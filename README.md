@@ -104,8 +104,8 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 ```
 
 - **IPC via Windows Named Pipes**: Operates locally via kernel memory with microsecond latency.
-- **Thread-safe**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing packet interleaving.
-- **Resilient**: The MQL5 EA non-blockingly polls client connections on a timer loop, gracefully handling reconnects and client termination.
+- **Thread-safe & Resilient I/O**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing packet interleaving. When pipe I/O breaks or the terminal closes, the DLL automatically tears down and invalidates the pipe handle (`disconnect_locked`) to fail fast and cleanly reconnect.
+- **High-Throughput EA Timer Loop**: The MQL5 EA non-blockingly polls client connections on an optimized 5ms timer loop (`InpTimerIntervalMs`), draining all buffered requests per tick for minimal IPC latency.
 
 ### Security Model & Threat Assumptions
 
@@ -113,22 +113,26 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 
 1. **Local IPC Boundary**: The bridge uses Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
 2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected with an error unless preceded by a valid, authenticated `CMD_INIT` handshake.
-3. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. For production deployments, configure a non-empty secret on the EA and provide it via the `MT5_PIPE_SECRET` environment variable. Set `InpRequireSecret = true` to prevent the EA from starting without a secret configured.
-4. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
-5. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
-6. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
+3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 2`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
+4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. For production deployments, configure a non-empty secret on the EA and provide it via the `MT5_PIPE_SECRET` environment variable. Set `InpRequireSecret = true` to prevent the EA from starting without a secret configured.
+5. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
+6. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
+7. **Pre-Flight Validation**: Both the Rust client and MQL5 EA enforce pre-flight validation. The EA verifies that the symbol is enabled for trading (`SYMBOL_TRADE_MODE_DISABLED`), checks pending order limits (`SYMBOL_LIMIT_ORDERS`), validates lot sizes against broker min/max/step constraints, and ensures prices, Stop Loss, and Take Profit values are finite, non-negative numbers before submission.
+8. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
 
 ### Trade Ownership & Magic Number Scope
 
 - **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge.
 - **Strict vs Account-Wide Management**:
   - By default (`InpEnforceMagicNumber = false`), `order_close` and `order_modify` allow managing any position or pending order on the account, logging a warning if the ticket was opened manually or by another EA.
-  - When `InpEnforceMagicNumber = true`, operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected.
+  - When `InpEnforceMagicNumber = true`, operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected. Manual trades (magic `0`) and unassigned orders are also strictly disallowed with no zero-bypass.
 - **Custom Order Magic**: Callers can override the magic number per-request using `OrderRequest::buy(...).magic(my_magic)`.
 
 ### Concurrency, Latency & Serialization
 
 - **Single-Channel Serialization**: All requests through `Mt5Client` are serialized through a Win32 `CRITICAL_SECTION` in `mt5_bridge.dll` and handled sequentially by the MQL5 EA on a timer loop.
+- **Optimized Timer Draining**: The EA runs an optimized 5ms timer (`InpTimerIntervalMs = 5`) and drains **all** buffered pipe requests in a loop on each tick rather than servicing only a single request per tick, drastically decreasing response latency under streaming or multi-query workflows.
+- **Broken Pipe Invalidation**: On pipe I/O failure (`ERROR_BROKEN_PIPE`, broken socket/pipe, or client crash), the C++ DLL automatically closes and invalidates the pipe handle (`disconnect_locked()`), allowing downstream callers to handle the error immediately without deadlocking.
 - **Latency Expectations**:
   - Live order execution (`order_send`, `order_close`) takes typical local pipe turn-around plus broker execution round-trip latency.
   - Large historical data requests (`copy_rates` or `copy_rates_chunked`) can take seconds as MT5 queries the broker history server.
@@ -138,7 +142,7 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 
 - **UTC Conversion**: By default (`InpConvertToUTC = true`), the EA normalizes rates and tick timestamps to UTC unix timestamps using the current broker server offset (`TimeTradeServer() - TimeGMT()`).
 - **Daylight Saving Time (DST)**: Forex brokers frequently shift offsets between UTC+2 (winter) and UTC+3 (summer). If exact historical candle alignment across DST transitions is critical, disable conversion (`InpConvertToUTC = false`) to receive native broker trade server timestamps.
-- **Calendar Timeframes (`MN1`, `W1`)**: Monthly (`MN1`) and weekly (`W1`) bars have variable durations. `copy_rates_chunked` provides `copy_rates_chunked_detailed` with completeness metadata and missing range tracking to ensure data integrity during backtesting.
+- **Calendar Timeframes (`MN1`, `W1`)**: Monthly (`MN1`) and weekly (`W1`) bars have variable durations. `copy_rates_chunked` provides `copy_rates_chunked_detailed` with completeness metadata and missing range tracking to ensure data integrity during backtesting. Additionally, `stream_bars` automatically expands lookback windows for calendar intervals (6 weeks for `W1`, 6 months for `MN1`) to guarantee completed candle delivery.
 
 ---
 
@@ -233,8 +237,20 @@ mt5-bridge/
 9. From the **Navigator** panel (Ctrl+N), expand **Expert Advisors**, find `mt5_bridge`, and drag it onto **any active chart** (e.g., EURUSD).
 10. Check the **Experts** tab at the bottom of MT5. You should see:
     ```text
-    MT5Bridge: pipe server ready — waiting for Rust client
+    MT5Bridge: pipe server ready (timer=5ms) — waiting for Rust client
     ```
+
+#### Expert Advisor Input Parameters
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `InpMagicNumber` | `int` | `20240101` | Magic number assigned to bridge trades |
+| `InpPipeName` | `string` | `"mt5bridge"` | Named pipe name (override for multi-terminal setups) |
+| `InpPipeSecret` | `string` | `""` | Optional shared secret token for client authentication |
+| `InpRequireSecret` | `bool` | `false` | Require non-empty secret token before allowing initialization |
+| `InpEnforceMagicNumber` | `bool` | `false` | Strictly reject modify/close for tickets not matching `InpMagicNumber` (no zero-bypass) |
+| `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC |
+| `InpTimerIntervalMs` | `int` | `5` | Timer polling and pipe draining loop frequency in milliseconds |
 
 ### Step 2: Deploy or Build `mt5_bridge.dll`
 
@@ -359,7 +375,7 @@ println!("Max Lot:    {:.2}", info.max_lot);
 println!("Lot Step:   {:.2}", info.lot_step);
 println!("Digits:     {}", info.digits);
 
-// Helper 1: Round an arbitrary volume to valid broker steps
+// Helper 1: Round an arbitrary volume to valid broker steps (returns 0.0 for sub-minimum or invalid/NaN/negative lots)
 let valid_lot = info.round_lot(0.1287);
 println!("Normalized Lot: {}", valid_lot); // Prints 0.13
 
@@ -525,18 +541,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = client.order_send(&order_req)?;
     println!(
-        "Order opened! Ticket: {}, Deal: {}, Fill: {:.5}, Status: {:?} ({})",
-        result.order, result.deal, result.price, result.status(), result.description()
+        "Order opened! Order: {}, Deal: {}, Position: {}, Fill: {:.5}, Status: {:?} ({})",
+        result.order, result.deal, result.position, result.price, result.status(), result.description()
     );
     assert!(result.is_filled());
 
+    // In MT5, modifying or closing an executed position uses its position ticket:
+    let target_ticket = if result.position > 0 {
+        result.position
+    } else {
+        result.order
+    };
+
     // 2. Modify Stop Loss (move SL closer to market with tick alignment)
     let new_sl = info.round_price(tick.bid - (150.0 * info.point));
-    let mod_res = client.order_modify(result.order, new_sl, tp)?;
+    let mod_res = client.order_modify(target_ticket, new_sl, tp)?;
     println!("Stop loss modified! Retcode: {} ({})", mod_res.retcode, mod_res.description());
 
-    // 3. Close the position by ticket ID
-    let close_result = client.order_close(result.order)?;
+    // 3. Close the position by position ticket ID
+    let close_result = client.order_close(target_ticket)?;
     println!(
         "Position closed at {:.5} (Deal: {}, Retcode: {})",
         close_result.price, close_result.deal, close_result.retcode
@@ -671,7 +694,7 @@ Asynchronous real-time streaming built on Tokio channels (enabled via default `a
 | Function | Signature | Description |
 | :--- | :--- | :--- |
 | [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task polling for new ticks, deduplicating unchanged quotes, and emitting new `Tick` values. Task shuts down when receiver is dropped. |
-| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Task shuts down when receiver is dropped. |
+| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). Task shuts down when receiver is dropped. |
 
 ---
 
@@ -705,7 +728,7 @@ pub struct SymbolInfo {
     pub digits: u32,       // Price decimal places (e.g. 5)
 }
 ```
-- `round_lot(&self, lot: f64) -> f64`: Rounds `lot` to the nearest valid `lot_step`, clamped between `min_lot` and `max_lot`. Returns `0.0` if `lot < min_lot`.
+- `round_lot(&self, lot: f64) -> f64`: Rounds `lot` to the nearest valid `lot_step`, clamped between `min_lot` and `max_lot`. Returns `0.0` if `lot` is non-finite (`NaN`, `Infinity`), `<= 0.0`, or strictly below `min_lot` (prevents silent risk inflation).
 - `is_valid_lot(&self, lot: f64) -> bool`: Verifies whether a lot size satisfies min, max, and step increments (rejects `NaN` and `Infinity`).
 - `point_value(&self, volume: f64) -> f64`: Calculates the true monetary value of a 1-point price move for the given volume, properly scaled by `(point / tick_size) * tick_value * volume` for CFDs, indices, and forex.
 - `round_price(&self, price: f64) -> f64`: Rounds `price` to the nearest broker `tick_size` and normalizes to symbol `digits`.
@@ -828,10 +851,12 @@ pub struct TradeResult {
     pub retcode: u32,      // MT5 return code (e.g. 10009 = TRADE_RETCODE_DONE)
     pub deal: u64,         // Deal ticket number (if executed)
     pub order: u64,        // Order ticket number
+    pub position: u64,     // Position ticket number associated with the trade
     pub volume: f64,       // Executed trade volume
     pub price: f64,        // Execution price
 }
 ```
+- `position: u64`: Position ticket number. When a market order executes, MetaTrader 5 assigns an open position ticket (`DEAL_POSITION_ID` / `POSITION_TICKET`). Subsequent position modifications (`order_modify`) and closures (`order_close`) should reference this position ticket.
 - `status(&self) -> TradeStatus`: Returns the classified `TradeStatus`.
 - `is_success(&self) -> bool`: Returns `true` if `status` is `Filled`, `Placed`, or `PartiallyFilled`.
 - `is_filled(&self) -> bool`: Returns `true` if executed in full.
@@ -913,9 +938,9 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 
 | Command ID | Name | Description |
 | :---: | :--- | :--- |
-| `1` | `CMD_INIT` | Handshake & authentication confirmation |
+| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 2`) |
 | `2` | `CMD_SHUTDOWN` | Close named pipe and clean up |
-| `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) |
+| `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) clamped by buffer capacity |
 | `4` | `CMD_ACCOUNT` | Query balance, equity, margin, free margin |
 | `5` | `CMD_ORDER_SEND` | Send Market or Pending order |
 | `6` | `CMD_ORDER_CLOSE` | Close position or cancel pending order by ticket |
@@ -931,8 +956,19 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
   `int64 time`, `double open`, `double high`, `double low`, `double close`, `int64 volume`, `int32 spread`, `int64 real_volume`.
 - **`Mt5Tick` (44 bytes)**:
   `int64 time`, `double bid`, `double ask`, `double last`, `uint64 volume`, `uint32 flags`.
-- **`Mt5TradeResult` (36 bytes)**:
-  `uint32 retcode`, `uint64 deal`, `uint64 order`, `double volume`, `double price`.
+- **`Mt5TradeResult` (44 bytes)**:
+  `uint32 retcode`, `uint64 deal`, `uint64 order`, `uint64 position`, `double volume`, `double price`.
+
+### ABI Consistency & Wire Protocol Versioning
+
+The bridge enforces strict compile-time and runtime alignment across the C++ DLL, MQL5 EA, and Rust FFI:
+- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 2` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
+- **Compile-Time ABI Assertions**: Struct byte layouts are validated via C++11 `static_assert` and Rust compile-time layout assertions:
+  - `Mt5SymInfo`: 60 bytes
+  - `Mt5Rate`: 60 bytes
+  - `Mt5Tick`: 44 bytes
+  - `Mt5TradeResult`: 44 bytes
+- **Handshake Verification**: `CMD_INIT` passes the client's protocol version. If there is a version mismatch between the client DLL and the EA server, the connection is rejected immediately to prevent binary deserialization faults.
 
 ---
 
@@ -976,7 +1012,7 @@ Tests executed directly against an active MetaTrader 5 terminal:
 # On Windows or via Wine:
 cargo test --target x86_64-pc-windows-gnu --test live_integration
 ```
-*Note: The live test suite utilizes a thread-safe mutex and an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending orders are automatically cancelled in `Drop`.*
+*Note: The live test suite utilizes a thread-safe mutex and an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending and market orders are automatically cancelled or closed in `Drop`. The suite also incorporates market-closure safety (handling retcode `10018`) and streaming timeouts to allow safe execution during weekends or market closures.*
 
 ---
 

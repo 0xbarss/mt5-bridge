@@ -518,7 +518,7 @@ When using `mt5-bridge`:
  
 Created and maintained by [**0xbarss**](https://github.com/0xbarss).
  
-Contributions, bug reports, and feature suggestions are welcome! Feel free to open an issue or pull request at [**github.com/0xbarss/mt5-bridge**](https://github.com/0xbarss/mt5-bridge).
+Contributions, bug reports, and feature suggestions are welcome! Please check out [**CONTRIBUTING.md**](CONTRIBUTING.md) for development guidelines, testing instructions, and commit conventions before submitting pull requests. Feel free to open an issue or pull request at [**github.com/0xbarss/mt5-bridge**](https://github.com/0xbarss/mt5-bridge).
  
 ---
  

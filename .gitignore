@@ -1,0 +1,20 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# C++ Build outputs
+bridge_dll/build/
+*.o
+*.obj
+*.exp
+*.lib
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

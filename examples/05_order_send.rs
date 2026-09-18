@@ -1,0 +1,53 @@
+use mt5_bridge::{Mt5Client, OrderRequest};
+use std::env;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let login: i64 = env::var("MT5_LOGIN")
+        .unwrap_or_else(|_| "12345678".to_string())
+        .parse()?;
+    let password = env::var("MT5_PASSWORD").unwrap_or_else(|_| "demo_password".to_string());
+    let server = env::var("MT5_SERVER").unwrap_or_else(|_| "MetaQuotes-Demo".to_string());
+
+    let client = Mt5Client::connect(login, &password, &server)?;
+    let symbol = "EURUSD";
+
+    // 1. Check current tick to determine market price
+    let tick = client.symbol_tick(symbol)?;
+    println!("Current EURUSD price: Bid={:.5}, Ask={:.5}", tick.bid, tick.ask);
+
+    let info = client.symbol_info(symbol)?;
+    let volume = info.min_lot; // Use minimum allowed lot size
+    let point = info.point;
+
+    // Define Stop Loss 50 points below Ask, Take Profit 100 points above Ask
+    let sl = tick.ask - (50.0 * point);
+    let tp = tick.ask + (100.0 * point);
+
+    // 2. Prepare and send Buy market order
+    let order_req = OrderRequest::buy(symbol, volume)
+        .stop_loss(sl)
+        .take_profit(tp)
+        .comment("mt5_bridge_test");
+
+    println!("Placing market BUY order for {:.2} lots...", volume);
+    let result = client.order_send(&order_req)?;
+
+    println!("✓ Order opened successfully!");
+    println!("  Ticket:   {}", result.order);
+    println!("  Deal:     {}", result.deal);
+    println!("  Price:    {:.5}", result.price);
+    println!("  Volume:   {:.2}", result.volume);
+
+    // 3. Modify Stop Loss (e.g. move SL closer by 20 points)
+    let new_sl = tick.ask - (30.0 * point);
+    println!("Modifying SL for ticket {} to {:.5}...", result.order, new_sl);
+    client.order_modify(result.order, new_sl, tp)?;
+    println!("✓ Order SL modified successfully!");
+
+    // 4. Close the position by ticket
+    println!("Closing position ticket {}...", result.order);
+    let close_res = client.order_close(result.order)?;
+    println!("✓ Position closed at price {:.5} (Deal: {})", close_res.price, close_res.deal);
+
+    Ok(())
+}

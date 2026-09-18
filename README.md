@@ -114,20 +114,21 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 1. **Local IPC Boundary**: The bridge uses Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
 2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected with an error unless preceded by a valid, authenticated `CMD_INIT` handshake.
 3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 2`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
-4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. For production deployments, configure a non-empty secret on the EA and provide it via the `MT5_PIPE_SECRET` environment variable. Set `InpRequireSecret = true` to prevent the EA from starting without a secret configured.
-5. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
-6. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
-7. **Pre-Flight Validation**: Both the Rust client and MQL5 EA enforce pre-flight validation. The EA verifies that the symbol is enabled for trading (`SYMBOL_TRADE_MODE_DISABLED`), checks pending order limits, validates lot sizes against broker min/max/step constraints (`SYMBOL_VOLUME_STEP`), checks stops and freeze level distances (`SYMBOL_TRADE_STOPS_LEVEL`), ensures tick size alignment (`SYMBOL_TRADE_TICK_SIZE`), and verifies prices, Stop Loss, and Take Profit values before submission.
-8. **Deterministic Position Resolution (Hedging Safe)**: In hedging accounts with multiple positions per symbol, the bridge strictly resolves position IDs via deal history (`DEAL_POSITION_ID`) or ticket selection (`PositionSelectByTicket`). It deliberately avoids ambiguous symbol-only lookups (`PositionSelect(sym)`); if position tracking cannot be verified, `position = 0` is safely returned instead of guessing an arbitrary position ticket.
-9. **Market Watch Control**: `InpAutoSelectSymbols` (default `true`) allows configuring whether queries automatically select symbols into Market Watch or strictly require them to already exist.
-10. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
+4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. `InpRequireSecret` is enabled by default (`true`), preventing the EA from starting without a secret configured (set `InpRequireSecret = false` to opt out). Provide the secret from Rust via [`Mt5Client::connect_with_secret`](#) or the `MT5_PIPE_SECRET` environment variable.
+5. **Explicit Pipe Security Descriptor (ACL)**: The named pipe is created with an explicit Win32 Security Descriptor (`InpPipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"`), restricting pipe access strictly to the owner user account, Local System, and Administrators, preventing unauthorized local users or cross-session processes from connecting.
+6. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
+7. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
+8. **Pre-Flight Validation**: Both the Rust client and MQL5 EA enforce pre-flight validation. The EA verifies that the symbol is enabled for trading (`SYMBOL_TRADE_MODE_DISABLED`), checks pending order limits, validates lot sizes against broker min/max/step constraints (`SYMBOL_VOLUME_STEP`), checks stops and freeze level distances (`SYMBOL_TRADE_STOPS_LEVEL`), ensures tick size alignment (`SYMBOL_TRADE_TICK_SIZE`), and verifies prices, Stop Loss, and Take Profit values before submission.
+9. **Deterministic Position Resolution (Hedging Safe)**: In hedging accounts with multiple positions per symbol, the bridge strictly resolves position IDs via deal history (`DEAL_POSITION_ID`) or ticket selection (`PositionSelectByTicket`). It deliberately avoids ambiguous symbol-only lookups (`PositionSelect(sym)`); if position tracking cannot be verified, `position = 0` is safely returned instead of guessing an arbitrary position ticket.
+10. **Market Watch Control**: `InpAutoSelectSymbols` (default `true`) allows configuring whether queries automatically select symbols into Market Watch or strictly require them to already exist.
+11. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
 
 ### Trade Ownership & Magic Number Scope
 
 - **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge.
 - **Strict vs Account-Wide Management**:
-  - By default (`InpEnforceMagicNumber = false`), `order_close` and `order_modify` allow managing any position or pending order on the account, logging a warning if the ticket was opened manually or by another EA.
-  - When `InpEnforceMagicNumber = true`, operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected. Manual trades (magic `0`) and unassigned orders are also strictly disallowed with no zero-bypass.
+  - By default (`InpEnforceMagicNumber = true`), operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected. Manual trades (magic `0`) and unassigned orders are also strictly disallowed with no zero-bypass, preventing accidental interference with manual or other EA positions.
+  - To manage external or foreign positions across the account, set `InpEnforceMagicNumber = false` to allow account-wide operations (logs a warning on magic mismatch).
 - **Custom Order Magic**: Callers can override the magic number per-request using `OrderRequest::buy(...).magic(my_magic)`.
 
 ### Concurrency, Latency & Serialization
@@ -249,9 +250,10 @@ mt5-bridge/
 | :--- | :--- | :--- | :--- |
 | `InpMagicNumber` | `int` | `20240101` | Magic number assigned to bridge trades |
 | `InpPipeName` | `string` | `"mt5bridge"` | Named pipe name (override for multi-terminal setups) |
-| `InpPipeSecret` | `string` | `""` | Optional shared secret token for client authentication |
-| `InpRequireSecret` | `bool` | `false` | Require non-empty secret token before allowing initialization |
-| `InpEnforceMagicNumber` | `bool` | `false` | Strictly reject modify/close for tickets not matching `InpMagicNumber` (no zero-bypass) |
+| `InpPipeSecret` | `string` | `""` | Shared secret token for client authentication (required by default) |
+| `InpRequireSecret` | `bool` | `true` | Require non-empty secret token before allowing initialization (set false to opt out) |
+| `InpEnforceMagicNumber` | `bool` | `true` | Strictly reject modify/close for tickets not matching `InpMagicNumber` (no zero-bypass) |
+| `InpPipeSDDL` | `string` | `"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"` | SDDL security descriptor restricting pipe access to owner user, Local System & admins |
 | `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC (disable for raw broker time) |
 | `InpTimerIntervalMs` | `int` | `5` | Timer polling and pipe draining loop frequency in milliseconds |
 | `InpMaxRequestsPerTimer` | `int` | `32` | Max requests serviced per timer tick (prevents terminal UI starvation) |
@@ -315,9 +317,11 @@ use mt5_bridge::Mt5Client;
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Connect specifying account number, password (or pipe secret), and server.
-    // (Pass 0 and empty strings to attach to the terminal's active logged-in account).
-    let mut client = Mt5Client::connect(12345678, "my_password", "MetaQuotes-Demo")?;
+    // 1. Connect using only the pipe secret token (recommended; keeps broker credentials off IPC):
+    let mut client = Mt5Client::connect_with_secret("my_pipe_secret")?;
+
+    // Alternatively, connect specifying account number, password/secret, and server:
+    // let mut client = Mt5Client::connect(12345678, "my_pipe_secret", "MetaQuotes-Demo")?;
     println!("Connected to MT5!");
 
     // 2. Configure in-memory cache TTL for symbol specifications (default: 60s)
@@ -329,8 +333,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 *Zero-Config Environment Variables:*
 Instead of hardcoding credentials, the client can automatically read:
+- `MT5_PIPE_SECRET` or `MT5_PASSWORD` (pipe authentication secret token)
+- `MT5_DEMO_ACCOUNT` (set to `1` to confirm demo account for live order placement tests)
 - `MT5_LOGIN` (e.g. `12345678` or `0` for active account)
-- `MT5_PASSWORD` or `MT5_PIPE_SECRET` (pipe authentication secret)
 - `MT5_SERVER` (broker server name)
 - `MT5_DLL_PATH` (explicit path to `mt5_bridge.dll`)
 - `MT5_PIPE_NAME` (custom named pipe name for multi-instance deployments)
@@ -699,8 +704,8 @@ Asynchronous real-time streaming built on Tokio channels (enabled via default `a
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for new quotes via `symbol_tick()`, deduplicates identical ticks (inspecting time, bid, ask, last, volume, and flags), and yields updated `Tick` values. Operates via latest-quote polling (not a lossless queue). Task terminates when receiver is dropped. |
-| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). Task shuts down when receiver is dropped. |
+| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for new quotes via `symbol_tick()`, deduplicates identical ticks (inspecting time, bid, ask, last, volume, and flags), and yields updated `Tick` values. Operates via latest-quote polling (not a lossless queue). Task terminates when receiver is dropped or upon exceeding 10 consecutive poll errors. |
+| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). Task terminates when receiver is dropped or upon exceeding 10 consecutive poll errors. |
 
 ---
 
@@ -1020,9 +1025,11 @@ cargo test --test bridge_tests
 Tests executed directly against an active MetaTrader 5 terminal:
 ```bash
 # On Windows or via Wine:
+export MT5_PIPE_SECRET="your_pipe_secret"
+export MT5_DEMO_ACCOUNT=1   # Safety guard: required to allow order placement tests to run
 cargo test --target x86_64-pc-windows-gnu --test live_integration
 ```
-*Note: The live test suite utilizes a thread-safe mutex and an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending and market orders are automatically cancelled or closed in `Drop`. The suite also incorporates market-closure safety (handling retcode `10018`) and streaming timeouts to allow safe execution during weekends or market closures.*
+*Note: The live test suite enforces a demo account check (`MT5_DEMO_ACCOUNT=1`), utilizes a thread-safe mutex, and uses an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending and market orders are automatically cancelled or closed in `Drop`. The suite also incorporates market-closure safety (handling retcode `10018`) and streaming timeouts to allow safe execution during weekends or market closures.*
 
 ---
 

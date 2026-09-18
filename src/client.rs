@@ -68,11 +68,30 @@ impl Mt5Client {
 
     /// Connect to MetaTrader 5 using the DLL path from the `MT5_DLL_PATH` environment variable,
     /// or safely resolving `mt5_bridge.dll` adjacent to the executable / current working directory.
+    ///
+    /// # Security Note
+    /// In MetaTrader 5, the terminal session is already authenticated with the broker.
+    /// The `password` parameter is matched by the EA against the bridge's shared `InpPipeSecret`
+    /// token. You do NOT need to pass your live broker account password over the IPC pipe;
+    /// provide your configured `InpPipeSecret` token instead (or use [`connect_with_secret`](Self::connect_with_secret)).
     pub fn connect(login: i64, password: &str, server: &str) -> Result<Self> {
         let dll_path = std::env::var_os("MT5_DLL_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(Self::resolve_default_dll_path);
         Self::connect_with_dll(dll_path, login, password, server)
+    }
+
+    /// Connect to MetaTrader 5 using only a pipe authentication secret token (`InpPipeSecret`).
+    ///
+    /// This avoids passing broker account credentials (login/password/server) over the local IPC pipe,
+    /// relying entirely on the application-level secret token configured on the Expert Advisor.
+    pub fn connect_with_secret(secret: &str) -> Result<Self> {
+        Self::connect(0, secret, "")
+    }
+
+    /// Connect to MetaTrader 5 using a custom DLL path and only a pipe authentication secret token.
+    pub fn connect_with_secret_and_dll(dll_path: impl AsRef<Path>, secret: &str) -> Result<Self> {
+        Self::connect_with_dll(dll_path, 0, secret, "")
     }
 
     /// Connect to MetaTrader 5 by loading the specified DLL path.

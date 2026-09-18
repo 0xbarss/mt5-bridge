@@ -1,7 +1,7 @@
 /* mt5_bridge.h
  * C header for the named-pipe bridge DLL.
  * Rust loads this DLL via libloading and calls the exported functions.
- * Struct layout must match crates/broker/src/mt5/mod.rs exactly.
+ * Struct layout must match src/ffi.rs exactly.
  */
 #pragma once
 #include <stdint.h>
@@ -12,7 +12,7 @@
   #define MT5_API __declspec(dllimport)
 #endif
 
-/* Match #[repr(C)] structs in mod.rs — all packed, no padding. */
+/* Match #[repr(C, packed)] structs in src/ffi.rs — all packed, no padding. */
 #pragma pack(push, 1)
 
 typedef struct {

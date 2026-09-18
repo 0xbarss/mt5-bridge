@@ -350,21 +350,11 @@ fn test_order_request_validate_with_symbol() {
     assert!(req_low_vol.validate_with_symbol(&sym).is_err());
 
     // Price not aligned with tick size (0.00005 tick size, price ending in 0.00003)
-    let req_bad_price = OrderRequest::pending(
-        "EURUSD",
-        OrderType::BuyLimit,
-        0.10,
-        1.10003,
-    );
+    let req_bad_price = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.10, 1.10003);
     assert!(req_bad_price.validate_with_symbol(&sym).is_err());
 
     // Price correctly aligned with tick size
-    let req_good_price = OrderRequest::pending(
-        "EURUSD",
-        OrderType::BuyLimit,
-        0.10,
-        1.10005,
-    );
+    let req_good_price = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.10, 1.10005);
     assert!(req_good_price.validate_with_symbol(&sym).is_ok());
 }
 

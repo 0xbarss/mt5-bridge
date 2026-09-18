@@ -13,6 +13,9 @@ const DEFAULT_BAR_BUFFER: usize = 256;
 
 const DUP_PRICE_THRESHOLD: f64 = 1e-9;
 
+/// Maximum consecutive poll errors allowed before a streaming task aborts and closes the channel.
+pub const MAX_CONSECUTIVE_STREAM_ERRORS: u32 = 10;
+
 /// Stream real-time ticks for a symbol using latest-quote polling.
 ///
 /// **Streaming Semantics:**
@@ -42,6 +45,7 @@ pub fn stream_ticks(
         let mut prev_last: f64 = 0.0;
         let mut prev_volume: u64 = 0;
         let mut prev_flags: u32 = 0;
+        let mut consecutive_errors: u32 = 0;
 
         loop {
             let client_clone = Arc::clone(&client);
@@ -52,6 +56,7 @@ pub fn stream_ticks(
 
             match tick_res {
                 Ok(Ok(tick)) => {
+                    consecutive_errors = 0;
                     if tick.bid > 0.0 && tick.ask > 0.0 && tick.ask >= tick.bid && tick.time_msc > 0
                     {
                         let time_dup = tick.time_msc == prev_time_msc;
@@ -77,7 +82,22 @@ pub fn stream_ticks(
                     }
                 }
                 Ok(Err(e)) => {
-                    warn!(symbol = %sym_owned, error = %e, "Tick stream poll error");
+                    consecutive_errors += 1;
+                    warn!(
+                        symbol = %sym_owned,
+                        error = %e,
+                        consecutive_errors,
+                        max_errors = MAX_CONSECUTIVE_STREAM_ERRORS,
+                        "Tick stream poll error"
+                    );
+                    if consecutive_errors >= MAX_CONSECUTIVE_STREAM_ERRORS {
+                        error!(
+                            symbol = %sym_owned,
+                            consecutive_errors,
+                            "Tick stream exceeded maximum consecutive errors; terminating stream"
+                        );
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!(symbol = %sym_owned, error = %e, "Tick stream task joined with error");
@@ -110,6 +130,7 @@ pub fn stream_bars(
         debug!(symbol = %sym_owned, timeframe = %timeframe, "Bar stream started");
 
         let mut last_closed_bar_time: i64 = 0;
+        let mut consecutive_errors: u32 = 0;
 
         loop {
             let now = chrono::Utc::now().timestamp();
@@ -130,6 +151,7 @@ pub fn stream_bars(
 
             match rates_res {
                 Ok(Ok(rates)) => {
+                    consecutive_errors = 0;
                     // We need at least 2 bars:
                     // rates[len - 1] is the currently forming unclosed bar.
                     // rates[len - 2] is the most recently completed closed bar.
@@ -151,7 +173,22 @@ pub fn stream_bars(
                     }
                 }
                 Ok(Err(e)) => {
-                    warn!(symbol = %sym_owned, error = %e, "Bar stream poll error");
+                    consecutive_errors += 1;
+                    warn!(
+                        symbol = %sym_owned,
+                        error = %e,
+                        consecutive_errors,
+                        max_errors = MAX_CONSECUTIVE_STREAM_ERRORS,
+                        "Bar stream poll error"
+                    );
+                    if consecutive_errors >= MAX_CONSECUTIVE_STREAM_ERRORS {
+                        error!(
+                            symbol = %sym_owned,
+                            consecutive_errors,
+                            "Bar stream exceeded maximum consecutive errors; terminating stream"
+                        );
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!(symbol = %sym_owned, error = %e, "Bar stream task joined with error");

@@ -113,8 +113,26 @@ impl<'a> Drop for OrderGuard<'a> {
     }
 }
 
+/// Safety gate: Returns true only if explicitly confirmed that tests are running against a demo account.
+/// This prevents `cargo test` from accidentally placing real trades if live credentials are configured.
+fn is_demo_confirmed() -> bool {
+    env::var("MT5_DEMO_ACCOUNT")
+        .or_else(|_| env::var("MT5_IS_DEMO"))
+        .or_else(|_| env::var("MT5_ACCOUNT_TYPE"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("demo"))
+        .unwrap_or(false)
+}
+
 #[test]
 fn test_live_pending_order_lifecycle() {
+    if !is_demo_confirmed() {
+        eprintln!(
+            "SKIPPING test_live_pending_order_lifecycle: Demo account guard is active. \
+             Set MT5_DEMO_ACCOUNT=1 to confirm you are using a demo account before running order tests."
+        );
+        return;
+    }
+
     let (client, _guard) = match get_client() {
         Some(cg) => cg,
         None => return,
@@ -182,6 +200,14 @@ fn test_live_chunked_history() {
 
 #[test]
 fn test_live_market_order_lifecycle() {
+    if !is_demo_confirmed() {
+        eprintln!(
+            "SKIPPING test_live_market_order_lifecycle: Demo account guard is active. \
+             Set MT5_DEMO_ACCOUNT=1 to confirm you are using a demo account before running order tests."
+        );
+        return;
+    }
+
     let (client, _guard) = match get_client() {
         Some(cg) => cg,
         None => return,

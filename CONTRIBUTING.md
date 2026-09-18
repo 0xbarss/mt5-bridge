@@ -174,7 +174,7 @@ refactor: simplify pipe reconnect polling logic
 
 - Adhere to C++17.
 - Preserve `#pragma pack(push, 1)` and 1-byte alignment across all wire structs.
-- Statically link runtime libraries (`-static-libgcc -static-libstdc++`) so the generated DLL has zero external dependencies on target Windows machines.
+- Statically link runtime libraries (`-static-libgcc -static-libstdc++`) so the generated DLL avoids external dependencies on MinGW GCC runtime DLLs (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`), relying only on standard Windows system libraries (`KERNEL32.dll` and UCRT/`msvcrt.dll`).
 
 ### MQL5
 

@@ -18,7 +18,25 @@
 #property version   "1.0"
 #property description "MT5 Bridge — named pipe server for Rust trading engine"
 
-//---- Require DLL imports (kernel32) to be enabled in MT5 settings.
+//---- Win32 structures for security descriptors (explicit x64 8-byte alignment)
+struct SECURITY_ATTRIBUTES {
+    uint   nLength;
+    uint   _padding;
+    long   lpSecurityDescriptor;
+    int    bInheritHandle;
+    int    _padding2;
+};
+
+//---- Require DLL imports (advapi32, kernel32) to be enabled in MT5 settings.
+#import "advapi32.dll"
+bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    string  StringSecurityDescriptor,
+    uint    StringSDRevision,
+    long   &SecurityDescriptor,
+    uint   &SecurityDescriptorSize
+);
+#import
+
 #import "kernel32.dll"
 long  CreateNamedPipeW(string name,
                        uint   dwOpenMode,
@@ -27,7 +45,7 @@ long  CreateNamedPipeW(string name,
                        uint   nOutBufferSize,
                        uint   nInBufferSize,
                        uint   nDefaultTimeOut,
-                       long   lpSecurityAttributes);
+                       SECURITY_ATTRIBUTES &lpSecurityAttributes);
 bool  ConnectNamedPipe(long hPipe, long lpOverlapped);
 bool  DisconnectNamedPipe(long hPipe);
 bool  ReadFile(long hFile, uchar &buf[], uint toRead,
@@ -45,6 +63,7 @@ bool  PeekNamedPipe(long hPipe, uchar &buf[], uint bufSize,
 bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
                               long lpMaxCollectionCount,
                               long lpCollectDataTimeout);
+long  LocalFree(long hMem);
 #import
 
 //---- Constants
@@ -74,9 +93,10 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 //---- EA input
 input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
 input string InpPipeName             = "mt5bridge"; // Custom Named Pipe Name
-input string InpPipeSecret           = "";          // Optional shared secret for client authentication
-input bool   InpRequireSecret        = false;       // Require non-empty InpPipeSecret on initialization
-input bool   InpEnforceMagicNumber   = false;       // Reject close/modify for positions not matching InpMagicNumber
+input string InpPipeSecret           = "";          // Shared secret for client authentication (required by default)
+input bool   InpRequireSecret        = true;        // Require non-empty InpPipeSecret on initialization (set false to opt out)
+input bool   InpEnforceMagicNumber   = true;        // Reject close/modify for positions not matching InpMagicNumber
+input string InpPipeSDDL             = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"; // SDDL security descriptor restricting access to owner, local system & admins
 input bool   InpConvertToUTC         = true;        // Convert history timestamps to UTC (set false for raw broker time)
 input int    InpTimerIntervalMs      = 5;           // Timer polling interval in milliseconds (default 5ms)
 input int    InpMaxRequestsPerTimer  = 32;          // Max pipe requests serviced per timer tick (prevents UI starvation)
@@ -1181,25 +1201,68 @@ bool DispatchRequest(long h) {
     return true;
 }
 
+// Helper to create the named pipe server with an explicit Win32 Security Descriptor.
+// Falls back gracefully to default security if SDDL conversion is disabled or fails.
+long CreatePipeHandle() {
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa._padding = 0;
+    sa.lpSecurityDescriptor = 0;
+    sa.bInheritHandle = 0;
+    sa._padding2 = 0;
+
+    long pSD = 0;
+    uint sdSize = 0;
+    if (StringLen(InpPipeSDDL) > 0) {
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(InpPipeSDDL, 1 /* SDDL_REVISION_1 */, pSD, sdSize) && pSD != 0) {
+            sa.lpSecurityDescriptor = pSD;
+        } else {
+            Print("MT5Bridge: warning — ConvertStringSecurityDescriptor failed, falling back to default security");
+        }
+    }
+
+    long h = CreateNamedPipeW(
+        g_pipe_path,
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_BYTE | PIPE_NOWAIT,
+        1,
+        65536,
+        65536,
+        0,
+        sa
+    );
+
+    if (h == INVALID_HANDLE && sa.lpSecurityDescriptor != 0) {
+        Print("MT5Bridge: warning — pipe creation with SDDL descriptor failed, retrying with default security descriptor...");
+        sa.lpSecurityDescriptor = 0;
+        h = CreateNamedPipeW(
+            g_pipe_path,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_NOWAIT,
+            1,
+            65536,
+            65536,
+            0,
+            sa
+        );
+    }
+
+    if (pSD != 0) {
+        LocalFree(pSD);
+    }
+    return h;
+}
+
 // ── EA lifecycle ──────────────────────────────────────────────────────────────
 
 int OnInit() {
     if (InpRequireSecret && StringLen(InpPipeSecret) == 0) {
-        Print("MT5Bridge: INIT_FAILED — InpRequireSecret is enabled but InpPipeSecret is empty!");
+        Print("MT5Bridge: INIT_FAILED — InpRequireSecret is enabled but InpPipeSecret is empty! Set InpPipeSecret in EA inputs or set InpRequireSecret = false to opt out.");
         return INIT_FAILED;
     }
 
     g_pipe_path = "\\\\.\\pipe\\" + InpPipeName;
-    g_server = CreateNamedPipeW(
-        g_pipe_path,
-        PIPE_ACCESS_DUPLEX,           // duplex
-        PIPE_TYPE_BYTE | PIPE_NOWAIT, // byte-stream, non-blocking connect poll
-        1,                            // 1 instance (single Rust client)
-        65536,                        // out buffer
-        65536,                        // in buffer
-        0,                            // default timeout
-        0                             // default security
-    );
+    g_server = CreatePipeHandle();
 
     if (g_server == INVALID_HANDLE) {
         Print("MT5Bridge: CreateNamedPipe failed — check DLL imports are enabled and no other instance is running");
@@ -1240,12 +1303,7 @@ void ResetPipeServer(const string reason) {
         CloseHandle(g_server);
         g_server = INVALID_HANDLE;
     }
-    g_server = CreateNamedPipeW(
-        g_pipe_path,
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_BYTE | PIPE_NOWAIT,
-        1, 65536, 65536, 0, 0
-    );
+    g_server = CreatePipeHandle();
     if (g_server == INVALID_HANDLE)
         Print("MT5Bridge: failed to recreate pipe (", reason, ")");
     else

@@ -393,3 +393,49 @@ fn test_account_info_helpers() {
     };
     assert_eq!(neg_margin.margin_level(), None);
 }
+
+#[test]
+fn test_protocol_version() {
+    assert_eq!(PROTOCOL_VERSION, 1);
+}
+
+#[test]
+fn test_order_request_validation() {
+    // Valid order
+    let valid = OrderRequest::buy("EURUSD", 0.1)
+        .stop_loss(1.08)
+        .take_profit(1.10);
+    assert!(valid.validate().is_ok());
+
+    // Empty symbol
+    let empty_sym = OrderRequest::buy("", 0.1);
+    assert!(empty_sym.validate().is_err());
+    let blank_sym = OrderRequest::buy("   ", 0.1);
+    assert!(blank_sym.validate().is_err());
+
+    // Invalid volume
+    let zero_vol = OrderRequest::buy("EURUSD", 0.0);
+    assert!(zero_vol.validate().is_err());
+    let neg_vol = OrderRequest::buy("EURUSD", -0.1);
+    assert!(neg_vol.validate().is_err());
+    let nan_vol = OrderRequest::buy("EURUSD", f64::NAN);
+    assert!(nan_vol.validate().is_err());
+    let inf_vol = OrderRequest::buy("EURUSD", f64::INFINITY);
+    assert!(inf_vol.validate().is_err());
+
+    // Invalid prices
+    let neg_price = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, -1.0);
+    assert!(neg_price.validate().is_err());
+    let nan_price = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, f64::NAN);
+    assert!(nan_price.validate().is_err());
+
+    // Invalid stops
+    let neg_sl = OrderRequest::buy("EURUSD", 0.1).stop_loss(-1.0);
+    assert!(neg_sl.validate().is_err());
+    let nan_sl = OrderRequest::buy("EURUSD", 0.1).stop_loss(f64::NAN);
+    assert!(nan_sl.validate().is_err());
+    let neg_tp = OrderRequest::buy("EURUSD", 0.1).take_profit(-1.0);
+    assert!(neg_tp.validate().is_err());
+    let nan_tp = OrderRequest::buy("EURUSD", 0.1).take_profit(f64::NAN);
+    assert!(nan_tp.validate().is_err());
+}

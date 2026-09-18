@@ -203,6 +203,7 @@ int Initialize(int64_t login, const char* password, const char* server) {
     p.i64(static_cast<int64_t>(login));
     p.str(auth_token.c_str());
     p.str(server ? server : "");
+    p.u32(MT5_BRIDGE_PROTOCOL_VERSION);
 
     if (!send_packet(CMD_INIT, p.buf)) return 0;
 
@@ -230,6 +231,7 @@ int CopyRates(const char* symbol, int timeframe, int64_t from,
     p.i32(timeframe);
     p.i64(from);
     p.i64(to);
+    p.i32(buf_capacity);
 
     if (!send_packet(CMD_RATES, p.buf)) return -1;
 

@@ -58,6 +58,7 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
+#define PROTOCOL_VERSION        1        // Wire protocol handshake version
 
 //---- Protocol commands
 #define CMD_INIT         1
@@ -295,6 +296,18 @@ void HandleInit(long h, const uchar &payload[], uint len) {
         return;
     }
 
+    // Verify wire protocol version if supplied by client
+    uint proto_ver = 0;
+    if (SafeUnpackU32(payload, off, len, proto_ver)) {
+        if (proto_ver != PROTOCOL_VERSION) {
+            Print("MT5Bridge: auth failed — protocol version mismatch (client=", proto_ver,
+                  ", server=", PROTOCOL_VERSION, ")");
+            g_authenticated = false;
+            SendError(h);
+            return;
+        }
+    }
+
     long actual_login = AccountInfoInteger(ACCOUNT_LOGIN);
     string actual_server = AccountInfoString(ACCOUNT_SERVER);
 
@@ -357,6 +370,10 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
         return;
     }
 
+    // Optional max buffer capacity requested by client (avoids over-allocating MQL5 payload)
+    int max_bars = 0;
+    SafeUnpackI32(payload, off, len, max_bars);
+
     long offset = 0;
     if (InpConvertToUTC) {
         offset = (long)TimeTradeServer() - (long)TimeGMT();
@@ -388,10 +405,15 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
 
     if (filled <= 0) { uchar e[1]; SendCount(h, 0, e, 0); return; }
 
+    int send_bars = filled;
+    if (max_bars > 0 && send_bars > max_bars) {
+        send_bars = max_bars;
+    }
+
     // Serialise MqlRates[] into Mt5Rate bytes (layouts match — 60 bytes each).
     uchar data[];
-    ArrayResize(data, filled * 60);
-    for (int i = 0; i < filled; i++) {
+    ArrayResize(data, send_bars * 60);
+    for (int i = 0; i < send_bars; i++) {
         if (InpConvertToUTC) {
             rates[i].time = (datetime)((long)rates[i].time - offset);
         }
@@ -399,7 +421,7 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
         StructToCharArray(rates[i], tmp);
         ArrayCopy(data, tmp, i * 60, 0, 60);
     }
-    SendCount(h, filled, data, (uint)(filled * 60));
+    SendCount(h, send_bars, data, (uint)(send_bars * 60));
 }
 
 void HandleAccount(long h) {

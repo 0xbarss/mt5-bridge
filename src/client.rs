@@ -492,6 +492,8 @@ impl Mt5Client {
 
     /// Send a trading order (Market Buy/Sell or Limit/Stop orders).
     pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+        req.validate()?;
+
         let sym_c = CString::new(req.symbol.as_str())?;
         let cmt_c = CString::new(req.comment.as_str())?;
         let otype = req.order_type as c_int;
@@ -542,6 +544,10 @@ impl Mt5Client {
 
     /// Close an existing position by its ticket number.
     pub fn order_close(&self, ticket: u64) -> Result<TradeResult> {
+        if ticket == 0 {
+            return Err(Mt5Error::Other("Order ticket cannot be 0".to_string()));
+        }
+
         let mut res = Mt5TradeResult::default();
         let ret = unsafe { (self.fn_close)(ticket, &mut res) };
 
@@ -573,6 +579,22 @@ impl Mt5Client {
         stop_loss: f64,
         take_profit: f64,
     ) -> Result<TradeResult> {
+        if ticket == 0 {
+            return Err(Mt5Error::Other("Order ticket cannot be 0".to_string()));
+        }
+        if stop_loss < 0.0 || stop_loss.is_nan() || stop_loss.is_infinite() {
+            return Err(Mt5Error::Other(format!(
+                "Invalid stop loss {}: stop loss cannot be negative or NaN",
+                stop_loss
+            )));
+        }
+        if take_profit < 0.0 || take_profit.is_nan() || take_profit.is_infinite() {
+            return Err(Mt5Error::Other(format!(
+                "Invalid take profit {}: take profit cannot be negative or NaN",
+                take_profit
+            )));
+        }
+
         let fn_mod = self
             .fn_modify
             .ok_or(Mt5Error::UnsupportedFeature("OrderModify"))?;

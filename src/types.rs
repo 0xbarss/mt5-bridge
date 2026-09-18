@@ -534,6 +534,40 @@ impl OrderRequest {
         self.magic = Some(magic);
         self
     }
+
+    /// Validates the order request parameters before submitting to the MT5 bridge.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if self.symbol.trim().is_empty() {
+            return Err(crate::error::Mt5Error::Other(
+                "OrderRequest symbol cannot be empty".to_string(),
+            ));
+        }
+        if self.volume <= 0.0 || self.volume.is_nan() || self.volume.is_infinite() {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "Invalid order volume {}: volume must be a positive finite number",
+                self.volume
+            )));
+        }
+        if self.price < 0.0 || self.price.is_nan() || self.price.is_infinite() {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "Invalid order price {}: price cannot be negative or NaN",
+                self.price
+            )));
+        }
+        if self.stop_loss < 0.0 || self.stop_loss.is_nan() || self.stop_loss.is_infinite() {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "Invalid stop loss {}: stop loss cannot be negative or NaN",
+                self.stop_loss
+            )));
+        }
+        if self.take_profit < 0.0 || self.take_profit.is_nan() || self.take_profit.is_infinite() {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "Invalid take profit {}: take profit cannot be negative or NaN",
+                self.take_profit
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Trade execution status classification.

@@ -69,6 +69,7 @@ pub mod stream;
 
 pub use client::Mt5Client;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
+pub use ffi::PROTOCOL_VERSION;
 pub use types::{
     AccountInfo, Bar, HistoryResult, OrderRequest, OrderType, Rate, SymbolInfo, Tick, Timeframe,
     TradeResult, TradeStatus,

@@ -58,6 +58,9 @@ pub struct Mt5TradeResult {
     pub price: f64,
 }
 
+// Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 // Ensure struct memory layouts match C header at compile-time.
 const _: () = {
     assert!(std::mem::size_of::<Mt5SymInfo>() == 60);

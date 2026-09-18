@@ -197,18 +197,41 @@ impl SymbolInfo {
             min_lot: raw.min_lot,
             max_lot: raw.max_lot,
             spread: raw.spread,
-            digits: if raw.digits >= 0 { raw.digits as u32 } else { 0 },
+            digits: if raw.digits >= 0 {
+                raw.digits as u32
+            } else {
+                0
+            },
         }
     }
 
     /// Normalizes and clamps a lot size according to `lot_step`, `min_lot`, and `max_lot`.
+    /// Returns 0.0 if the requested lot is strictly below `min_lot` (does not silently inflate risk).
     pub fn round_lot(&self, lot: f64) -> f64 {
-        if self.lot_step <= 0.0 {
+        if self.lot_step <= 0.0 || lot <= 0.0 {
             return lot;
+        }
+        if lot < self.min_lot {
+            return 0.0;
         }
         let steps = (lot / self.lot_step).round();
         let rounded = steps * self.lot_step;
         rounded.max(self.min_lot).min(self.max_lot)
+    }
+
+    /// Checks if a lot size satisfies broker minimum, maximum, and lot step constraints.
+    pub fn is_valid_lot(&self, lot: f64) -> bool {
+        if lot < self.min_lot || lot > self.max_lot {
+            return false;
+        }
+        if self.lot_step > 0.0 {
+            let steps = lot / self.lot_step;
+            let diff = (steps - steps.round()).abs();
+            if diff > 1e-4 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Monetary value of a 1-point price move for a given lot volume.
@@ -221,7 +244,9 @@ impl SymbolInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tick {
     pub symbol: String,
-    /// Time of the last quote (UTC unix timestamp in seconds).
+    /// Time of the last quote in milliseconds (UTC unix timestamp).
+    pub time_msc: i64,
+    /// Time of the last quote in seconds (UTC unix timestamp).
     pub time: i64,
     pub bid: f64,
     pub ask: f64,
@@ -234,7 +259,8 @@ impl Tick {
     pub(crate) fn from_raw(symbol: &str, raw: Mt5Tick) -> Self {
         Self {
             symbol: symbol.to_string(),
-            time: raw.time,
+            time_msc: raw.time,
+            time: raw.time / 1000,
             bid: raw.bid,
             ask: raw.ask,
             last: raw.last,
@@ -364,11 +390,17 @@ pub enum OrderType {
 
 impl OrderType {
     pub fn is_buy(self) -> bool {
-        matches!(self, OrderType::Buy | OrderType::BuyLimit | OrderType::BuyStop)
+        matches!(
+            self,
+            OrderType::Buy | OrderType::BuyLimit | OrderType::BuyStop
+        )
     }
 
     pub fn is_sell(self) -> bool {
-        matches!(self, OrderType::Sell | OrderType::SellLimit | OrderType::SellStop)
+        matches!(
+            self,
+            OrderType::Sell | OrderType::SellLimit | OrderType::SellStop
+        )
     }
 }
 
@@ -412,7 +444,12 @@ impl OrderRequest {
     }
 
     /// Create a new limit or pending order request.
-    pub fn pending(symbol: impl Into<String>, order_type: OrderType, volume: f64, price: f64) -> Self {
+    pub fn pending(
+        symbol: impl Into<String>,
+        order_type: OrderType,
+        volume: f64,
+        price: f64,
+    ) -> Self {
         Self {
             symbol: symbol.into(),
             order_type,
@@ -516,9 +553,11 @@ mod tests {
             digits: 5,
         };
 
-        assert_eq!(sym.round_lot(0.004), 0.01);
+        assert_eq!(sym.round_lot(0.004), 0.0);
         assert_eq!(sym.round_lot(0.126), 0.13);
         assert_eq!(sym.round_lot(150.0), 100.0);
+        assert!(sym.is_valid_lot(0.12));
+        assert!(!sym.is_valid_lot(0.004));
     }
 
     #[test]

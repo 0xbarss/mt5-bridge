@@ -3,7 +3,7 @@ use crate::ffi::*;
 use crate::types::*;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::raw::{c_double, c_int, c_long};
+use std::os::raw::{c_double, c_int};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +45,8 @@ impl Mt5Client {
     /// Connect to MetaTrader 5 using the DLL path from the `MT5_DLL_PATH` environment variable,
     /// or falling back to searching for `mt5_bridge.dll` in the current directory / PATH.
     pub fn connect(login: i64, password: &str, server: &str) -> Result<Self> {
-        let dll_path = std::env::var("MT5_DLL_PATH").unwrap_or_else(|_| "mt5_bridge.dll".to_string());
+        let dll_path =
+            std::env::var("MT5_DLL_PATH").unwrap_or_else(|_| "mt5_bridge.dll".to_string());
         Self::connect_with_dll(&dll_path, login, password, server)
     }
 
@@ -66,60 +67,76 @@ impl Mt5Client {
             }
         })?;
 
-        let (fn_init, fn_shut, fn_rates, fn_acct, fn_send, fn_close, fn_modify, fn_sym_tick, fn_sym_info) = unsafe {
-            let fn_init: FnInit = *lib
-                .get(b"Initialize\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "Initialize",
-                    source,
-                })?;
-            let fn_shut: FnShut = *lib
-                .get(b"Shutdown\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "Shutdown",
-                    source,
-                })?;
-            let fn_rates: FnRates = *lib
-                .get(b"CopyRates\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "CopyRates",
-                    source,
-                })?;
-            let fn_acct: FnAcct = *lib
-                .get(b"AccountInfo\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "AccountInfo",
-                    source,
-                })?;
-            let fn_send: FnSend = *lib
-                .get(b"OrderSend\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "OrderSend",
-                    source,
-                })?;
-            let fn_close: FnClose = *lib
-                .get(b"OrderClose\0")
-                .map_err(|source| Mt5Error::SymbolNotFound {
-                    symbol: "OrderClose",
-                    source,
-                })?;
+        let (
+            fn_init,
+            fn_shut,
+            fn_rates,
+            fn_acct,
+            fn_send,
+            fn_close,
+            fn_modify,
+            fn_sym_tick,
+            fn_sym_info,
+        ) = unsafe {
+            let fn_init: FnInit =
+                *lib.get(b"Initialize\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "Initialize",
+                        source,
+                    })?;
+            let fn_shut: FnShut =
+                *lib.get(b"Shutdown\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "Shutdown",
+                        source,
+                    })?;
+            let fn_rates: FnRates =
+                *lib.get(b"CopyRates\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "CopyRates",
+                        source,
+                    })?;
+            let fn_acct: FnAcct =
+                *lib.get(b"AccountInfo\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "AccountInfo",
+                        source,
+                    })?;
+            let fn_send: FnSend =
+                *lib.get(b"OrderSend\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "OrderSend",
+                        source,
+                    })?;
+            let fn_close: FnClose =
+                *lib.get(b"OrderClose\0")
+                    .map_err(|source| Mt5Error::SymbolNotFound {
+                        symbol: "OrderClose",
+                        source,
+                    })?;
 
             let fn_modify: Option<FnModify> = lib
                 .get::<FnModify>(b"OrderModify\0")
                 .map(|s| *s)
-                .map_err(|_| warn!("MT5 DLL: 'OrderModify' not found — SL/TP modification disabled"))
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'OrderModify' not found — SL/TP modification disabled")
+                })
                 .ok();
 
             let fn_sym_tick: Option<FnSymTick> = lib
                 .get::<FnSymTick>(b"SymbolInfoTick\0")
                 .map(|s| *s)
-                .map_err(|_| warn!("MT5 DLL: 'SymbolInfoTick' not found — real-time ticks disabled"))
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'SymbolInfoTick' not found — real-time ticks disabled")
+                })
                 .ok();
 
             let fn_sym_info: Option<FnSymInfo> = lib
                 .get::<FnSymInfo>(b"SymbolInfoFull\0")
                 .map(|s| *s)
-                .map_err(|_| warn!("MT5 DLL: 'SymbolInfoFull' not found — symbol specifications disabled"))
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'SymbolInfoFull' not found — symbol specifications disabled")
+                })
                 .ok();
 
             (
@@ -160,12 +177,16 @@ impl Mt5Client {
             "Connecting to MetaTrader 5 bridge..."
         );
 
-        let ret = unsafe { (client.fn_init)(login as c_long, pwd_c.as_ptr(), srv_c.as_ptr()) };
+        let ret = unsafe { (client.fn_init)(login, pwd_c.as_ptr(), srv_c.as_ptr()) };
         if ret != 1 {
             return Err(Mt5Error::InitFailed(ret));
         }
 
-        info!(login = login, server = server, "MT5 bridge connected successfully");
+        info!(
+            login = login,
+            server = server,
+            "MT5 bridge connected successfully"
+        );
         Ok(client)
     }
 
@@ -177,7 +198,8 @@ impl Mt5Client {
     /// Query current account balance, equity, and margin information.
     pub fn account_info(&self) -> Result<AccountInfo> {
         let (mut balance, mut equity, mut margin, mut free_margin) = (0.0, 0.0, 0.0, 0.0);
-        let ret = unsafe { (self.fn_acct)(&mut balance, &mut equity, &mut margin, &mut free_margin) };
+        let ret =
+            unsafe { (self.fn_acct)(&mut balance, &mut equity, &mut margin, &mut free_margin) };
 
         if ret != 1 {
             return Err(Mt5Error::AccountInfoFailed(ret));
@@ -250,7 +272,10 @@ impl Mt5Client {
         to: i64,
     ) -> Result<Vec<Rate>> {
         if from > to {
-            return Err(Mt5Error::InvalidTimeRange { start: from, end: to });
+            return Err(Mt5Error::InvalidTimeRange {
+                start: from,
+                end: to,
+            });
         }
 
         let sym_c = CString::new(symbol)?;
@@ -268,15 +293,8 @@ impl Mt5Client {
         let estimated_bars = ((to - from_val) / tf_secs + 100).max(100) as usize;
         let mut buf = vec![Mt5Rate::default(); estimated_bars];
 
-        let filled = unsafe {
-            (self.fn_rates)(
-                sym_c.as_ptr(),
-                tf_const,
-                from_val,
-                to,
-                buf.as_mut_ptr(),
-            )
-        };
+        let filled =
+            unsafe { (self.fn_rates)(sym_c.as_ptr(), tf_const, from_val, to, buf.as_mut_ptr()) };
 
         if filled < 0 {
             return Err(Mt5Error::CopyRatesFailed {
@@ -475,10 +493,18 @@ impl Mt5Client {
 
         let ret = unsafe { fn_mod(ticket, stop_loss as c_double, take_profit as c_double) };
         if ret != 1 {
-            return Err(Mt5Error::OrderModifyFailed { ticket, retcode: ret });
+            return Err(Mt5Error::OrderModifyFailed {
+                ticket,
+                retcode: ret,
+            });
         }
 
-        debug!(ticket = ticket, sl = stop_loss, tp = take_profit, "Order modified");
+        debug!(
+            ticket = ticket,
+            sl = stop_loss,
+            tp = take_profit,
+            "Order modified"
+        );
         Ok(())
     }
 

@@ -60,7 +60,7 @@ extern "C" {
 #endif
 
 /* Connect to MT5 EA pipe server. Returns 1 on success, 0 on failure. */
-MT5_API int Initialize(long login, const char* password, const char* server);
+MT5_API int Initialize(int64_t login, const char* password, const char* server);
 
 /* Disconnect and clean up. */
 MT5_API int Shutdown(void);

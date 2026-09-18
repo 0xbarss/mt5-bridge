@@ -4,7 +4,7 @@ use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let login: i64 = env::var("MT5_LOGIN")
-        .unwrap_or_else(|_| "12345678".to_string())
+        .unwrap_or_else(|_| "5056168447".to_string())
         .parse()?;
     let password = env::var("MT5_PASSWORD").unwrap_or_else(|_| "demo_password".to_string());
     let server = env::var("MT5_SERVER").unwrap_or_else(|_| "MetaQuotes-Demo".to_string());
@@ -18,12 +18,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = Utc::now().timestamp();
     let from = now - (24 * 3600);
 
-    println!("Fetching {} {} bars from {} to {}...", symbol, timeframe, from, now);
+    println!(
+        "Fetching {} {} bars from {} to {}...",
+        symbol, timeframe, from, now
+    );
     let bars = client.copy_bars(symbol, timeframe, from, now)?;
 
     println!("Fetched {} bars total. Last 10 bars:", bars.len());
-    println!("{:<20} {:<10} {:<10} {:<10} {:<10} {:<10}",
-        "Time (UTC)", "Open", "High", "Low", "Close", "Volume");
+    println!(
+        "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10}",
+        "Time (UTC)", "Open", "High", "Low", "Close", "Volume"
+    );
     println!("{:-<72}", "");
 
     for bar in bars.iter().rev().take(10).rev() {

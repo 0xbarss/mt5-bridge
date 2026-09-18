@@ -99,8 +99,10 @@ static bool send_packet(Cmd cmd, const std::string& payload) {
 }
 
 static bool recv_packet(int32_t& status, std::string& data) {
+    const uint32_t MAX_PAYLOAD = 64 * 1024 * 1024; // 64 MB upper limit
     RespHdr hdr{};
     if (!read_all(&hdr, sizeof hdr)) return false;
+    if (hdr.len > MAX_PAYLOAD) return false;
     status = hdr.status;
     data.resize(hdr.len);
     return hdr.len == 0 || read_all(&data[0], hdr.len);
@@ -131,7 +133,7 @@ private:
 
 extern "C" {
 
-int Initialize(long login, const char* password, const char* server) {
+int Initialize(int64_t login, const char* password, const char* server) {
     Lock lk;
 
     if (g_pipe != INVALID_HANDLE_VALUE) {
@@ -250,11 +252,13 @@ int OrderSend(const char* symbol, int type, double volume,
     if (!send_packet(CMD_ORDER_SEND, p.buf)) return 0;
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data) || st != 1 || data.size() < sizeof(Mt5TradeResult))
-        return 0;
+    if (!recv_packet(st, data)) return 0;
 
-    std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
-    return 1;
+    // Preserve MT5 trade result details (including error retcodes) whenever payload is present
+    if (result && data.size() >= sizeof(Mt5TradeResult)) {
+        std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
+    }
+    return (st == 1) ? 1 : 0;
 }
 
 int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
@@ -267,11 +271,12 @@ int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
     if (!send_packet(CMD_ORDER_CLOSE, p.buf)) return 0;
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data) || st != 1 || data.size() < sizeof(Mt5TradeResult))
-        return 0;
+    if (!recv_packet(st, data)) return 0;
 
-    std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
-    return 1;
+    if (result && data.size() >= sizeof(Mt5TradeResult)) {
+        std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
+    }
+    return (st == 1) ? 1 : 0;
 }
 
 int OrderModify(uint64_t ticket, double sl, double tp) {

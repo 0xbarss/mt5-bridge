@@ -11,7 +11,6 @@ use tracing::{debug, error, warn};
 const DEFAULT_TICK_BUFFER: usize = 1024;
 const DEFAULT_BAR_BUFFER: usize = 256;
 
-const DUP_TIME_THRESHOLD: f64 = 1e-6;
 const DUP_PRICE_THRESHOLD: f64 = 1e-9;
 
 /// Stream real-time ticks for a symbol.
@@ -30,7 +29,7 @@ pub fn stream_ticks(
     tokio::spawn(async move {
         debug!(symbol = %sym_owned, "Tick stream started");
 
-        let mut prev_time: f64 = 0.0;
+        let mut prev_time_msc: i64 = 0;
         let mut prev_bid: f64 = 0.0;
         let mut prev_ask: f64 = 0.0;
 
@@ -38,21 +37,19 @@ pub fn stream_ticks(
             let client_clone = Arc::clone(&client);
             let sym_task = sym_owned.clone();
 
-            let tick_res = tokio::task::spawn_blocking(move || {
-                client_clone.symbol_tick(&sym_task)
-            })
-            .await;
+            let tick_res =
+                tokio::task::spawn_blocking(move || client_clone.symbol_tick(&sym_task)).await;
 
             match tick_res {
                 Ok(Ok(tick)) => {
-                    if tick.bid > 0.0 && tick.ask > 0.0 && tick.ask >= tick.bid && tick.time > 0 {
-                        let ts = tick.time as f64;
-                        let time_dup = (ts - prev_time).abs() < DUP_TIME_THRESHOLD;
+                    if tick.bid > 0.0 && tick.ask > 0.0 && tick.ask >= tick.bid && tick.time_msc > 0
+                    {
+                        let time_dup = tick.time_msc == prev_time_msc;
                         let bid_dup = (tick.bid - prev_bid).abs() < DUP_PRICE_THRESHOLD;
                         let ask_dup = (tick.ask - prev_ask).abs() < DUP_PRICE_THRESHOLD;
 
                         if !(time_dup && bid_dup && ask_dup) {
-                            prev_time = ts;
+                            prev_time_msc = tick.time_msc;
                             prev_bid = tick.bid;
                             prev_ask = tick.ask;
 

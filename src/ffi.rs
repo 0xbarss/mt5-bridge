@@ -3,7 +3,7 @@
 //! All structs are marked `#[repr(C, packed)]` to match the `#pragma pack(push, 1)`
 //! packing in the C/C++ DLL and MQL5 serialiser.
 
-use std::os::raw::{c_char, c_double, c_int, c_long};
+use std::os::raw::{c_char, c_double, c_int};
 
 /// Wire format for symbol specification (52 bytes).
 #[repr(C, packed)]
@@ -66,7 +66,7 @@ const _: () = {
 };
 
 // Function pointer signatures for dynamic library loading.
-pub type FnInit = unsafe extern "C" fn(c_long, *const c_char, *const c_char) -> c_int;
+pub type FnInit = unsafe extern "C" fn(i64, *const c_char, *const c_char) -> c_int;
 pub type FnShut = unsafe extern "C" fn() -> c_int;
 pub type FnRates = unsafe extern "C" fn(*const c_char, c_int, i64, i64, *mut Mt5Rate) -> c_int;
 pub type FnAcct = unsafe extern "C" fn(*mut f64, *mut f64, *mut f64, *mut f64) -> c_int;

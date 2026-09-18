@@ -4,12 +4,15 @@ use std::env;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read credentials from environment variables or use test defaults
     let login: i64 = env::var("MT5_LOGIN")
-        .unwrap_or_else(|_| "12345678".to_string())
+        .unwrap_or_else(|_| "5056168447".to_string())
         .parse()?;
     let password = env::var("MT5_PASSWORD").unwrap_or_else(|_| "demo_password".to_string());
     let server = env::var("MT5_SERVER").unwrap_or_else(|_| "MetaQuotes-Demo".to_string());
 
-    println!("Connecting to MT5 bridge (login: {}, server: {})...", login, server);
+    println!(
+        "Connecting to MT5 bridge (login: {}, server: {})...",
+        login, server
+    );
     let client = Mt5Client::connect(login, &password, &server)?;
 
     let account = client.account_info()?;

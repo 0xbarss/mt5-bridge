@@ -57,6 +57,7 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 // INVALID_HANDLE is a built-in MQL5 constant (-1); no redefinition needed.
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
+#define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
 
 //---- Protocol commands
 #define CMD_INIT         1
@@ -72,6 +73,16 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 //---- EA input
 input int InpMagicNumber = 20240101;  // Magic number for bridge orders
 input string InpPipeName = "mt5bridge"; // Custom Named Pipe Name
+
+// Automatically select the broker-supported order filling mode for a symbol
+ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
+    uint filling = (uint)SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+    if ((filling & SYMBOL_FILLING_FOK) != 0)
+        return ORDER_FILLING_FOK;
+    if ((filling & SYMBOL_FILLING_IOC) != 0)
+        return ORDER_FILLING_IOC;
+    return ORDER_FILLING_RETURN;
+}
 
 //---- State
 long g_server  = INVALID_HANDLE;
@@ -229,16 +240,35 @@ bool SendError(long h) {
 // ── Command handlers ──────────────────────────────────────────────────────────
 
 void HandleInit(long h, const uchar &payload[], uint len) {
-    // payload: i64 login + str password + str server
-    // We already have the connection — just confirm credentials are plausible.
-    // (The EA runs inside MT5 which is already logged in; we don't re-login here.)
-    // If the EA's active account matches, respond OK.
     if (len < 8) { SendError(h); return; }
-    int off = 8; // skip login i64 (we don't use it; MT5 is already connected)
-    // Read password and server strings (ignored; MT5 manages its own session)
-    // Just respond OK.
+    int off = 0;
+    long req_login = UnpackI64(payload, off); off += 8;
+    string req_password = UnpackStr(payload, off);
+    string req_server   = UnpackStr(payload, off);
+
+    long actual_login = AccountInfoInteger(ACCOUNT_LOGIN);
+    string actual_server = AccountInfoString(ACCOUNT_SERVER);
+
+    // If client supplied a login (> 0), verify it matches the active MT5 terminal account
+    if (req_login > 0 && req_login != actual_login) {
+        Print("MT5Bridge: auth failed — requested login ", req_login,
+              " does not match terminal login ", actual_login);
+        SendError(h);
+        return;
+    }
+
+    // If client supplied a server, verify server name matches
+    if (StringLen(req_server) > 0 &&
+        StringFind(actual_server, req_server) < 0 &&
+        StringFind(req_server, actual_server) < 0) {
+        Print("MT5Bridge: auth failed — requested server '", req_server,
+              "' does not match terminal server '", actual_server, "'");
+        SendError(h);
+        return;
+    }
+
     SendOk(h);
-    Print("MT5Bridge: client authenticated");
+    Print("MT5Bridge: client authenticated (account: ", actual_login, ", server: ", actual_server, ")");
 }
 
 void HandleShutdown(long h) {
@@ -326,20 +356,55 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     double tp      = UnpackF64(payload, off); off += 8;
     string comment = UnpackStr(payload, off);
 
-    ENUM_ORDER_TYPE order_type = (otype == 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    ENUM_TRADE_REQUEST_ACTIONS action = TRADE_ACTION_DEAL;
+    ENUM_ORDER_TYPE order_type = ORDER_TYPE_BUY;
+    double req_price = price;
+
+    switch (otype) {
+        case 0: // Market Buy
+            action     = TRADE_ACTION_DEAL;
+            order_type = ORDER_TYPE_BUY;
+            req_price  = SymbolInfoDouble(sym, SYMBOL_ASK);
+            break;
+        case 1: // Market Sell
+            action     = TRADE_ACTION_DEAL;
+            order_type = ORDER_TYPE_SELL;
+            req_price  = SymbolInfoDouble(sym, SYMBOL_BID);
+            break;
+        case 2: // Buy Limit
+            action     = TRADE_ACTION_PENDING;
+            order_type = ORDER_TYPE_BUY_LIMIT;
+            break;
+        case 3: // Sell Limit
+            action     = TRADE_ACTION_PENDING;
+            order_type = ORDER_TYPE_SELL_LIMIT;
+            break;
+        case 4: // Buy Stop
+            action     = TRADE_ACTION_PENDING;
+            order_type = ORDER_TYPE_BUY_STOP;
+            break;
+        case 5: // Sell Stop
+            action     = TRADE_ACTION_PENDING;
+            order_type = ORDER_TYPE_SELL_STOP;
+            break;
+        default:
+            Print("MT5Bridge: unsupported order type: ", otype);
+            SendError(h);
+            return;
+    }
 
     MqlTradeRequest req = {};
-    req.action      = TRADE_ACTION_DEAL;
+    req.action      = action;
     req.symbol      = sym;
     req.volume      = volume;
     req.type        = order_type;
-    req.price       = SymbolInfoDouble(sym, (otype == 0) ? SYMBOL_ASK : SYMBOL_BID);
+    req.price       = req_price;
     req.sl          = sl;
     req.tp          = tp;
     req.deviation   = 10;
     req.magic       = InpMagicNumber;
     req.comment     = comment;
-    req.type_filling= ORDER_FILLING_IOC;
+    req.type_filling= GetSymbolFillingMode(sym);
 
     MqlTradeResult res = {};
     bool ok = OrderSend(req, res);
@@ -382,11 +447,41 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     if (len < 8) { SendError(h); return; }
     ulong ticket = UnpackU64(payload, 0);
 
-    // Find position by ticket and close it.
+    // Find position by ticket, or pending order to remove
     if (!PositionSelectByTicket((ulong)ticket)) {
-        Print("MT5Bridge: position not found for ticket=", ticket);
+        if (OrderSelect((ulong)ticket)) {
+            MqlTradeRequest pend_req = {};
+            pend_req.action = TRADE_ACTION_REMOVE;
+            pend_req.order  = ticket;
+
+            MqlTradeResult pend_res = {};
+            bool pend_ok = OrderSend(pend_req, pend_res);
+
+            uchar pend_data[];
+            PackU32(pend_data, pend_res.retcode);
+            PackU64(pend_data, 0);
+            PackU64(pend_data, pend_res.order);
+            PackF64(pend_data, 0.0);
+            PackF64(pend_data, 0.0);
+
+            if (pend_ok && (pend_res.retcode == TRADE_RETCODE_DONE || pend_res.retcode == TRADE_RETCODE_PLACED)) {
+                SendOkData(h, pend_data, (uint)ArraySize(pend_data));
+            } else {
+                Print("MT5Bridge: OrderRemove failed retcode=", pend_res.retcode);
+                SendResponse(h, -1, pend_data, (uint)ArraySize(pend_data));
+            }
+            return;
+        }
+
+        Print("MT5Bridge: position or order not found for ticket=", ticket);
         SendError(h);
         return;
+    }
+
+    long pos_magic = PositionGetInteger(POSITION_MAGIC);
+    if (InpMagicNumber > 0 && pos_magic != 0 && pos_magic != InpMagicNumber) {
+        Print("MT5Bridge: warning — closing position ticket ", ticket, " magic (", pos_magic,
+              ") does not match EA magic (", InpMagicNumber, ")");
     }
 
     string  sym   = PositionGetString(POSITION_SYMBOL);
@@ -406,7 +501,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     req.position = ticket;
     req.magic    = InpMagicNumber;
     req.comment  = "bridge_close";
-    req.type_filling = ORDER_FILLING_IOC;
+    req.type_filling = GetSymbolFillingMode(sym);
 
     MqlTradeResult res = {};
     bool ok = OrderSend(req, res);
@@ -523,12 +618,16 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     MqlTick tick;
     if (!SymbolInfoTick(sym, tick)) { SendError(h); return; }
 
-    long offset = (long)TimeTradeServer() - (long)TimeGMT();
+    long offset_ms = ((long)TimeTradeServer() - (long)TimeGMT()) * 1000;
+    long tick_ms = (long)tick.time_msc;
+    if (tick_ms <= 0) {
+        tick_ms = (long)tick.time * 1000;
+    }
 
-    // Serialise as packed wire format: i64 + 3×f64 + u64 + u32 = 44 bytes
+    // Serialise as packed wire format: i64 (time_msc UTC) + 3×f64 + u64 + u32 = 44 bytes
     // (matches Mt5Tick in mt5_bridge.h).
     uchar data[];
-    PackI64(data, (long)tick.time - offset);
+    PackI64(data, tick_ms - offset_ms);
     PackF64(data, tick.bid);
     PackF64(data, tick.ask);
     PackF64(data, tick.last);
@@ -546,6 +645,11 @@ bool DispatchRequest(long h) {
 
     uint cmd     = UnpackU32(hdr, 0);
     uint pay_len = UnpackU32(hdr, 4);
+
+    if (pay_len > MAX_PAYLOAD_SIZE) {
+        Print("MT5Bridge: request payload length ", pay_len, " exceeds limit (", MAX_PAYLOAD_SIZE, ")");
+        return false;
+    }
 
     uchar payload[];
     if (pay_len > 0) {

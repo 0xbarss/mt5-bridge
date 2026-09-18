@@ -3,7 +3,7 @@ use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let login: i64 = env::var("MT5_LOGIN")
-        .unwrap_or_else(|_| "12345678".to_string())
+        .unwrap_or_else(|_| "5056168447".to_string())
         .parse()?;
     let password = env::var("MT5_PASSWORD").unwrap_or_else(|_| "demo_password".to_string());
     let server = env::var("MT5_SERVER").unwrap_or_else(|_| "MetaQuotes-Demo".to_string());
@@ -12,8 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD"];
 
-    println!("{:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8}",
-        "Symbol", "Point", "TickVal", "MinLot", "MaxLot", "LotStep", "Digits");
+    println!(
+        "{:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8}",
+        "Symbol", "Point", "TickVal", "MinLot", "MaxLot", "LotStep", "Digits"
+    );
     println!("{:-<70}", "");
 
     for symbol in symbols {

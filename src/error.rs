@@ -103,12 +103,18 @@ pub fn mt5_retcode_description(retcode: u32) -> &'static str {
         10031 => "TRADE_RETCODE_CONNECTION: No connection with the trade server",
         10032 => "TRADE_RETCODE_ONLY_REAL: Operation is allowed only for live accounts",
         10033 => "TRADE_RETCODE_LIMIT_ORDERS: The number of pending orders has reached the limit",
-        10034 => "TRADE_RETCODE_LIMIT_VOLUME: The volume of orders and positions has reached the limit",
+        10034 => {
+            "TRADE_RETCODE_LIMIT_VOLUME: The volume of orders and positions has reached the limit"
+        }
         10035 => "TRADE_RETCODE_INVALID_ORDER: Incorrect or prohibited order type",
         10036 => "TRADE_RETCODE_POSITION_CLOSED: Position with specified ticket is already closed",
-        10038 => "TRADE_RETCODE_INVALID_CLOSE_VOLUME: Close volume exceeds the current position volume",
+        10038 => {
+            "TRADE_RETCODE_INVALID_CLOSE_VOLUME: Close volume exceeds the current position volume"
+        }
         10039 => "TRADE_RETCODE_CLOSE_ORDER_EXIST: A close order already exists for this position",
-        10040 => "TRADE_RETCODE_LIMIT_POSITIONS: The number of open positions has reached the limit",
+        10040 => {
+            "TRADE_RETCODE_LIMIT_POSITIONS: The number of open positions has reached the limit"
+        }
         _ => "Unknown MT5 retcode",
     }
 }

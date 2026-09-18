@@ -125,11 +125,11 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 
 ### Trade Ownership & Magic Number Scope
 
-- **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge.
-- **Strict vs Account-Wide Management**:
-  - By default (`InpEnforceMagicNumber = true`), operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected. Manual trades (magic `0`) and unassigned orders are also strictly disallowed with no zero-bypass, preventing accidental interference with manual or other EA positions.
-  - To manage external or foreign positions across the account, set `InpEnforceMagicNumber = false` to allow account-wide operations (logs a warning on magic mismatch).
-- **Custom Order Magic**: Callers can override the magic number per-request using `OrderRequest::buy(...).magic(my_magic)`.
+- **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge unless a custom magic number is specified.
+- **Multi-Strategy & Magic Management**:
+  - By default (`InpEnforceMagicNumber = false`), orders placed with custom magic numbers (or multiple strategies sharing the same bridge connection) can be freely closed and modified by ticket. When closing or modifying positions, the bridge preserves the position's original magic number in the trade record.
+  - To restrict the bridge strictly to a single magic number, set `InpEnforceMagicNumber = true`. When enabled, the EA strictly enforces `InpMagicNumber` across `OrderSend`, `OrderClose`, and `OrderModify`, rejecting any operation where the magic number does not match.
+- **Custom Order Magic**: Callers can specify custom magic numbers per-request using `OrderRequest::buy(...).magic(my_magic)`.
 
 ### Concurrency, Latency & Serialization
 
@@ -179,15 +179,13 @@ mt5-bridge/
 │       ├── mt5_bridge.mq5   # Expert Advisor source code (deploy to MT5)
 │       └── mt5_bridge.ex5   # Compiled Expert Advisor binary
 │
-├── bridge_dll/              # C++ Named Pipe client DLL source & builds
+├── bridge_dll/              # C++ Named Pipe client DLL source & build scripts
 │   ├── mt5_bridge.h         # C header and packed struct definitions
 │   ├── mt5_bridge.cpp       # Pipe client implementation
 │   ├── CMakeLists.txt       # CMake build configuration
 │   ├── build.sh             # MinGW cross-compilation script (Linux -> Windows)
-│   ├── cmake/
-│   │   └── mingw64.cmake    # MinGW toolchain definition
-│   └── bin/
-│       └── mt5_bridge.dll   # Precompiled 64-bit Windows DLL (ready to use)
+│   └── cmake/
+│       └── mingw64.cmake    # MinGW toolchain definition
 │
 ├── src/                     # Rust library crate
 │   ├── lib.rs               # Library entry point & re-exports
@@ -218,10 +216,9 @@ mt5-bridge/
 
 1. **MetaTrader 5 Terminal** (installed on Windows or running via Wine on Linux).
 2. **Rust Toolchain**: 1.75 or newer (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-3. *(Optional)* **C++ Compiler**:
-   - If compiling the DLL yourself on Linux: `mingw-w64-gcc` (`x86_64-w64-mingw32-g++`).
-   - If compiling on Windows: Visual Studio (MSVC) or MinGW.
-   - *Note: A ready-to-use 64-bit DLL is already included in `bridge_dll/bin/mt5_bridge.dll`.*
+3. **C++ Compiler** (to build the C FFI client DLL):
+   - On Linux: `mingw-w64-gcc` (`x86_64-w64-mingw32-g++`).
+   - On Windows: Visual Studio (MSVC) or MinGW-w64.
 
 ### Step 1: Install the Expert Advisor in MT5
 
@@ -252,7 +249,7 @@ mt5-bridge/
 | `InpPipeName` | `string` | `"mt5bridge"` | Named pipe name (override for multi-terminal setups) |
 | `InpPipeSecret` | `string` | `""` | Shared secret token for client authentication (required by default) |
 | `InpRequireSecret` | `bool` | `true` | Require non-empty secret token before allowing initialization (set false to opt out) |
-| `InpEnforceMagicNumber` | `bool` | `true` | Strictly reject modify/close for tickets not matching `InpMagicNumber` (no zero-bypass) |
+| `InpEnforceMagicNumber` | `bool` | `false` | Restrict send/modify/close to `InpMagicNumber` (default `false` allows multi-strategy magic routing) |
 | `InpPipeSDDL` | `string` | `"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"` | SDDL security descriptor restricting pipe access to owner user, Local System & admins |
 | `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC (disable for raw broker time) |
 | `InpTimerIntervalMs` | `int` | `5` | Timer polling and pipe draining loop frequency in milliseconds |
@@ -260,25 +257,28 @@ mt5-bridge/
 | `InpMaxTimerBudgetUs` | `uint` | `2000` | Max execution budget per timer tick in microseconds (2000 µs = 2 ms) |
 | `InpAutoSelectSymbols` | `bool` | `true` | Automatically select queried/traded symbols into Market Watch |
 
-### Step 2: Deploy or Build `mt5_bridge.dll`
+### Step 2: Build and Deploy `mt5_bridge.dll`
 
-The Rust client dynamically loads `mt5_bridge.dll`.
+The Rust client dynamically loads `mt5_bridge.dll`. Compile the DLL from source using your platform's compiler:
 
-- **Option 1 (Easiest)**: Copy `bridge_dll/bin/mt5_bridge.dll` to your application's working directory, or set the environment variable:
-  ```bash
-  export MT5_DLL_PATH="/path/to/bridge_dll/bin/mt5_bridge.dll"
-  ```
-- **Option 2 (Build from source on Linux)**:
+- **Build on Linux (Cross-compile via MinGW)**:
   ```bash
   cd bridge_dll
   chmod +x build.sh
   ./build.sh
   ```
-- **Option 3 (Build on Windows with MSVC)**:
+  This generates `mt5_bridge.dll` in `bridge_dll/build/` and synchronizes it to the project root.
+
+- **Build on Windows (MSVC)**:
   ```cmd
   cd bridge_dll
-  cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_bridge.dll
+  cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:..\mt5_bridge.dll
   ```
+
+Place `mt5_bridge.dll` adjacent to your compiled Rust binary, in your working directory, or specify its exact location via the `MT5_DLL_PATH` environment variable:
+```bash
+export MT5_DLL_PATH="/absolute/path/to/mt5_bridge.dll"
+```
 
 ### Step 3: Running on Linux via Wine
 

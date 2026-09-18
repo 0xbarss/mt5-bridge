@@ -105,17 +105,14 @@ If you make modifications to [`bridge_dll/mt5_bridge.cpp`](bridge_dll/mt5_bridge
 ```bash
 cd bridge_dll
 
-# Cross-compile from Linux (outputs to build/mt5_bridge.dll)
+# Cross-compile from Linux (outputs to build/mt5_bridge.dll and project root)
 ./build.sh
-
-# Copy updated DLL to bin/
-cp build/mt5_bridge.dll bin/mt5_bridge.dll
 ```
 
 On Windows with MSVC:
 ```cmd
 cd bridge_dll
-cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_bridge.dll
+cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:..\mt5_bridge.dll
 ```
 
 ---

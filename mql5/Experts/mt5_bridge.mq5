@@ -95,7 +95,7 @@ input int    InpMagicNumber          = 20240101;    // Magic number for bridge o
 input string InpPipeName             = "mt5bridge"; // Custom Named Pipe Name
 input string InpPipeSecret           = "";          // Shared secret for client authentication (required by default)
 input bool   InpRequireSecret        = true;        // Require non-empty InpPipeSecret on initialization (set false to opt out)
-input bool   InpEnforceMagicNumber   = true;        // Reject close/modify for positions not matching InpMagicNumber
+input bool   InpEnforceMagicNumber   = false;       // Reject close/modify/send for magic not matching InpMagicNumber (false allows multi-strategy routing)
 input string InpPipeSDDL             = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"; // SDDL security descriptor restricting access to owner, local system & admins
 input bool   InpConvertToUTC         = true;        // Convert history timestamps to UTC (set false for raw broker time)
 input int    InpTimerIntervalMs      = 5;           // Timer polling interval in milliseconds (default 5ms)
@@ -302,7 +302,7 @@ bool SendOk(long h) {
 }
 
 bool SendOkData(long h, const uchar &data[], uint len) {
-    return SendResponse(h, (int)len > 0 ? 1 : 1, data, len);
+    return SendResponse(h, 1, data, len);
 }
 
 bool SendCount(long h, int count, const uchar &data[], uint data_len) {
@@ -330,16 +330,14 @@ void HandleInit(long h, const uchar &payload[], uint len) {
         return;
     }
 
-    // Verify wire protocol version if supplied by client
+    // Verify wire protocol version (mandatory)
     uint proto_ver = 0;
-    if (SafeUnpackU32(payload, off, len, proto_ver)) {
-        if (proto_ver != PROTOCOL_VERSION) {
-            Print("MT5Bridge: auth failed — protocol version mismatch (client=", proto_ver,
-                  ", server=", PROTOCOL_VERSION, ")");
-            g_authenticated = false;
-            SendError(h);
-            return;
-        }
+    if (!SafeUnpackU32(payload, off, len, proto_ver) || proto_ver != PROTOCOL_VERSION) {
+        Print("MT5Bridge: auth failed — protocol version mismatch or missing (client=", proto_ver,
+              ", server=", PROTOCOL_VERSION, ")");
+        g_authenticated = false;
+        SendError(h);
+        return;
     }
 
     long actual_login = AccountInfoInteger(ACCOUNT_LOGIN);
@@ -514,6 +512,14 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     ulong magic = 0;
     SafeUnpackU64(payload, off, len, magic);
 
+    // If magic enforcement is enabled, reject any order whose custom magic does not match InpMagicNumber
+    if (InpEnforceMagicNumber && InpMagicNumber > 0 && magic > 0 && (long)magic != InpMagicNumber) {
+        Print("MT5Bridge: rejected order — order magic (", magic,
+              ") does not match EA magic (", InpMagicNumber, ")");
+        SendError(h);
+        return;
+    }
+
     // EA-side pre-flight validation
     if (!EnsureSymbolAvailable(sym)) {
         Print("MT5Bridge: symbol '", sym, "' not available in Market Watch");
@@ -549,10 +555,11 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
 
     double step_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
     if (step_vol > 0.0) {
-        double base = (min_vol > 0.0) ? min_vol : 0.0;
-        double steps = (volume - base) / step_vol;
-        double rounded_steps = MathRound(steps);
-        if (MathAbs(steps - rounded_steps) > 1e-4) {
+        double steps_zero = volume / step_vol;
+        double steps_min  = (min_vol > 0.0) ? (volume - min_vol) / step_vol : steps_zero;
+        bool ok_zero = MathAbs(steps_zero - MathRound(steps_zero)) <= 1e-4;
+        bool ok_min  = MathAbs(steps_min  - MathRound(steps_min))  <= 1e-4;
+        if (!ok_zero && !ok_min) {
             Print("MT5Bridge: volume ", DoubleToString(volume, 4),
                   " does not align with lot step ", DoubleToString(step_vol, 4),
                   " (min=", DoubleToString(min_vol, 4), ") for ", sym);
@@ -818,11 +825,15 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
                       ") does not match EA magic (", InpMagicNumber, ")");
                 SendError(h);
                 return;
+            } else if (InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
+                Print("MT5Bridge: warning — removing pending order ticket ", ticket, " magic (", ord_magic,
+                      ") does not match EA magic (", InpMagicNumber, ")");
             }
 
             MqlTradeRequest pend_req = {};
             pend_req.action = TRADE_ACTION_REMOVE;
             pend_req.order  = ticket;
+            pend_req.magic  = (ord_magic > 0) ? ord_magic : InpMagicNumber;
 
             MqlTradeResult pend_res = {};
             bool pend_ok = OrderSend(pend_req, pend_res);
@@ -877,7 +888,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
                                         ? SYMBOL_ASK : SYMBOL_BID);
     req.deviation= 10;
     req.position = ticket;
-    req.magic    = InpMagicNumber;
+    req.magic    = (pos_magic > 0) ? pos_magic : InpMagicNumber;
     req.comment  = "bridge_close";
     req.type_filling = GetSymbolFillingMode(sym);
 
@@ -936,6 +947,9 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
             return;
+        } else if (InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
+            Print("MT5Bridge: warning — modifying position ticket ", ticket, " magic (", pos_magic,
+                  ") does not match EA magic (", InpMagicNumber, ")");
         }
 
         string sym   = PositionGetString(POSITION_SYMBOL);
@@ -990,7 +1004,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         req.symbol   = sym;
         req.sl       = sl;
         req.tp       = tp;
-        req.magic    = InpMagicNumber;
+        req.magic    = (pos_magic > 0) ? pos_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else if (OrderSelect(ticket)) {
         long ord_magic = OrderGetInteger(ORDER_MAGIC);
@@ -999,6 +1013,9 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
             return;
+        } else if (InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
+            Print("MT5Bridge: warning — modifying pending order ticket ", ticket, " magic (", ord_magic,
+                  ") does not match EA magic (", InpMagicNumber, ")");
         }
 
         string sym   = OrderGetString(ORDER_SYMBOL);
@@ -1053,7 +1070,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         req.price    = ord_price;
         req.sl       = sl;
         req.tp       = tp;
-        req.magic    = InpMagicNumber;
+        req.magic    = (ord_magic > 0) ? ord_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else {
         Print("MT5Bridge: ticket ", ticket, " not found for modify");

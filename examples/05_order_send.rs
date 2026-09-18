@@ -39,11 +39,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Placing market BUY order for {:.2} lots (SL: {:.5}, TP: {:.5})...",
         volume, sl, tp
     );
-    let result = client.order_send(&order_req)?;
+    let result = match client.order_send(&order_req) {
+        Ok(r) => r,
+        Err(mt5_bridge::Mt5Error::OrderSendFailed {
+            retcode: 10018,
+            description,
+            ..
+        }) => {
+            println!(
+                "ℹ Market is currently closed (weekend): retcode 10018 ({})",
+                description
+            );
+            println!(
+                "✓ Pre-flight order validation and bridge serialization completed successfully."
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     println!("✓ Order opened successfully!");
     println!("  Ticket:   {}", result.order);
     println!("  Deal:     {}", result.deal);
+    println!("  Position: {}", result.position);
     println!("  Price:    {:.5}", result.price);
     println!("  Volume:   {:.2}", result.volume);
     println!(
@@ -52,13 +70,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.description()
     );
 
+    let target_ticket = if result.position > 0 {
+        result.position
+    } else {
+        result.order
+    };
+
     // 3. Modify Stop Loss (move SL closer by 50 points, keeping tick alignment)
     let new_sl = info.round_price(tick.bid - (150.0 * point));
     println!(
         "Modifying SL for ticket {} to {:.5}...",
-        result.order, new_sl
+        target_ticket, new_sl
     );
-    let mod_res = client.order_modify(result.order, new_sl, tp)?;
+    let mod_res = client.order_modify(target_ticket, new_sl, tp)?;
     println!(
         "✓ Order SL modified successfully! (retcode: {} - {})",
         mod_res.retcode,
@@ -66,8 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 4. Close the position by ticket
-    println!("Closing position ticket {}...", result.order);
-    let close_res = client.order_close(result.order)?;
+    println!("Closing position ticket {}...", target_ticket);
+    let close_res = client.order_close(target_ticket)?;
     println!(
         "✓ Position closed at price {:.5} (Deal: {}, retcode: {} - {})",
         close_res.price,

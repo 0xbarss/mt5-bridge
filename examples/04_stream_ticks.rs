@@ -21,22 +21,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rx = stream_ticks(client, symbol, Duration::from_millis(10));
 
     let mut count = 0;
-    while let Some(tick) = rx.recv().await {
-        let dt = Utc.timestamp_opt(tick.time, 0).single().unwrap_or_default();
-        println!(
-            "[{}] Tick: Bid={:.5} Ask={:.5} Spread={:.5} Last={:.5} Vol={}",
-            dt.format("%H:%M:%S"),
-            tick.bid,
-            tick.ask,
-            tick.spread(),
-            tick.last,
-            tick.volume
-        );
+    while count < 5 {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(tick)) => {
+                let dt = Utc.timestamp_opt(tick.time, 0).single().unwrap_or_default();
+                println!(
+                    "[{}] Tick: Bid={:.5} Ask={:.5} Spread={:.5} Last={:.5} Vol={}",
+                    dt.format("%H:%M:%S"),
+                    tick.bid,
+                    tick.ask,
+                    tick.spread(),
+                    tick.last,
+                    tick.volume
+                );
 
-        count += 1;
-        if count >= 5 {
-            println!("Received 5 ticks. Dropping receiver to stop background task.");
-            break;
+                count += 1;
+                if count >= 5 {
+                    println!("Received 5 ticks. Dropping receiver to stop background task.");
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                println!(
+                    "No new ticks received within 2s (market may be closed/idle). Stopping stream."
+                );
+                break;
+            }
         }
     }
 

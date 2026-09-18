@@ -97,7 +97,11 @@ pub fn stream_bars(
 
         loop {
             let now = chrono::Utc::now().timestamp();
-            let lookback = timeframe.seconds() * 4;
+            let lookback = match timeframe {
+                Timeframe::W1 => 86400 * 7 * 6,   // 6 weeks lookback
+                Timeframe::MN1 => 86400 * 32 * 6, // 6 months (~192 days) lookback
+                tf => tf.seconds() * 4,
+            };
             let from = now - lookback;
 
             let client_clone = Arc::clone(&client);

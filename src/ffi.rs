@@ -47,26 +47,27 @@ pub struct Mt5Tick {
     pub flags: u32,
 }
 
-/// Wire format for order execution results (36 bytes).
+/// Wire format for order execution results (44 bytes).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5TradeResult {
     pub retcode: u32,
     pub deal: u64,
     pub order: u64,
+    pub position: u64,
     pub volume: f64,
     pub price: f64,
 }
 
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // Ensure struct memory layouts match C header at compile-time.
 const _: () = {
     assert!(std::mem::size_of::<Mt5SymInfo>() == 60);
     assert!(std::mem::size_of::<Mt5Rate>() == 60);
     assert!(std::mem::size_of::<Mt5Tick>() == 44);
-    assert!(std::mem::size_of::<Mt5TradeResult>() == 36);
+    assert!(std::mem::size_of::<Mt5TradeResult>() == 44);
 };
 
 // Function pointer signatures for dynamic library loading.

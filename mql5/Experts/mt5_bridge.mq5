@@ -58,7 +58,7 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-#define PROTOCOL_VERSION        1        // Wire protocol handshake version
+#define PROTOCOL_VERSION        2        // Wire protocol handshake version
 
 //---- Protocol commands
 #define CMD_INIT         1
@@ -78,6 +78,7 @@ input string InpPipeSecret = ""; // Optional shared secret for client authentica
 input bool InpRequireSecret = false; // Require non-empty InpPipeSecret on initialization
 input bool InpEnforceMagicNumber = false; // Reject close/modify for positions not matching InpMagicNumber
 input bool InpConvertToUTC = true; // Convert history timestamps to UTC
+input int InpTimerIntervalMs = 5; // Timer polling interval in milliseconds (default 5ms)
 
 // Automatically select the broker-supported order filling mode for a symbol
 ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
@@ -443,6 +444,7 @@ struct BridgeTradeResult {
     uint   retcode;
     ulong  deal;
     ulong  order;
+    ulong  position;
     double volume;
     double price;
 };
@@ -474,6 +476,47 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
 
     ulong magic = 0;
     SafeUnpackU64(payload, off, len, magic);
+
+    // EA-side pre-flight validation
+    if (!SymbolSelect(sym, true)) {
+        Print("MT5Bridge: symbol '", sym, "' not available in Market Watch");
+        SendError(h);
+        return;
+    }
+
+    long trade_mode = SymbolInfoInteger(sym, SYMBOL_TRADE_MODE);
+    if (trade_mode == SYMBOL_TRADE_MODE_DISABLED) {
+        Print("MT5Bridge: trading is disabled for symbol ", sym);
+        SendError(h);
+        return;
+    }
+
+    if (!MathIsValidNumber(volume) || volume <= 0.0) {
+        Print("MT5Bridge: invalid order volume: ", volume);
+        SendError(h);
+        return;
+    }
+
+    double min_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+    double max_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+    if (min_vol > 0.0 && volume < min_vol) {
+        Print("MT5Bridge: volume ", volume, " below min lot ", min_vol, " for ", sym);
+        SendError(h);
+        return;
+    }
+    if (max_vol > 0.0 && volume > max_vol) {
+        Print("MT5Bridge: volume ", volume, " exceeds max lot ", max_vol, " for ", sym);
+        SendError(h);
+        return;
+    }
+
+    if (!MathIsValidNumber(price) || price < 0.0 ||
+        !MathIsValidNumber(sl) || sl < 0.0 ||
+        !MathIsValidNumber(tp) || tp < 0.0) {
+        Print("MT5Bridge: non-finite or negative price/SL/TP parameters");
+        SendError(h);
+        return;
+    }
 
     ENUM_TRADE_REQUEST_ACTIONS action = TRADE_ACTION_DEAL;
     ENUM_ORDER_TYPE order_type = ORDER_TYPE_BUY;
@@ -549,12 +592,24 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         }
     }
 
+    ulong pos_ticket = 0;
+    if (res.deal > 0 && HistoryDealSelect(res.deal)) {
+        pos_ticket = HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
+    }
+    if (pos_ticket == 0 && res.order > 0 && PositionSelectByTicket(res.order)) {
+        pos_ticket = res.order;
+    }
+    if (pos_ticket == 0 && PositionSelect(sym)) {
+        pos_ticket = PositionGetInteger(POSITION_TICKET);
+    }
+
     // Serialise as packed wire format: u32 retcode + u64 deal + u64 order +
-    // f64 volume + f64 price = 36 bytes (matches Mt5TradeResult in mt5_bridge.h).
+    // u64 position + f64 volume + f64 price = 44 bytes (matches Mt5TradeResult in mt5_bridge.h).
     uchar data[];
     PackU32(data, res.retcode);
     PackU64(data, res.deal);
     PackU64(data, res.order);
+    PackU64(data, pos_ticket);
     PackF64(data, res.volume);
     PackF64(data, exec_price);
 
@@ -579,7 +634,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     if (!PositionSelectByTicket(ticket)) {
         if (OrderSelect(ticket)) {
             long ord_magic = OrderGetInteger(ORDER_MAGIC);
-            if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != 0 && ord_magic != InpMagicNumber) {
+            if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
                 Print("MT5Bridge: rejected remove — pending order ticket ", ticket, " magic (", ord_magic,
                       ") does not match EA magic (", InpMagicNumber, ")");
                 SendError(h);
@@ -597,6 +652,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
             PackU32(pend_data, pend_res.retcode);
             PackU64(pend_data, 0);
             PackU64(pend_data, pend_res.order);
+            PackU64(pend_data, 0);
             PackF64(pend_data, 0.0);
             PackF64(pend_data, 0.0);
 
@@ -617,12 +673,12 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     }
 
     long pos_magic = PositionGetInteger(POSITION_MAGIC);
-    if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != 0 && pos_magic != InpMagicNumber) {
+    if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
         Print("MT5Bridge: rejected close — position ticket ", ticket, " magic (", pos_magic,
               ") does not match EA magic (", InpMagicNumber, ")");
         SendError(h);
         return;
-    } else if (InpMagicNumber > 0 && pos_magic != 0 && pos_magic != InpMagicNumber) {
+    } else if (InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
         Print("MT5Bridge: warning — closing position ticket ", ticket, " magic (", pos_magic,
               ") does not match EA magic (", InpMagicNumber, ")");
     }
@@ -663,6 +719,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     PackU32(data, res.retcode);
     PackU64(data, res.deal);
     PackU64(data, res.order);
+    PackU64(data, ticket);
     PackF64(data, res.volume);
     PackF64(data, exec_price);
 
@@ -690,10 +747,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
     MqlTradeRequest req = {};
     MqlTradeResult res = {};
     bool ok = false;
+    bool is_position = false;
 
     if (PositionSelectByTicket(ticket)) {
+        is_position = true;
         long pos_magic = PositionGetInteger(POSITION_MAGIC);
-        if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != 0 && pos_magic != InpMagicNumber) {
+        if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — position ticket ", ticket, " magic (", pos_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
@@ -710,7 +769,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         ok = OrderSend(req, res);
     } else if (OrderSelect(ticket)) {
         long ord_magic = OrderGetInteger(ORDER_MAGIC);
-        if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != 0 && ord_magic != InpMagicNumber) {
+        if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — pending order ticket ", ticket, " magic (", ord_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
@@ -736,6 +795,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
     PackU32(data, res.retcode);
     PackU64(data, res.deal);
     PackU64(data, res.order);
+    PackU64(data, (is_position ? ticket : 0));
     PackF64(data, res.volume);
     PackF64(data, res.price);
 
@@ -898,8 +958,9 @@ int OnInit() {
 
     g_running = true;
     g_authenticated = false;
-    EventSetMillisecondTimer(TIMER_INTERVAL_MS);
-    Print("MT5Bridge: pipe server ready — waiting for Rust client");
+    int timer_ms = (InpTimerIntervalMs > 0) ? InpTimerIntervalMs : 5;
+    EventSetMillisecondTimer(timer_ms);
+    Print("MT5Bridge: pipe server ready (timer=", timer_ms, "ms) — waiting for Rust client");
     return INIT_SUCCEEDED;
 }
 
@@ -959,32 +1020,35 @@ void OnTimer() {
         return;
     }
 
-    // Service one request per timer tick (non-blocking check first).
-    uchar peek_hdr[8];
-    uint  peek_read = 0, peek_avail = 0, peek_left = 0;
-    bool has_data = PeekNamedPipe(g_client, peek_hdr, 8,
-                                  peek_read, peek_avail, peek_left);
-    if (!has_data) {
-        // Pipe broke or client disconnected abruptly without shutdown
-        ResetPipeServer("client disconnected abruptly or pipe broken");
-        return;
-    }
+    // Service all available requests per timer tick (non-blocking check first).
+    while (true) {
+        uchar peek_hdr[8];
+        uint  peek_read = 0, peek_avail = 0, peek_left = 0;
+        bool has_data = PeekNamedPipe(g_client, peek_hdr, 8,
+                                      peek_read, peek_avail, peek_left);
+        if (!has_data) {
+            // Pipe broke or client disconnected abruptly without shutdown
+            ResetPipeServer("client disconnected abruptly or pipe broken");
+            return;
+        }
 
-    if (peek_avail < 8) return;  // need at least complete 8-byte header
+        if (peek_avail < 8) return;  // need at least complete 8-byte header
 
-    uint expected_pay_len = UnpackU32(peek_hdr, 4);
-    if (expected_pay_len > MAX_PAYLOAD_SIZE) {
-        Print("MT5Bridge: payload length ", expected_pay_len, " exceeds MAX_PAYLOAD_SIZE; dropping client");
-        ResetPipeServer("exceeded MAX_PAYLOAD_SIZE");
-        return;
-    }
+        uint expected_pay_len = UnpackU32(peek_hdr, 4);
+        if (expected_pay_len > MAX_PAYLOAD_SIZE) {
+            Print("MT5Bridge: payload length ", expected_pay_len, " exceeds MAX_PAYLOAD_SIZE; dropping client");
+            ResetPipeServer("exceeded MAX_PAYLOAD_SIZE");
+            return;
+        }
 
-    // If full payload has not arrived yet, wait for next timer tick without blocking
-    if (peek_avail < 8 + expected_pay_len) return;
+        // If full payload has not arrived yet, wait for next timer tick without blocking
+        if (peek_avail < 8 + expected_pay_len) return;
 
-    bool ok = DispatchRequest(g_client);
-    if (!ok) {
-        ResetPipeServer("client disconnected");
+        bool ok = DispatchRequest(g_client);
+        if (!ok) {
+            ResetPipeServer("client disconnected");
+            return;
+        }
     }
 }
 

@@ -53,6 +53,13 @@ static CRITICAL_SECTION g_cs;
 /* RAII guard for g_cs. */
 struct Lock { Lock() { EnterCriticalSection(&g_cs); } ~Lock() { LeaveCriticalSection(&g_cs); } };
 
+static void disconnect_locked() {
+    if (g_pipe != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_pipe);
+        g_pipe = INVALID_HANDLE_VALUE;
+    }
+}
+
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) InitializeCriticalSection(&g_cs);
     if (reason == DLL_PROCESS_DETACH) DeleteCriticalSection(&g_cs);
@@ -62,24 +69,30 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
 /* ── Low-level I/O ───────────────────────────────────────────────────────── */
 
 static bool write_all(const void* data, DWORD len) {
+    if (g_pipe == INVALID_HANDLE_VALUE) return false;
     const char* p = static_cast<const char*>(data);
     DWORD done = 0;
     while (done < len) {
         DWORD n = 0;
-        if (!WriteFile(g_pipe, p + done, len - done, &n, nullptr) || n == 0)
+        if (!WriteFile(g_pipe, p + done, len - done, &n, nullptr) || n == 0) {
+            disconnect_locked();
             return false;
+        }
         done += n;
     }
     return true;
 }
 
 static bool read_all(void* data, DWORD len) {
+    if (g_pipe == INVALID_HANDLE_VALUE) return false;
     char* p = static_cast<char*>(data);
     DWORD done = 0;
     while (done < len) {
         DWORD n = 0;
-        if (!ReadFile(g_pipe, p + done, len - done, &n, nullptr) || n == 0)
+        if (!ReadFile(g_pipe, p + done, len - done, &n, nullptr) || n == 0) {
+            disconnect_locked();
             return false;
+        }
         done += n;
     }
     return true;
@@ -102,7 +115,10 @@ static bool recv_packet(int32_t& status, std::string& data) {
     const uint32_t MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MB upper limit (aligned with MQL5)
     RespHdr hdr{};
     if (!read_all(&hdr, sizeof hdr)) return false;
-    if (hdr.len > MAX_PAYLOAD) return false;
+    if (hdr.len > MAX_PAYLOAD) {
+        disconnect_locked();
+        return false;
+    }
     status = hdr.status;
     data.resize(hdr.len);
     return hdr.len == 0 || read_all(&data[0], hdr.len);
@@ -137,10 +153,7 @@ extern "C" {
 int Initialize(int64_t login, const char* password, const char* server) {
     Lock lk;
 
-    if (g_pipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(g_pipe);
-        g_pipe = INVALID_HANDLE_VALUE;
-    }
+    disconnect_locked();
 
     // Determine pipe name from environment or fallback to default
     char pipe_name[256] = {0};
@@ -205,19 +218,30 @@ int Initialize(int64_t login, const char* password, const char* server) {
     p.str(server ? server : "");
     p.u32(MT5_BRIDGE_PROTOCOL_VERSION);
 
-    if (!send_packet(CMD_INIT, p.buf)) return 0;
+    if (!send_packet(CMD_INIT, p.buf)) {
+        disconnect_locked();
+        return 0;
+    }
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data)) return 0;
-    return (st == 1) ? 1 : 0;
+    if (!recv_packet(st, data)) {
+        disconnect_locked();
+        return 0;
+    }
+
+    if (st != 1) {
+        disconnect_locked();
+        return 0;
+    }
+
+    return 1;
 }
 
 int Shutdown(void) {
     Lock lk;
     if (g_pipe == INVALID_HANDLE_VALUE) return 1;
     send_packet(CMD_SHUTDOWN, {});
-    CloseHandle(g_pipe);
-    g_pipe = INVALID_HANDLE_VALUE;
+    disconnect_locked();
     return 1;
 }
 

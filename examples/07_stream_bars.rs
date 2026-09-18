@@ -27,37 +27,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Starting real-time closed-bar stream for {} {}...",
         symbol, timeframe
     );
-    println!("(Listening for completed candles; poll interval: 1s)");
+    println!("(Listening for completed candles; poll interval: 1s, timeout: 3s)");
 
     let mut rx = stream_bars(client, symbol, timeframe, Duration::from_secs(1));
 
     let mut count = 0;
-    while let Some(bar) = rx.recv().await {
-        let dt = Utc.timestamp_opt(bar.time, 0).single().unwrap_or_default();
-        let trend = if bar.is_bullish() {
-            "BULLISH"
-        } else if bar.is_bearish() {
-            "BEARISH"
-        } else {
-            "DOJI"
-        };
+    while count < 1 {
+        match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+            Ok(Some(bar)) => {
+                let dt = Utc.timestamp_opt(bar.time, 0).single().unwrap_or_default();
+                let trend = if bar.is_bullish() {
+                    "BULLISH"
+                } else if bar.is_bearish() {
+                    "BEARISH"
+                } else {
+                    "DOJI"
+                };
 
-        println!(
-            "[{}] Closed Bar -> Open: {:.5} | High: {:.5} | Low: {:.5} | Close: {:.5} | Range: {:.5} | Vol: {:.0} [{}]",
-            dt.format("%Y-%m-%d %H:%M:%S"),
-            bar.open,
-            bar.high,
-            bar.low,
-            bar.close,
-            bar.range(),
-            bar.volume,
-            trend
-        );
+                println!(
+                    "[{}] Closed Bar -> Open: {:.5} | High: {:.5} | Low: {:.5} | Close: {:.5} | Range: {:.5} | Vol: {:.0} [{}]",
+                    dt.format("%Y-%m-%d %H:%M:%S"),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.range(),
+                    bar.volume,
+                    trend
+                );
 
-        count += 1;
-        if count >= 1 {
-            println!("Received {} closed bar. Exiting stream.", count);
-            break;
+                count += 1;
+                if count >= 1 {
+                    println!("Received {} closed bar. Exiting stream.", count);
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                println!("No new closed bars within 3s timeout (market may be closed/idle). Exiting stream.");
+                break;
+            }
         }
     }
 

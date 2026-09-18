@@ -50,20 +50,21 @@ typedef struct {
     uint32_t retcode;
     uint64_t deal;
     uint64_t order;
+    uint64_t position;
     double   volume;
     double   price;
-} Mt5TradeResult;        /* 36 bytes */
+} Mt5TradeResult;        /* 44 bytes */
 
 #pragma pack(pop)
 
 /* Protocol version for wire handshake compatibility checks */
-#define MT5_BRIDGE_PROTOCOL_VERSION 1
+#define MT5_BRIDGE_PROTOCOL_VERSION 2
 
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5SymInfo) == 60, "Mt5SymInfo size must be exactly 60 bytes");
 static_assert(sizeof(Mt5Rate) == 60, "Mt5Rate size must be exactly 60 bytes");
 static_assert(sizeof(Mt5Tick) == 44, "Mt5Tick size must be exactly 44 bytes");
-static_assert(sizeof(Mt5TradeResult) == 36, "Mt5TradeResult size must be exactly 36 bytes");
+static_assert(sizeof(Mt5TradeResult) == 44, "Mt5TradeResult size must be exactly 44 bytes");
 #endif
 
 #ifdef __cplusplus

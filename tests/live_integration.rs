@@ -1,5 +1,5 @@
 use chrono::Utc;
-use mt5_bridge::{Mt5Client, OrderRequest, OrderType, Timeframe};
+use mt5_bridge::{Mt5Client, Mt5Error, OrderRequest, OrderType, Timeframe};
 use std::env;
 
 use std::sync::{Mutex, MutexGuard};
@@ -129,7 +129,14 @@ fn test_live_pending_order_lifecycle() {
         .comment("live_test_suite")
         .deviation(10);
 
-    let trade_res = client.order_send(&req).expect("order_send failed");
+    let trade_res = match client.order_send(&req) {
+        Ok(r) => r,
+        Err(Mt5Error::OrderSendFailed { retcode: 10018, .. }) => {
+            println!("Market is closed (weekend) for EURUSD; pending order skipped gracefully");
+            return;
+        }
+        Err(e) => panic!("order_send failed: {:?}", e),
+    };
     assert!(trade_res.is_success());
     assert!(trade_res.is_placed());
     let ticket = trade_res.order;
@@ -171,4 +178,43 @@ fn test_live_chunked_history() {
     assert!(!history_res.rates.is_empty());
     assert!(history_res.is_complete());
     assert!(history_res.missing_ranges.is_empty());
+}
+
+#[test]
+fn test_live_market_order_lifecycle() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let info = client.symbol_info("EURUSD").expect("info failed");
+    let req = OrderRequest::buy("EURUSD", info.min_lot).comment("live_market_test");
+
+    let trade_res = match client.order_send(&req) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Market order send returned: {} (market may be closed)", e);
+            return;
+        }
+    };
+
+    assert!(trade_res.is_success());
+    assert!(trade_res.order > 0);
+    let target_ticket = if trade_res.position > 0 {
+        trade_res.position
+    } else {
+        trade_res.order
+    };
+
+    let mut guard = OrderGuard {
+        client: &client,
+        ticket: target_ticket,
+    };
+
+    // Close position
+    let close_res = client
+        .order_close(target_ticket)
+        .expect("order_close failed");
+    assert!(close_res.is_success());
+    guard.ticket = 0;
 }

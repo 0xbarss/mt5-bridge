@@ -213,10 +213,10 @@ impl SymbolInfo {
     }
 
     /// Normalizes and clamps a lot size according to `lot_step`, `min_lot`, and `max_lot`.
-    /// Returns 0.0 if the requested lot is strictly below `min_lot` (does not silently inflate risk).
+    /// Returns 0.0 if the requested lot is non-finite, <= 0.0, or strictly below `min_lot` (does not silently inflate risk).
     pub fn round_lot(&self, lot: f64) -> f64 {
-        if self.lot_step <= 0.0 || lot <= 0.0 {
-            return lot;
+        if !lot.is_finite() || lot <= 0.0 || self.lot_step <= 0.0 {
+            return 0.0;
         }
         if lot < self.min_lot {
             return 0.0;
@@ -592,6 +592,8 @@ pub struct TradeResult {
     pub deal: u64,
     /// Order ticket number.
     pub order: u64,
+    /// Position ticket number associated with the trade.
+    pub position: u64,
     /// Executed trade volume.
     pub volume: f64,
     /// Execution price.
@@ -599,11 +601,12 @@ pub struct TradeResult {
 }
 
 impl TradeResult {
-    pub(crate) fn from_raw(raw: Mt5TradeResult) -> Self {
+    pub fn from_raw(raw: Mt5TradeResult) -> Self {
         Self {
             retcode: raw.retcode,
             deal: raw.deal,
             order: raw.order,
+            position: raw.position,
             volume: raw.volume,
             price: raw.price,
         }

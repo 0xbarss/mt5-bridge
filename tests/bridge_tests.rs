@@ -78,10 +78,11 @@ fn test_round_lot_edge_cases() {
         digits: 5,
     };
 
-    // Below min_lot should return 0.0 to prevent risk inflation
+    // Below min_lot or invalid should return 0.0 to prevent risk inflation
     assert_eq!(sym.round_lot(0.005), 0.0);
     assert_eq!(sym.round_lot(0.0), 0.0);
-    assert_eq!(sym.round_lot(-1.0), -1.0);
+    assert_eq!(sym.round_lot(-1.0), 0.0);
+    assert_eq!(sym.round_lot(f64::NAN), 0.0);
     assert_eq!(sym.round_lot(0.01), 0.01);
     assert_eq!(sym.round_lot(0.019), 0.02);
     assert_eq!(sym.round_lot(150.0), 100.0);
@@ -240,10 +241,12 @@ fn test_trade_result_success_retcodes() {
         retcode: 10009, // DONE
         deal: 1001,
         order: 2001,
+        position: 3001,
         volume: 0.1,
         price: 1.1000,
     };
     assert!(res_filled.is_success());
+    assert_eq!(res_filled.position, 3001);
     assert_eq!(res_filled.status(), TradeStatus::Filled);
     assert!(res_filled.is_filled());
     assert!(!res_filled.is_placed());
@@ -254,6 +257,7 @@ fn test_trade_result_success_retcodes() {
         retcode: 10009,
         deal: 0,
         order: 2002,
+        position: 0,
         volume: 0.1,
         price: 1.1000,
     };
@@ -267,6 +271,7 @@ fn test_trade_result_success_retcodes() {
         retcode: 10008,
         deal: 0,
         order: 2003,
+        position: 0,
         volume: 0.1,
         price: 1.1000,
     };
@@ -280,6 +285,7 @@ fn test_trade_result_success_retcodes() {
         retcode: 10010,
         deal: 1003,
         order: 2004,
+        position: 3004,
         volume: 0.05,
         price: 1.1000,
     };
@@ -293,6 +299,7 @@ fn test_trade_result_success_retcodes() {
         retcode: 10019,
         deal: 0,
         order: 0,
+        position: 0,
         volume: 0.0,
         price: 0.0,
     };
@@ -396,7 +403,28 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 1);
+    assert_eq!(PROTOCOL_VERSION, 2);
+}
+
+#[test]
+fn test_trade_result_from_raw() {
+    use mt5_bridge::ffi::Mt5TradeResult;
+
+    let raw = Mt5TradeResult {
+        retcode: 10009,
+        deal: 12345,
+        order: 67890,
+        position: 112233,
+        volume: 0.5,
+        price: 1.0850,
+    };
+    let res = TradeResult::from_raw(raw);
+    assert_eq!(res.retcode, 10009);
+    assert_eq!(res.deal, 12345);
+    assert_eq!(res.order, 67890);
+    assert_eq!(res.position, 112233);
+    assert_eq!(res.volume, 0.5);
+    assert_eq!(res.price, 1.0850);
 }
 
 #[test]

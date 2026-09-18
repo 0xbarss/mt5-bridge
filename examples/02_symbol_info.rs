@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure in-memory cache TTL for symbol specifications
     client.set_symbol_cache_ttl(std::time::Duration::from_secs(120));
 
-    let symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD"];
+    let symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "USDCAD"];
 
     println!(
         "{:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8}",

@@ -257,14 +257,22 @@ impl Mt5Client {
         let tf_const = timeframe.to_mt5_const();
         let tf_secs = timeframe.seconds().max(1);
 
-        let estimated_bars = ((to - from) / tf_secs + 10).max(1) as usize;
+        // Safe maximum limit to prevent excessive memory allocations in a single call
+        const MAX_SINGLE_FETCH_BARS: i64 = 1_000_000;
+        let mut from_val = from;
+        let diff_bars = (to - from) / tf_secs;
+        if diff_bars > MAX_SINGLE_FETCH_BARS {
+            from_val = to - (MAX_SINGLE_FETCH_BARS * tf_secs);
+        }
+
+        let estimated_bars = ((to - from_val) / tf_secs + 100).max(100) as usize;
         let mut buf = vec![Mt5Rate::default(); estimated_bars];
 
         let filled = unsafe {
             (self.fn_rates)(
                 sym_c.as_ptr(),
                 tf_const,
-                from,
+                from_val,
                 to,
                 buf.as_mut_ptr(),
             )

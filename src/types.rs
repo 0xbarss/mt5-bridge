@@ -473,7 +473,7 @@ impl TradeResult {
 
     /// Returns `true` if the order was successfully completed or placed.
     pub fn is_success(&self) -> bool {
-        self.retcode == 10009 || self.retcode == 10008
+        self.retcode == 10009 || self.retcode == 10008 || self.retcode == 10010
     }
 
     /// Human-readable explanation of the return code.

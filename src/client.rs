@@ -312,22 +312,24 @@ impl Mt5Client {
         let tf_const = timeframe.to_mt5_const();
         let tf_secs = timeframe.seconds().max(1);
 
-        // Safe maximum limit to prevent excessive memory allocations in a single call
+        // Maximum limit to prevent unbounded memory allocation in a single unchunked call
         const MAX_SINGLE_FETCH_BARS: i64 = 1_000_000;
-        let mut from_val = from;
         let diff_bars = (to - from) / tf_secs;
         if diff_bars > MAX_SINGLE_FETCH_BARS {
-            from_val = to - (MAX_SINGLE_FETCH_BARS * tf_secs);
+            return Err(Mt5Error::Other(format!(
+                "Requested range ({} bars) exceeds maximum single fetch limit of {} bars. Please use copy_rates_chunked() for large historical datasets.",
+                diff_bars, MAX_SINGLE_FETCH_BARS
+            )));
         }
 
-        let estimated_bars = ((to - from_val) / tf_secs + 100).max(100) as usize;
+        let estimated_bars = ((to - from) / tf_secs + 100).max(100) as usize;
         let mut buf = vec![Mt5Rate::default(); estimated_bars];
 
         let filled = unsafe {
             (self.fn_rates)(
                 sym_c.as_ptr(),
                 tf_const,
-                from_val,
+                from,
                 to,
                 buf.as_mut_ptr(),
                 buf.len() as c_int,
@@ -346,18 +348,15 @@ impl Mt5Client {
         Ok(rates)
     }
 
-    /// Robust, chunked historical data downloader.
-    ///
-    /// Requests historical bars in chunks (default 2,000 bars per chunk) with a retry loop
-    /// to give MetaTrader 5 time to asynchronously fetch older history from the broker server.
-    pub fn copy_rates_chunked(
+    /// Robust, chunked historical data downloader with completeness and missing range tracking.
+    pub fn copy_rates_chunked_detailed(
         &self,
         symbol: &str,
         timeframe: Timeframe,
         start: i64,
         end: i64,
         chunk_bars: usize,
-    ) -> Result<Vec<Rate>> {
+    ) -> Result<HistoryResult> {
         if start > end {
             return Err(Mt5Error::InvalidTimeRange { start, end });
         }
@@ -370,6 +369,7 @@ impl Mt5Client {
         let chunk_duration = (chunk_size as i64) * tf_secs;
 
         let mut all_rates: Vec<Rate> = Vec::new();
+        let mut missing_ranges: Vec<(i64, i64)> = Vec::new();
         let mut current_start = start;
 
         while current_start <= end {
@@ -380,6 +380,7 @@ impl Mt5Client {
             let max_attempts = 30; // up to 3 seconds wait
             let mut last_count = -1;
             let mut chunk_result: Vec<Rate> = Vec::new();
+            let mut chunk_failed = false;
 
             while attempts < max_attempts {
                 let mut buf = vec![Mt5Rate::default(); max_bars];
@@ -418,14 +419,19 @@ impl Mt5Client {
                         warn!(
                             symbol = symbol,
                             start = current_start,
-                            "CopyRates returned error multiple times; continuing"
+                            "CopyRates returned error multiple times; tracking as missing range"
                         );
+                        chunk_failed = true;
                         break;
                     }
                 }
 
                 attempts += 1;
                 std::thread::sleep(Duration::from_millis(100));
+            }
+
+            if chunk_failed {
+                missing_ranges.push((current_start, current_end));
             }
 
             let filtered_chunk: Vec<Rate> = chunk_result
@@ -441,7 +447,35 @@ impl Mt5Client {
         all_rates.sort_by_key(|r| r.time);
         all_rates.dedup_by_key(|r| r.time);
 
-        Ok(all_rates)
+        let complete = missing_ranges.is_empty();
+        Ok(HistoryResult {
+            rates: all_rates,
+            complete,
+            missing_ranges,
+        })
+    }
+
+    /// Robust, chunked historical data downloader.
+    ///
+    /// Requests historical bars in chunks (default 2,000 bars per chunk) with a retry loop
+    /// to give MetaTrader 5 time to asynchronously fetch older history from the broker server.
+    pub fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        start: i64,
+        end: i64,
+        chunk_bars: usize,
+    ) -> Result<Vec<Rate>> {
+        let res = self.copy_rates_chunked_detailed(symbol, timeframe, start, end, chunk_bars)?;
+        if !res.complete {
+            warn!(
+                symbol = symbol,
+                missing = res.missing_ranges.len(),
+                "copy_rates_chunked finished with missing ranges"
+            );
+        }
+        Ok(res.rates)
     }
 
     /// Convenience wrapper around `copy_rates` that returns clean `Bar` structures.
@@ -461,6 +495,9 @@ impl Mt5Client {
         let sym_c = CString::new(req.symbol.as_str())?;
         let cmt_c = CString::new(req.comment.as_str())?;
         let otype = req.order_type as c_int;
+        let dev = req.deviation.unwrap_or(10);
+        let exp = req.expiration.unwrap_or(0);
+        let mag = req.magic.unwrap_or(0);
 
         let mut res = Mt5TradeResult::default();
         let ret = unsafe {
@@ -472,6 +509,9 @@ impl Mt5Client {
                 req.stop_loss as c_double,
                 req.take_profit as c_double,
                 cmt_c.as_ptr(),
+                dev,
+                exp,
+                mag,
                 &mut res,
             )
         };
@@ -493,6 +533,7 @@ impl Mt5Client {
             ticket = trade_result.order,
             deal = trade_result.deal,
             price = trade_result.price,
+            status = ?trade_result.status(),
             "Order executed successfully"
         );
 
@@ -518,23 +559,41 @@ impl Mt5Client {
             ticket = ticket,
             deal = trade_result.deal,
             price = trade_result.price,
+            status = ?trade_result.status(),
             "Position closed successfully"
         );
 
         Ok(trade_result)
     }
 
-    /// Modify the Stop Loss and/or Take Profit of an open position.
-    pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<()> {
+    /// Modify the Stop Loss and/or Take Profit of an open position or pending order.
+    pub fn order_modify(
+        &self,
+        ticket: u64,
+        stop_loss: f64,
+        take_profit: f64,
+    ) -> Result<TradeResult> {
         let fn_mod = self
             .fn_modify
             .ok_or(Mt5Error::UnsupportedFeature("OrderModify"))?;
 
-        let ret = unsafe { fn_mod(ticket, stop_loss as c_double, take_profit as c_double) };
-        if ret != 1 {
+        let mut res = Mt5TradeResult::default();
+        let ret = unsafe {
+            fn_mod(
+                ticket,
+                stop_loss as c_double,
+                take_profit as c_double,
+                &mut res,
+            )
+        };
+
+        let trade_result = TradeResult::from_raw(res);
+
+        if ret != 1 || !trade_result.is_success() {
             return Err(Mt5Error::OrderModifyFailed {
                 ticket,
-                retcode: ret,
+                retcode: trade_result.retcode,
+                description: mt5_retcode_description(trade_result.retcode),
             });
         }
 
@@ -542,9 +601,10 @@ impl Mt5Client {
             ticket = ticket,
             sl = stop_loss,
             tp = take_profit,
-            "Order modified"
+            retcode = trade_result.retcode,
+            "Order modified successfully"
         );
-        Ok(())
+        Ok(trade_result)
     }
 
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.

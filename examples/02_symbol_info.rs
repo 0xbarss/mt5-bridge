@@ -17,18 +17,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD"];
 
     println!(
-        "{:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8}",
-        "Symbol", "Point", "TickVal", "MinLot", "MaxLot", "LotStep", "Digits"
+        "{:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8}",
+        "Symbol", "Point", "TickSize", "TickVal", "MinLot", "MaxLot", "LotStep", "Digits"
     );
-    println!("{:-<70}", "");
+    println!("{:-<80}", "");
 
     for symbol in symbols {
         match client.symbol_info(symbol) {
             Ok(info) => {
                 println!(
-                    "{:<10} {:<10.5} {:<10.2} {:<10.2} {:<10.2} {:<10.2} {:<8}",
+                    "{:<10} {:<10.5} {:<10.5} {:<10.2} {:<10.2} {:<10.2} {:<10.2} {:<8}",
                     info.symbol,
                     info.point,
+                    info.tick_size,
                     info.tick_value,
                     info.min_lot,
                     info.max_lot,
@@ -41,8 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rounded = info.round_lot(raw_lot);
                 let is_valid = info.is_valid_lot(rounded);
                 let p_val = info.point_value(rounded);
+                let raw_price = 1.0854321;
+                let rounded_price = info.round_price(raw_price);
                 println!(
-                    "  ↳ Lot {raw_lot} -> rounded: {rounded} (valid: {is_valid}) | 1-point move value: ${p_val:.5}"
+                    "  ↳ Lot {raw_lot} -> {rounded} (valid: {is_valid}) | 1-pt move: ${p_val:.5} | Price {raw_price} -> {rounded_price}"
                 );
             }
             Err(e) => {

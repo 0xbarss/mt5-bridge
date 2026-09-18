@@ -24,9 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let volume = info.min_lot; // Use minimum allowed lot size
     let point = info.point;
 
-    // Define Stop Loss 50 points below Ask, Take Profit 100 points above Ask
-    let sl = tick.ask - (50.0 * point);
-    let tp = tick.ask + (100.0 * point);
+    // Define Stop Loss 200 points below Bid, Take Profit 400 points above Bid
+    // Always round prices using info.round_price() to ensure tick alignment and broker acceptance
+    let sl = info.round_price(tick.bid - (200.0 * point));
+    let tp = info.round_price(tick.bid + (400.0 * point));
 
     // 2. Prepare and send Buy market order
     let order_req = OrderRequest::buy(symbol, volume)
@@ -34,7 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take_profit(tp)
         .comment("mt5_bridge_test");
 
-    println!("Placing market BUY order for {:.2} lots...", volume);
+    println!(
+        "Placing market BUY order for {:.2} lots (SL: {:.5}, TP: {:.5})...",
+        volume, sl, tp
+    );
     let result = client.order_send(&order_req)?;
 
     println!("✓ Order opened successfully!");
@@ -42,22 +46,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Deal:     {}", result.deal);
     println!("  Price:    {:.5}", result.price);
     println!("  Volume:   {:.2}", result.volume);
+    println!(
+        "  Status:   {:?} ({})",
+        result.status(),
+        result.description()
+    );
 
-    // 3. Modify Stop Loss (e.g. move SL closer by 20 points)
-    let new_sl = tick.ask - (30.0 * point);
+    // 3. Modify Stop Loss (move SL closer by 50 points, keeping tick alignment)
+    let new_sl = info.round_price(tick.bid - (150.0 * point));
     println!(
         "Modifying SL for ticket {} to {:.5}...",
         result.order, new_sl
     );
-    client.order_modify(result.order, new_sl, tp)?;
-    println!("✓ Order SL modified successfully!");
+    let mod_res = client.order_modify(result.order, new_sl, tp)?;
+    println!(
+        "✓ Order SL modified successfully! (retcode: {} - {})",
+        mod_res.retcode,
+        mod_res.description()
+    );
 
     // 4. Close the position by ticket
     println!("Closing position ticket {}...", result.order);
     let close_res = client.order_close(result.order)?;
     println!(
-        "✓ Position closed at price {:.5} (Deal: {})",
-        close_res.price, close_res.deal
+        "✓ Position closed at price {:.5} (Deal: {}, retcode: {} - {})",
+        close_res.price,
+        close_res.deal,
+        close_res.retcode,
+        close_res.description()
     );
 
     Ok(())

@@ -18,12 +18,13 @@
 typedef struct {
     double   point;
     double   tick_value;
+    double   tick_size;
     double   lot_step;
     double   min_lot;
     double   max_lot;
     double   spread;
     int32_t  digits;
-} Mt5SymInfo;            /* 52 bytes */
+} Mt5SymInfo;            /* 60 bytes */
 
 typedef struct {
     int64_t  time;
@@ -73,21 +74,23 @@ MT5_API int CopyRates(const char* symbol, int timeframe, int64_t from,
 MT5_API int AccountInfo(double* balance, double* equity,
                         double* margin,  double* free_margin);
 
-/* Open a market order. Returns 1 on success. */
+/* Open or place an order. Returns 1 on success. */
 MT5_API int OrderSend(const char* symbol, int type, double volume,
                       double price, double sl, double tp,
-                      const char* comment, Mt5TradeResult* result);
+                      const char* comment, uint32_t deviation,
+                      int64_t expiration, uint64_t magic,
+                      Mt5TradeResult* result);
 
 /* Close position by ticket. Returns 1 on success. */
 MT5_API int OrderClose(uint64_t ticket, Mt5TradeResult* result);
 
 /* Modify SL/TP. Returns 1 on success. */
-MT5_API int OrderModify(uint64_t ticket, double sl, double tp);
+MT5_API int OrderModify(uint64_t ticket, double sl, double tp, Mt5TradeResult* result);
 
 /* Latest tick for a symbol. Returns 1 on success. */
 MT5_API int SymbolInfoTick(const char* symbol, Mt5Tick* tick);
 
-/* Symbol properties (point size, tick value, lot limits, digits). Returns 1 on success. */
+/* Symbol properties (point size, tick value, tick size, lot limits, digits). Returns 1 on success. */
 MT5_API int SymbolInfoFull(const char* symbol, Mt5SymInfo* info);
 
 #ifdef __cplusplus

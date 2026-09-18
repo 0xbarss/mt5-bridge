@@ -49,8 +49,12 @@ pub enum Mt5Error {
         description: &'static str,
     },
 
-    #[error("OrderModify failed for ticket {ticket} (retcode {retcode})")]
-    OrderModifyFailed { ticket: u64, retcode: i32 },
+    #[error("OrderModify failed for ticket {ticket} (retcode {retcode}: {description})")]
+    OrderModifyFailed {
+        ticket: u64,
+        retcode: u32,
+        description: &'static str,
+    },
 
     #[error("Optional export '{0}' is not supported by the loaded DLL")]
     UnsupportedFeature(&'static str),

@@ -99,7 +99,7 @@ static bool send_packet(Cmd cmd, const std::string& payload) {
 }
 
 static bool recv_packet(int32_t& status, std::string& data) {
-    const uint32_t MAX_PAYLOAD = 64 * 1024 * 1024; // 64 MB upper limit
+    const uint32_t MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MB upper limit (aligned with MQL5)
     RespHdr hdr{};
     if (!read_all(&hdr, sizeof hdr)) return false;
     if (hdr.len > MAX_PAYLOAD) return false;
@@ -113,6 +113,7 @@ static bool recv_packet(int32_t& status, std::string& data) {
 struct Packer {
     std::string buf;
 
+    void u32(uint32_t v) { append(&v, 4); }
     void i32(int32_t  v) { append(&v, 4); }
     void i64(int64_t  v) { append(&v, 8); }
     void u64(uint64_t v) { append(&v, 8); }
@@ -265,7 +266,9 @@ int AccountInfo(double* balance, double* equity,
 
 int OrderSend(const char* symbol, int type, double volume,
               double price, double sl, double tp,
-              const char* comment, Mt5TradeResult* result) {
+              const char* comment, uint32_t deviation,
+              int64_t expiration, uint64_t magic,
+              Mt5TradeResult* result) {
     Lock lk;
     if (g_pipe == INVALID_HANDLE_VALUE) return 0;
 
@@ -277,6 +280,9 @@ int OrderSend(const char* symbol, int type, double volume,
     p.f64(sl);
     p.f64(tp);
     p.str(comment);
+    p.u32(deviation);
+    p.i64(expiration);
+    p.u64(magic);
 
     if (!send_packet(CMD_ORDER_SEND, p.buf)) return 0;
 
@@ -308,7 +314,7 @@ int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
     return (st == 1) ? 1 : 0;
 }
 
-int OrderModify(uint64_t ticket, double sl, double tp) {
+int OrderModify(uint64_t ticket, double sl, double tp, Mt5TradeResult* result) {
     Lock lk;
     if (g_pipe == INVALID_HANDLE_VALUE) return 0;
 
@@ -321,6 +327,10 @@ int OrderModify(uint64_t ticket, double sl, double tp) {
 
     int32_t st = 0; std::string data;
     if (!recv_packet(st, data)) return 0;
+
+    if (result && data.size() >= sizeof(Mt5TradeResult)) {
+        std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
+    }
     return (st == 1) ? 1 : 0;
 }
 

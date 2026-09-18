@@ -31,12 +31,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Time range: {} to {}", start, now);
 
-    let rates = client.copy_rates_chunked(symbol, timeframe, start, now, chunk_bars)?;
+    let history_res =
+        client.copy_rates_chunked_detailed(symbol, timeframe, start, now, chunk_bars)?;
 
     println!(
-        "✓ Successfully downloaded {} historical bars total!",
-        rates.len()
+        "✓ Successfully downloaded {} historical bars total! (Complete: {}, missing chunks: {})",
+        history_res.rates.len(),
+        history_res.is_complete(),
+        history_res.missing_ranges.len()
     );
+
+    let rates = history_res.rates;
 
     if let Some(first) = rates.first() {
         let dt_first = Utc

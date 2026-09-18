@@ -24,8 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let point = info.point;
     let volume = info.min_lot;
 
-    // Place BuyLimit 50 points below current Ask
-    let limit_price = ((tick.ask - (50.0 * point)) * 100000.0).round() / 100000.0;
+    // Place BuyLimit 200 points below current Bid, rounded to broker tick size
+    let limit_price = info.round_price(tick.bid - (200.0 * point));
     println!(
         "Placing BuyLimit order at {:.5} for {:.2} lots...",
         limit_price, volume
@@ -38,14 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Pending BuyLimit order placed successfully!");
     println!("  Ticket:   {}", result.order);
     println!("  Retcode:  {} ({})", result.retcode, result.description());
+    println!("  Status:   {:?}", result.status());
     println!("  Price:    {:.5}", result.price);
 
     // Cancel the pending order by ticket
     println!("Cancelling pending order ticket {}...", result.order);
     let cancel_res = client.order_close(result.order)?;
     println!(
-        "✓ Pending order cancelled successfully! (retcode: {})",
-        cancel_res.retcode
+        "✓ Pending order cancelled successfully! (retcode: {} - {})",
+        cancel_res.retcode,
+        cancel_res.description()
     );
 
     Ok(())

@@ -5,12 +5,13 @@
 
 use std::os::raw::{c_char, c_double, c_int};
 
-/// Wire format for symbol specification (52 bytes).
+/// Wire format for symbol specification (60 bytes).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5SymInfo {
     pub point: f64,
     pub tick_value: f64,
+    pub tick_size: f64,
     pub lot_step: f64,
     pub min_lot: f64,
     pub max_lot: f64,
@@ -59,7 +60,7 @@ pub struct Mt5TradeResult {
 
 // Ensure struct memory layouts match C header at compile-time.
 const _: () = {
-    assert!(std::mem::size_of::<Mt5SymInfo>() == 52);
+    assert!(std::mem::size_of::<Mt5SymInfo>() == 60);
     assert!(std::mem::size_of::<Mt5Rate>() == 60);
     assert!(std::mem::size_of::<Mt5Tick>() == 44);
     assert!(std::mem::size_of::<Mt5TradeResult>() == 36);
@@ -79,10 +80,13 @@ pub type FnSend = unsafe extern "C" fn(
     c_double,
     c_double,
     *const c_char,
+    u32,
+    i64,
+    u64,
     *mut Mt5TradeResult,
 ) -> c_int;
 pub type FnClose = unsafe extern "C" fn(u64, *mut Mt5TradeResult) -> c_int;
-pub type FnModify = unsafe extern "C" fn(u64, c_double, c_double) -> c_int;
+pub type FnModify = unsafe extern "C" fn(u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnSymTick = unsafe extern "C" fn(*const c_char, *mut Mt5Tick) -> c_int;
 pub type FnSymInfo = unsafe extern "C" fn(*const c_char, *mut Mt5SymInfo) -> c_int;
 

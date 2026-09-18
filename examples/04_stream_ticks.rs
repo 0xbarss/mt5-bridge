@@ -34,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         count += 1;
-        if count >= 20 {
-            println!("Received 20 ticks. Dropping receiver to stop background task.");
+        if count >= 5 {
+            println!("Received 5 ticks. Dropping receiver to stop background task.");
             break;
         }
     }

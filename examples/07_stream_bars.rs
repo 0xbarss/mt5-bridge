@@ -55,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         count += 1;
-        if count >= 3 {
-            println!("Received {} closed bars. Exiting stream.", count);
+        if count >= 1 {
+            println!("Received {} closed bar. Exiting stream.", count);
             break;
         }
     }

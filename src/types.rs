@@ -83,6 +83,11 @@ impl Timeframe {
         }
     }
 
+    /// Returns true for timeframes whose calendar length is variable (weeks and months).
+    pub fn is_calendar_interval(self) -> bool {
+        matches!(self, Timeframe::W1 | Timeframe::MN1)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Timeframe::M1 => "M1",
@@ -180,6 +185,7 @@ pub struct SymbolInfo {
     pub symbol: String,
     pub point: f64,
     pub tick_value: f64,
+    pub tick_size: f64,
     pub lot_step: f64,
     pub min_lot: f64,
     pub max_lot: f64,
@@ -193,6 +199,7 @@ impl SymbolInfo {
             symbol: symbol.to_string(),
             point: raw.point,
             tick_value: raw.tick_value,
+            tick_size: raw.tick_size,
             lot_step: raw.lot_step,
             min_lot: raw.min_lot,
             max_lot: raw.max_lot,
@@ -221,7 +228,7 @@ impl SymbolInfo {
 
     /// Checks if a lot size satisfies broker minimum, maximum, and lot step constraints.
     pub fn is_valid_lot(&self, lot: f64) -> bool {
-        if lot < self.min_lot || lot > self.max_lot {
+        if !lot.is_finite() || lot < self.min_lot || lot > self.max_lot {
             return false;
         }
         if self.lot_step > 0.0 {
@@ -235,8 +242,28 @@ impl SymbolInfo {
     }
 
     /// Monetary value of a 1-point price move for a given lot volume.
+    /// Properly scales when `tick_size` differs from `point` (e.g. for CFDs, indices, commodities).
     pub fn point_value(&self, volume: f64) -> f64 {
-        self.tick_value * volume
+        if self.tick_size > 0.0 {
+            (self.point / self.tick_size) * self.tick_value * volume
+        } else {
+            self.tick_value * volume
+        }
+    }
+
+    /// Normalizes a price according to `tick_size` and `digits`.
+    pub fn round_price(&self, price: f64) -> f64 {
+        if self.tick_size > 0.0 {
+            let steps = (price / self.tick_size).round();
+            let rounded = steps * self.tick_size;
+            let factor = 10f64.powi(self.digits as i32);
+            (rounded * factor).round() / factor
+        } else if self.digits > 0 {
+            let factor = 10f64.powi(self.digits as i32);
+            (price * factor).round() / factor
+        } else {
+            price
+        }
     }
 }
 
@@ -414,6 +441,9 @@ pub struct OrderRequest {
     pub stop_loss: f64,
     pub take_profit: f64,
     pub comment: String,
+    pub deviation: Option<u32>,
+    pub expiration: Option<i64>,
+    pub magic: Option<u64>,
 }
 
 impl OrderRequest {
@@ -427,6 +457,9 @@ impl OrderRequest {
             stop_loss: 0.0,
             take_profit: 0.0,
             comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
         }
     }
 
@@ -440,6 +473,9 @@ impl OrderRequest {
             stop_loss: 0.0,
             take_profit: 0.0,
             comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
         }
     }
 
@@ -458,6 +494,9 @@ impl OrderRequest {
             stop_loss: 0.0,
             take_profit: 0.0,
             comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
         }
     }
 
@@ -480,6 +519,34 @@ impl OrderRequest {
         self.comment = comment.into();
         self
     }
+
+    pub fn deviation(mut self, deviation: u32) -> Self {
+        self.deviation = Some(deviation);
+        self
+    }
+
+    pub fn expiration(mut self, expiration: i64) -> Self {
+        self.expiration = Some(expiration);
+        self
+    }
+
+    pub fn magic(mut self, magic: u64) -> Self {
+        self.magic = Some(magic);
+        self
+    }
+}
+
+/// Trade execution status classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TradeStatus {
+    /// Request completed in full (`TRADE_RETCODE_DONE` = 10009).
+    Filled,
+    /// Pending order placed (`TRADE_RETCODE_PLACED` = 10008).
+    Placed,
+    /// Only part of the requested volume was filled (`TRADE_RETCODE_DONE_PARTIAL` = 10010).
+    PartiallyFilled,
+    /// Order was rejected or failed.
+    Rejected,
 }
 
 /// Result returned from an order placement or closure.
@@ -508,14 +575,69 @@ impl TradeResult {
         }
     }
 
-    /// Returns `true` if the order was successfully completed or placed.
+    /// Classified status of the trade execution.
+    pub fn status(&self) -> TradeStatus {
+        match self.retcode {
+            10009 => {
+                if self.deal > 0 {
+                    TradeStatus::Filled
+                } else if self.order > 0 {
+                    TradeStatus::Placed
+                } else {
+                    TradeStatus::Filled
+                }
+            }
+            10008 => TradeStatus::Placed,
+            10010 => TradeStatus::PartiallyFilled,
+            _ => TradeStatus::Rejected,
+        }
+    }
+
+    /// Returns `true` if the order was successfully completed, placed, or partially filled.
     pub fn is_success(&self) -> bool {
-        self.retcode == 10009 || self.retcode == 10008 || self.retcode == 10010
+        matches!(
+            self.status(),
+            TradeStatus::Filled | TradeStatus::Placed | TradeStatus::PartiallyFilled
+        )
+    }
+
+    /// Returns `true` if the order was executed in full.
+    pub fn is_filled(&self) -> bool {
+        self.status() == TradeStatus::Filled
+    }
+
+    /// Returns `true` if a pending order was placed.
+    pub fn is_placed(&self) -> bool {
+        self.status() == TradeStatus::Placed
+    }
+
+    /// Returns `true` if only part of the requested volume was filled.
+    pub fn is_partially_filled(&self) -> bool {
+        self.status() == TradeStatus::PartiallyFilled
     }
 
     /// Human-readable explanation of the return code.
     pub fn description(&self) -> &'static str {
         mt5_retcode_description(self.retcode)
+    }
+}
+
+/// Detailed historical data result with completeness tracking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryResult {
+    /// Retrieved historical rates.
+    pub rates: Vec<Rate>,
+    /// Whether all requested chunks were successfully retrieved without error or missing ranges.
+    pub complete: bool,
+    /// Time ranges `(start, end)` that failed or were missing from broker history.
+    pub missing_ranges: Vec<(i64, i64)>,
+}
+
+impl HistoryResult {
+    /// Returns `true` if all requested chunks were retrieved with zero missing ranges.
+    #[inline]
+    pub fn is_complete(&self) -> bool {
+        self.complete && self.missing_ranges.is_empty()
     }
 }
 
@@ -546,6 +668,7 @@ mod tests {
             symbol: "EURUSD".to_string(),
             point: 0.00001,
             tick_value: 1.0,
+            tick_size: 0.00001,
             lot_step: 0.01,
             min_lot: 0.01,
             max_lot: 100.0,
@@ -587,7 +710,10 @@ mod tests {
         let req = OrderRequest::buy("EURUSD", 0.5)
             .stop_loss(1.0850)
             .take_profit(1.0950)
-            .comment("test_buy");
+            .comment("test_buy")
+            .deviation(20)
+            .expiration(1800000000)
+            .magic(123456);
 
         assert_eq!(req.symbol, "EURUSD");
         assert_eq!(req.order_type, OrderType::Buy);
@@ -595,5 +721,60 @@ mod tests {
         assert_eq!(req.stop_loss, 1.0850);
         assert_eq!(req.take_profit, 1.0950);
         assert_eq!(req.comment, "test_buy");
+        assert_eq!(req.deviation, Some(20));
+        assert_eq!(req.expiration, Some(1800000000));
+        assert_eq!(req.magic, Some(123456));
+    }
+
+    #[test]
+    fn test_point_value_scaling() {
+        // Forex: point == tick_size == 0.00001
+        let forex = SymbolInfo {
+            symbol: "EURUSD".to_string(),
+            point: 0.00001,
+            tick_value: 1.0,
+            tick_size: 0.00001,
+            lot_step: 0.01,
+            min_lot: 0.01,
+            max_lot: 100.0,
+            spread: 1.0,
+            digits: 5,
+        };
+        assert!((forex.point_value(1.0) - 1.0).abs() < 1e-6);
+
+        // Index / CFD: point is 0.01, but tick_size is 0.25, tick_value is 12.50
+        let index = SymbolInfo {
+            symbol: "US500".to_string(),
+            point: 0.01,
+            tick_value: 12.50,
+            tick_size: 0.25,
+            lot_step: 0.1,
+            min_lot: 0.1,
+            max_lot: 100.0,
+            spread: 2.0,
+            digits: 2,
+        };
+        // 1 point (0.01) is 0.01 / 0.25 = 0.04 ticks. 0.04 * 12.50 = 0.50 per lot.
+        assert!((index.point_value(1.0) - 0.50).abs() < 1e-6);
+        assert!((index.point_value(2.0) - 1.00).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_price_rounding() {
+        let sym = SymbolInfo {
+            symbol: "US500".to_string(),
+            point: 0.01,
+            tick_value: 12.50,
+            tick_size: 0.25,
+            lot_step: 0.1,
+            min_lot: 0.1,
+            max_lot: 100.0,
+            spread: 2.0,
+            digits: 2,
+        };
+        assert_eq!(sym.round_price(5000.12), 5000.0);
+        assert_eq!(sym.round_price(5000.13), 5000.25);
+        assert_eq!(sym.round_price(5000.37), 5000.25);
+        assert_eq!(sym.round_price(5000.38), 5000.50);
     }
 }

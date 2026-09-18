@@ -13,31 +13,42 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
 ## Table of Contents
 
 - [Why mt5-bridge?](#why-mt5-bridge)
-- [Architecture](#architecture)
+- [Architecture & Design](#architecture--design)
+  - [IPC Architecture](#ipc-architecture)
+  - [Security Model & Threat Assumptions](#security-model--threat-assumptions)
+  - [Trade Ownership & Magic Number Scope](#trade-ownership--magic-number-scope)
+  - [Concurrency, Latency & Serialization](#concurrency-latency--serialization)
+  - [Timezone & Historical Timestamps Contract](#timezone--historical-timestamps-contract)
 - [Key Features](#key-features)
 - [Repository Structure](#repository-structure)
-- [Prerequisites](#prerequisites)
-- [Step-by-Step Setup Guide](#step-by-step-setup-guide)
+- [Prerequisites & Installation](#prerequisites--installation)
   - [Step 1: Install the Expert Advisor in MT5](#step-1-install-the-expert-advisor-in-mt5)
   - [Step 2: Deploy or Build `mt5_bridge.dll`](#step-2-deploy-or-build-mt5_bridgedll)
-  - [Step 3: Use the Rust Library](#step-3-use-the-rust-library)
+  - [Step 3: Running on Linux via Wine](#step-3-running-on-linux-via-wine)
+  - [Step 4: Add Rust Crate to Project](#step-4-add-rust-crate-to-project)
 - [Usage & Code Examples](#usage--code-examples)
-  - [1. Connecting to MT5](#1-connecting-to-mt5)
+  - [1. Connecting to MT5 & Configuration](#1-connecting-to-mt5--configuration)
   - [2. Fetching Account Information](#2-fetching-account-information)
-  - [3. Querying Symbol Specifications](#3-querying-symbol-specifications)
-  - [4. Fetching Historical OHLCV Bars](#4-fetching-historical-ohlcv-bars)
-  - [5. Real-Time Tick Streaming](#5-real-time-tick-streaming)
-  - [6. Real-Time Closed Bar Streaming](#6-real-time-closed-bar-streaming)
-  - [7. Placing, Modifying & Closing Orders](#7-placing-modifying--closing-orders)
+  - [3. Querying Symbol Specifications & Risk Helpers](#3-querying-symbol-specifications--risk-helpers)
+  - [4. Fetching Historical OHLCV Bars & Technical Metrics](#4-fetching-historical-ohlcv-bars--technical-metrics)
+  - [5. Downloading Deep Chunked History with Completeness](#5-downloading-deep-chunked-history-with-completeness)
+  - [6. Real-Time Tick Streaming](#6-real-time-tick-streaming)
+  - [7. Real-Time Closed Bar Streaming](#7-real-time-closed-bar-streaming)
+  - [8. Placing, Modifying & Closing Market Orders](#8-placing-modifying--closing-market-orders)
+  - [9. Pending Orders with Expiration & Cancellation](#9-pending-orders-with-expiration--cancellation)
+  - [10. Error Handling & Return Code Inspection](#10-error-handling--return-code-inspection)
 - [API Reference](#api-reference)
   - [Mt5Client](#mt5client)
   - [Streaming APIs](#streaming-apis)
   - [Data Structures & Models](#data-structures--models)
   - [Error Handling](#error-handling)
 - [Multi-Instance / Multi-Account Support](#multi-instance--multi-account-support)
-- [Low-Level Binary Protocol](#low-level-binary-protocol)
+- [Low-Level Binary IPC Protocol](#low-level-binary-ipc-protocol)
+  - [Packet Framing](#packet-framing)
+  - [Command Table](#command-table)
+  - [Packed Struct Layouts](#packed-struct-layouts)
 - [Building the C++ DLL from Source](#building-the-c-dll-from-source)
-- [Running on Linux via Wine](#running-on-linux-via-wine)
+- [Testing & Quality Assurance](#testing--quality-assurance)
 - [Troubleshooting & FAQ](#troubleshooting--faq)
 - [Author & Contributions](#author--contributions)
 - [License & Disclaimer](#license--disclaimer)
@@ -59,7 +70,9 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 
 ---
 
-## Architecture
+## Architecture & Design
+
+### IPC Architecture
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
@@ -91,22 +104,56 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 ```
 
 - **IPC via Windows Named Pipes**: Operates locally via kernel memory with microsecond latency.
-- **Thread-safe**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing race conditions.
-- **Resilient**: The MQL5 EA non-blockingly polls client connections on a 50ms timer, gracefully handling reconnections.
+- **Thread-safe**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing packet interleaving.
+- **Resilient**: The MQL5 EA non-blockingly polls client connections on a timer loop, gracefully handling reconnects and client termination.
+
+### Security Model & Threat Assumptions
+
+The bridge operates across an Inter-Process Communication (IPC) boundary between the client engine and the MetaTrader 5 Expert Advisor:
+
+1. **Local IPC Boundary**: The bridge uses Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
+2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected with an error unless preceded by a valid, authenticated `CMD_INIT` handshake.
+3. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. For production deployments, configure a non-empty secret on the EA and provide it via the `MT5_PIPE_SECRET` environment variable. Set `InpRequireSecret = true` to prevent the EA from starting without a secret configured.
+4. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
+5. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
+6. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
+
+### Trade Ownership & Magic Number Scope
+
+- **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge.
+- **Strict vs Account-Wide Management**:
+  - By default (`InpEnforceMagicNumber = false`), `order_close` and `order_modify` allow managing any position or pending order on the account, logging a warning if the ticket was opened manually or by another EA.
+  - When `InpEnforceMagicNumber = true`, operations on tickets whose magic number does not match `InpMagicNumber` are strictly rejected.
+- **Custom Order Magic**: Callers can override the magic number per-request using `OrderRequest::buy(...).magic(my_magic)`.
+
+### Concurrency, Latency & Serialization
+
+- **Single-Channel Serialization**: All requests through `Mt5Client` are serialized through a Win32 `CRITICAL_SECTION` in `mt5_bridge.dll` and handled sequentially by the MQL5 EA on a timer loop.
+- **Latency Expectations**:
+  - Live order execution (`order_send`, `order_close`) takes typical local pipe turn-around plus broker execution round-trip latency.
+  - Large historical data requests (`copy_rates` or `copy_rates_chunked`) can take seconds as MT5 queries the broker history server.
+  - For high-frequency trading where bulk history downloads must not delay trade execution, run separate dedicated MT5 terminal instances with independent pipe names (`InpPipeName`).
+
+### Timezone & Historical Timestamps Contract
+
+- **UTC Conversion**: By default (`InpConvertToUTC = true`), the EA normalizes rates and tick timestamps to UTC unix timestamps using the current broker server offset (`TimeTradeServer() - TimeGMT()`).
+- **Daylight Saving Time (DST)**: Forex brokers frequently shift offsets between UTC+2 (winter) and UTC+3 (summer). If exact historical candle alignment across DST transitions is critical, disable conversion (`InpConvertToUTC = false`) to receive native broker trade server timestamps.
+- **Calendar Timeframes (`MN1`, `W1`)**: Monthly (`MN1`) and weekly (`W1`) bars have variable durations. `copy_rates_chunked` provides `copy_rates_chunked_detailed` with completeness metadata and missing range tracking to ensure data integrity during backtesting.
 
 ---
 
 ## Key Features
 
 - **Account Overview**: Real-time balance, equity, margin, free margin, and floating profit/loss.
-- **Symbol Specifications**: Point size, tick value, contract min/max lots, lot step, spread, and digits with in-memory caching.
-- **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`). Includes chunking and retry loops to allow the broker server to synchronize deep history.
-- **Real-Time Streaming**: Asynchronous tick streaming and completed (closed) bar streaming powered by Tokio channels with built-in deduplication.
+- **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, and digits with in-memory caching.
+- **Price & Lot Normalization**: Helpers to round prices to tick size and normalize lots to valid broker steps, with `is_valid_lot()` bounds checking against `NaN` and `Infinity`.
+- **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`). Includes chunking and retry loops to allow the broker server to synchronize deep history, plus `copy_rates_chunked_detailed()` reporting completeness.
+- **Real-Time Streaming**: Asynchronous tick streaming and completed (closed) bar streaming powered by Tokio channels with built-in deduplication and automatic cancellation.
 - **Order Execution**:
-  - Instant market orders (`Buy` / `Sell`) with slippage tolerance and order filling flags (`IOC`).
-  - Pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`).
+  - Instant market orders (`Buy` / `Sell`) with slippage tolerance and order filling flags.
+  - Pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`) with expiration control.
   - Position closing by ticket.
-  - Stop Loss and Take Profit modification.
+  - Stop Loss and Take Profit modification with tick-aligned precision and retcode feedback.
 - **Multi-Terminal Ready**: Custom named pipe parameters allow running multiple MT5 terminals/accounts concurrently on the same machine.
 
 ---
@@ -121,7 +168,8 @@ mt5-bridge/
 │
 ├── mql5/
 │   └── Experts/
-│       └── mt5_bridge.mq5   # Expert Advisor source code (deploy to MT5)
+│       ├── mt5_bridge.mq5   # Expert Advisor source code (deploy to MT5)
+│       └── mt5_bridge.ex5   # Compiled Expert Advisor binary
 │
 ├── bridge_dll/              # C++ Named Pipe client DLL source & builds
 │   ├── mt5_bridge.h         # C header and packed struct definitions
@@ -141,6 +189,10 @@ mt5-bridge/
 │   ├── ffi.rs               # C FFI declarations and packed struct layouts
 │   └── stream.rs            # Async Tokio tick & bar stream implementations
 │
+├── tests/                   # Test suites
+│   ├── bridge_tests.rs      # Unit & data model tests (offline, CI-ready)
+│   └── live_integration.rs  # End-to-end integration tests (requires running MT5)
+│
 └── examples/                # Runnable demonstration scripts
     ├── 01_account_info.rs   # Account balance, equity, margin, and margin level
     ├── 02_symbol_info.rs    # Symbol specifications, lot rounding, and point value
@@ -154,7 +206,7 @@ mt5-bridge/
 
 ---
 
-## Prerequisites
+## Prerequisites & Installation
 
 1. **MetaTrader 5 Terminal** (installed on Windows or running via Wine on Linux).
 2. **Rust Toolchain**: 1.75 or newer (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
@@ -163,16 +215,12 @@ mt5-bridge/
    - If compiling on Windows: Visual Studio (MSVC) or MinGW.
    - *Note: A ready-to-use 64-bit DLL is already included in `bridge_dll/bin/mt5_bridge.dll`.*
 
----
-
-## Step-by-Step Setup Guide
-
 ### Step 1: Install the Expert Advisor in MT5
 
 1. Open MetaTrader 5.
 2. Click **File** → **Open Data Folder**.
 3. Navigate to `MQL5/Experts/` inside the opened explorer window.
-4. Copy [`mql5/Experts/mt5_bridge.mq5`](mql5/Experts/mt5_bridge.mq5) into that folder.
+4. Copy [`mql5/Experts/mt5_bridge.mq5`](mql5/Experts/mt5_bridge.mq5) (and optionally [`mt5_bridge.ex5`](mql5/Experts/mt5_bridge.ex5)) into that folder.
 5. In MT5, press **F4** to open **MetaEditor** (or double-click `mt5_bridge.mq5`).
 6. Press **F7** (or click the **Compile** button). Ensure the compilation finishes with `0 errors, 0 warnings`. This produces `mt5_bridge.ex5`.
 7. In the main MT5 terminal, configure settings:
@@ -208,7 +256,23 @@ The Rust client dynamically loads `mt5_bridge.dll`.
   cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_bridge.dll
   ```
 
-### Step 3: Use the Rust Library
+### Step 3: Running on Linux via Wine
+
+MetaTrader 5 runs smoothly under Wine on Linux:
+1. Ensure MT5 is installed and running inside your Wine prefix (`wine terminal64.exe`).
+2. Attach `mt5_bridge.mq5` to a chart inside MT5.
+3. Wine implements Windows Named Pipes through Unix domain sockets or standard Wine IPC (`\\.\pipe\mt5bridge`).
+4. To run Rust examples/applications against Wine MT5:
+   ```bash
+   # Add the Windows target to Rust
+   rustup target add x86_64-pc-windows-gnu
+
+   # Build and run with Wine
+   cargo build --target x86_64-pc-windows-gnu --example 01_account_info
+   wine target/x86_64-pc-windows-gnu/debug/examples/01_account_info.exe
+   ```
+
+### Step 4: Add Rust Crate to Project
 
 Add `mt5-bridge` to your project's `Cargo.toml`:
 
@@ -222,19 +286,32 @@ tokio = { version = "1.0", features = ["full"] }
 
 ## Usage & Code Examples
 
-### 1. Connecting to MT5
+### 1. Connecting to MT5 & Configuration
 
 ```rust
 use mt5_bridge::Mt5Client;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Specify your account number, password, and broker server name.
-    // (Note: The MT5 terminal should already be logged in to this account).
-    let client = Mt5Client::connect(12345678, "my_password", "MetaQuotes-Demo")?;
+    // 1. Connect specifying account number, password (or pipe secret), and server.
+    // (Pass 0 and empty strings to attach to the terminal's active logged-in account).
+    let mut client = Mt5Client::connect(12345678, "my_password", "MetaQuotes-Demo")?;
     println!("Connected to MT5!");
+
+    // 2. Configure in-memory cache TTL for symbol specifications (default: 60s)
+    client.set_symbol_cache_ttl(Duration::from_secs(120));
+
     Ok(())
 }
 ```
+
+*Zero-Config Environment Variables:*
+Instead of hardcoding credentials, the client can automatically read:
+- `MT5_LOGIN` (e.g. `12345678` or `0` for active account)
+- `MT5_PASSWORD` or `MT5_PIPE_SECRET` (pipe authentication secret)
+- `MT5_SERVER` (broker server name)
+- `MT5_DLL_PATH` (explicit path to `mt5_bridge.dll`)
+- `MT5_PIPE_NAME` (custom named pipe name for multi-instance deployments)
 
 *Custom DLL Path:*
 ```rust
@@ -261,32 +338,47 @@ println!("Floating PnL: ${:.2}", account.profit());
 
 if let Some(margin_level) = account.margin_level() {
     println!("Margin Level: {:.2}%", margin_level);
+} else {
+    println!("Margin Level: N/A (no margin currently in use)");
 }
 ```
 
 ---
 
-### 3. Querying Symbol Specifications
+### 3. Querying Symbol Specifications & Risk Helpers
 
 ```rust
 let info = client.symbol_info("EURUSD")?;
 
 println!("Symbol:     {}", info.symbol);
 println!("Point Size: {:.5}", info.point);
+println!("Tick Size:  {:.5}", info.tick_size);
 println!("Tick Value: {:.2}", info.tick_value);
 println!("Min Lot:    {:.2}", info.min_lot);
 println!("Max Lot:    {:.2}", info.max_lot);
 println!("Lot Step:   {:.2}", info.lot_step);
 println!("Digits:     {}", info.digits);
 
-// Helper: Normalize an arbitrary volume to valid broker steps
+// Helper 1: Round an arbitrary volume to valid broker steps
 let valid_lot = info.round_lot(0.1287);
 println!("Normalized Lot: {}", valid_lot); // Prints 0.13
+
+// Helper 2: Validate volume satisfies min/max/step constraints (rejects NaN / Inf)
+let is_valid = info.is_valid_lot(valid_lot);
+println!("Lot is valid: {}", is_valid); // true
+
+// Helper 3: Round arbitrary price to tick size and symbol precision
+let valid_price = info.round_price(1.0854321);
+println!("Normalized Price: {}", valid_price); // Prints 1.08543
+
+// Helper 4: Accurate multi-asset 1-point move value (scaled by point / tick_size)
+let p_val = info.point_value(valid_lot);
+println!("1-point move value: ${:.5}", p_val);
 ```
 
 ---
 
-### 4. Fetching Historical OHLCV Bars
+### 4. Fetching Historical OHLCV Bars & Technical Metrics
 
 ```rust
 use chrono::Utc;
@@ -295,24 +387,55 @@ use mt5_bridge::Timeframe;
 let now = Utc::now().timestamp();
 let one_day_ago = now - 86400;
 
-// Fetch M15 bars
+// Option A: Fetch clean candlestick bars with technical metrics
 let bars = client.copy_bars("EURUSD", Timeframe::M15, one_day_ago, now)?;
 
 for bar in bars.iter().take(5) {
     println!(
-        "Time: {} | O: {:.5} H: {:.5} L: {:.5} C: {:.5} | Vol: {:.0}",
-        bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume
+        "Time: {} | O: {:.5} H: {:.5} L: {:.5} C: {:.5} | Mid: {:.5} | Range: {:.5} | Typical: {:.5} | Bullish: {}",
+        bar.time, bar.open, bar.high, bar.low, bar.close,
+        bar.mid(), bar.range(), bar.typical_price(), bar.is_bullish()
     );
 }
 
-// Or use copy_rates_chunked for deep historical data (with stabilization retries):
-let deep_history = client.copy_rates_chunked("EURUSD", Timeframe::H1, now - (30 * 86400), now, 2000)?;
-println!("Downloaded {} hourly bars", deep_history.len());
+// Option B: Fetch raw 1-to-1 MT5 rates with broker spread and tick/real volumes
+let raw_rates = client.copy_rates("EURUSD", Timeframe::M15, one_day_ago, now)?;
+if let Some(first) = raw_rates.first() {
+    println!("First raw rate spread: {} points | Vol: {}", first.spread, first.volume);
+}
 ```
 
 ---
 
-### 5. Real-Time Tick Streaming
+### 5. Downloading Deep Chunked History with Completeness
+
+```rust
+use chrono::Utc;
+use mt5_bridge::Timeframe;
+
+let now = Utc::now().timestamp();
+let start = now - (30 * 86400); // 30 days ago
+
+// Download deep history with chunking and observable completeness tracking:
+let history = client.copy_rates_chunked_detailed("EURUSD", Timeframe::H1, start, now, 200)?;
+
+println!(
+    "Downloaded {} bars total (Complete: {}, Missing ranges: {})",
+    history.rates.len(),
+    history.is_complete(),
+    history.missing_ranges.len()
+);
+
+if !history.is_complete() {
+    for (gap_start, gap_end) in &history.missing_ranges {
+        eprintln!("Missing broker history between {} and {}", gap_start, gap_end);
+    }
+}
+```
+
+---
+
+### 6. Real-Time Tick Streaming
 
 Streams real-time price changes via non-blocking Tokio channels:
 
@@ -328,11 +451,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Poll every 10 ms for new price ticks
     let mut rx = stream_ticks(client, "EURUSD", Duration::from_millis(10));
 
+    let mut count = 0;
     while let Some(tick) = rx.recv().await {
         println!(
-            "Tick -> Time: {} | Bid: {:.5} | Ask: {:.5} | Spread: {:.5}",
-            tick.time, tick.bid, tick.ask, tick.spread()
+            "Tick -> Time: {} | Bid: {:.5} | Ask: {:.5} | Spread: {:.5} | Last: {:.5}",
+            tick.time, tick.bid, tick.ask, tick.spread(), tick.last
         );
+        count += 1;
+        if count >= 10 {
+            // Dropping receiver automatically terminates the background polling task
+            break;
+        }
     }
 
     Ok(())
@@ -341,7 +470,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-### 6. Real-Time Closed Bar Streaming
+### 7. Real-Time Closed Bar Streaming
 
 Emits clean `Bar` instances whenever a candle closes:
 
@@ -354,12 +483,13 @@ use std::time::Duration;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Arc::new(Mt5Client::connect(12345678, "password", "Broker-Demo")?);
 
-    let mut rx = stream_bars(client, "EURUSD", Timeframe::M1, Duration::from_millis(250));
+    // Listen for newly closed 1-minute bars
+    let mut rx = stream_bars(client, "EURUSD", Timeframe::M1, Duration::from_millis(500));
 
     while let Some(bar) = rx.recv().await {
         println!(
-            "Closed Bar -> Time: {} | Open: {:.5} | Close: {:.5} | Range: {:.5}",
-            bar.time, bar.open, bar.close, bar.range()
+            "Closed Candle -> Time: {} | Open: {:.5} | Close: {:.5} | Range: {:.5} | Vol: {:.0}",
+            bar.time, bar.open, bar.close, bar.range(), bar.volume
         );
     }
 
@@ -369,36 +499,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-### 7. Placing, Modifying & Closing Orders
+### 8. Placing, Modifying & Closing Market Orders
 
 ```rust
 use mt5_bridge::{Mt5Client, OrderRequest};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Mt5Client::connect(12345678, "password", "Broker-Demo")?;
+    let symbol = "EURUSD";
 
-    // 1. Fetch current price
-    let tick = client.symbol_tick("EURUSD")?;
+    let tick = client.symbol_tick(symbol)?;
+    let info = client.symbol_info(symbol)?;
 
-    // 2. Open Market Buy order
-    let order_req = OrderRequest::buy("EURUSD", 0.01)
-        .stop_loss(tick.ask - 0.0050)
-        .take_profit(tick.ask + 0.0100)
+    // Calculate tick-aligned SL and TP relative to Bid
+    let sl = info.round_price(tick.bid - (200.0 * info.point));
+    let tp = info.round_price(tick.bid + (400.0 * info.point));
+
+    // 1. Submit Market Buy order with slippage deviation and custom magic number
+    let order_req = OrderRequest::buy(symbol, info.min_lot)
+        .stop_loss(sl)
+        .take_profit(tp)
+        .deviation(15)
+        .magic(20240101)
         .comment("bot_trade_1");
 
     let result = client.order_send(&order_req)?;
-    println!("Order opened! Ticket: {}, Fill Price: {:.5}", result.order, result.price);
+    println!(
+        "Order opened! Ticket: {}, Deal: {}, Fill: {:.5}, Status: {:?} ({})",
+        result.order, result.deal, result.price, result.status(), result.description()
+    );
+    assert!(result.is_filled());
 
-    // 3. Modify Stop Loss
-    let new_sl = tick.ask - 0.0025;
-    client.order_modify(result.order, new_sl, tick.ask + 0.0100)?;
-    println!("Stop loss modified!");
+    // 2. Modify Stop Loss (move SL closer to market with tick alignment)
+    let new_sl = info.round_price(tick.bid - (150.0 * info.point));
+    let mod_res = client.order_modify(result.order, new_sl, tp)?;
+    println!("Stop loss modified! Retcode: {} ({})", mod_res.retcode, mod_res.description());
 
-    // 4. Close the position
+    // 3. Close the position by ticket ID
     let close_result = client.order_close(result.order)?;
-    println!("Position closed at {:.5} (Deal ticket: {})", close_result.price, close_result.deal);
+    println!(
+        "Position closed at {:.5} (Deal: {}, Retcode: {})",
+        close_result.price, close_result.deal, close_result.retcode
+    );
 
     Ok(())
+}
+```
+
+---
+
+### 9. Pending Orders with Expiration & Cancellation
+
+```rust
+use chrono::Utc;
+use mt5_bridge::{Mt5Client, OrderRequest, OrderType};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Mt5Client::connect(12345678, "password", "Broker-Demo")?;
+    let symbol = "EURUSD";
+
+    let tick = client.symbol_tick(symbol)?;
+    let info = client.symbol_info(symbol)?;
+
+    // Place BuyLimit 200 points below market, expiring in 1 hour
+    let limit_price = info.round_price(tick.bid - (200.0 * info.point));
+    let expiration = Utc::now().timestamp() + 3600;
+
+    let req = OrderRequest::pending(symbol, OrderType::BuyLimit, info.min_lot, limit_price)
+        .expiration(expiration)
+        .comment("pending_order_1");
+
+    let trade_res = client.order_send(&req)?;
+    println!(
+        "BuyLimit placed! Ticket: {}, Status: {:?}, Retcode: {}",
+        trade_res.order, trade_res.status(), trade_res.retcode
+    );
+    assert!(trade_res.is_placed());
+
+    // Cancel pending order by ticket ID
+    let cancel_res = client.order_close(trade_res.order)?;
+    println!("Pending order cancelled! Retcode: {}", cancel_res.retcode);
+
+    Ok(())
+}
+```
+
+---
+
+### 10. Error Handling & Return Code Inspection
+
+All bridge operations return typed `Result<T, Mt5Error>`. You can pattern match on errors or inspect MT5 trade retcodes:
+
+```rust
+use mt5_bridge::{mt5_retcode_description, Mt5Client, Mt5Error, OrderRequest};
+
+fn place_trade(client: &Mt5Client, req: &OrderRequest) {
+    match client.order_send(req) {
+        Ok(trade) => {
+            println!("Order executed successfully! Ticket: {}", trade.order);
+        }
+        Err(Mt5Error::OrderSendFailed { symbol, retcode, description }) => {
+            eprintln!("Order rejected for {symbol}: retcode {retcode} ({description})");
+        }
+        Err(Mt5Error::RatesLimitExceeded { requested, max }) => {
+            eprintln!("Request exceeded limit: {requested} bars > {max} maximum");
+        }
+        Err(Mt5Error::SymbolInfoFailed(sym)) => {
+            eprintln!("Symbol {sym} not found or not selected in Market Watch");
+        }
+        Err(e) => {
+            eprintln!("Bridge error: {e}");
+        }
+    }
+
+    // Direct lookup of any MT5 retcode:
+    let msg = mt5_retcode_description(10016);
+    println!("Retcode 10016: {msg}");
 }
 ```
 
@@ -426,24 +642,25 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | Method | Signature | Description |
 | :--- | :--- | :--- |
 | [`account_info`](src/client.rs) | `pub fn account_info(&self) -> Result<AccountInfo>` | Queries real-time balance, equity, margin, and free margin in deposit currency. |
-| [`symbol_info`](src/client.rs) | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Queries contract specifications (point size, lot step, min/max lots, spread, digits) with thread-safe caching. |
+| [`symbol_info`](src/client.rs) | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Queries contract specifications (point size, tick size, tick value, lot step, min/max lots, spread, digits) with thread-safe caching. |
 | [`symbol_tick`](src/client.rs) | `pub fn symbol_tick(&self, symbol: &str) -> Result<Tick>` | Queries the latest quote tick (bid, ask, last, volume, flags). |
 
 #### Historical Market Data
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`copy_rates`](src/client.rs) | `pub fn copy_rates(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Rate>>` | Fetches raw `Rate` structs within UTC timestamp range `[from, to]`. |
+| [`copy_rates`](src/client.rs) | `pub fn copy_rates(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Rate>>` | Fetches raw `Rate` structs within UTC timestamp range `[from, to]`. Rejects requests exceeding 1M bars with `RatesLimitExceeded`. |
 | [`copy_bars`](src/client.rs) | `pub fn copy_bars(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Bar>>` | Convenience wrapper around `copy_rates` that returns clean `Bar` records. |
-| [`copy_rates_chunked`](src/client.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries to allow MT5 to sync older bars from broker servers. |
+| [`copy_rates_chunked`](src/client.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries. |
+| [`copy_rates_chunked_detailed`](src/client.rs) | `pub fn copy_rates_chunked_detailed(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<HistoryResult>` | Detailed downloader returning `HistoryResult` with completeness tracking. |
 
 #### Order Management
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
 | [`order_send`](src/client.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
-| [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position by ticket ID. |
-| [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<()>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
+| [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position or cancels a pending order by ticket ID. |
+| [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
 
 ---
 
@@ -480,6 +697,7 @@ pub struct SymbolInfo {
     pub symbol: String,    // Symbol name (e.g., "EURUSD")
     pub point: f64,        // Smallest price change unit (e.g. 0.00001)
     pub tick_value: f64,   // Monetary value of 1 tick per 1.0 lot
+    pub tick_size: f64,    // Trade tick size (e.g. 0.00001 or 0.25)
     pub lot_step: f64,     // Minimum volume increment (e.g. 0.01)
     pub min_lot: f64,      // Minimum allowed trade volume
     pub max_lot: f64,      // Maximum allowed trade volume
@@ -488,8 +706,9 @@ pub struct SymbolInfo {
 }
 ```
 - `round_lot(&self, lot: f64) -> f64`: Rounds `lot` to the nearest valid `lot_step`, clamped between `min_lot` and `max_lot`. Returns `0.0` if `lot < min_lot`.
-- `is_valid_lot(&self, lot: f64) -> bool`: Verifies whether a lot size satisfies min, max, and step increments.
-- `point_value(&self, volume: f64) -> f64`: Returns currency value of a 1-point move for the given volume (`tick_value * volume`).
+- `is_valid_lot(&self, lot: f64) -> bool`: Verifies whether a lot size satisfies min, max, and step increments (rejects `NaN` and `Infinity`).
+- `point_value(&self, volume: f64) -> f64`: Calculates the true monetary value of a 1-point price move for the given volume, properly scaled by `(point / tick_size) * tick_value * volume` for CFDs, indices, and forex.
+- `round_price(&self, price: f64) -> f64`: Rounds `price` to the nearest broker `tick_size` and normalizes to symbol `digits`.
 
 #### `Tick`
 [`Tick`](src/types.rs) represents a live price quote:
@@ -542,31 +761,46 @@ pub struct Rate {
 }
 ```
 
+#### `HistoryResult`
+[`HistoryResult`](src/types.rs) returned from `copy_rates_chunked_detailed`:
+```rust
+pub struct HistoryResult {
+    pub rates: Vec<Rate>,                // Retrieved historical rates
+    pub complete: bool,                  // True if all requested ranges were retrieved
+    pub missing_ranges: Vec<(i64, i64)>, // Ranges where broker returned no data
+}
+```
+- `is_complete(&self) -> bool`: Returns `true` if all requested ranges were retrieved without error.
+
 #### `Timeframe`
 [`Timeframe`](src/types.rs) covers standard chart intervals:
 - **Variants**: `M1`, `M2`, `M3`, `M5`, `M6`, `M10`, `M12`, `M15`, `M20`, `M30`, `H1`, `H2`, `H3`, `H4`, `H6`, `H8`, `H12`, `D1`, `W1`, `MN1`.
 - `to_mt5_const(self) -> i32`: Translates to MT5 `ENUM_TIMEFRAMES` constant.
 - `seconds(self) -> i64`: Bar duration in seconds (e.g. `Timeframe::M15.seconds()` -> `900`).
+- `is_calendar_interval(self) -> bool`: Returns `true` for variable-length calendar periods (`W1`, `MN1`).
 - `as_str(self) -> &'static str`: Returns standard code (e.g. `"M15"`).
 - `FromStr`: Parses standard representations (e.g. `"m15"`, `"15m"`, `"h1"`, `"1h"`, `"d1"`).
 
 #### `OrderRequest`
 [`OrderRequest`](src/types.rs) provides a fluent builder for trades:
 ```rust
-// Instant Market Orders
+// Instant Market Orders with custom deviation & magic
 let req = OrderRequest::buy("EURUSD", 0.1)
     .stop_loss(1.0800)
     .take_profit(1.0950)
+    .deviation(10)
+    .magic(20240101)
     .comment("my_bot_buy");
 
 let req = OrderRequest::sell("EURUSD", 0.1)
     .stop_loss(1.0950)
     .take_profit(1.0800);
 
-// Pending Orders (Limit / Stop)
+// Pending Orders (Limit / Stop) with expiration
 let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, 1.0820)
     .stop_loss(1.0770)
-    .take_profit(1.0920);
+    .take_profit(1.0920)
+    .expiration(1750000000);
 ```
 
 #### `OrderType`
@@ -580,6 +814,13 @@ let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, 1.0820)
 - `is_buy(self) -> bool`: Returns `true` for `Buy`, `BuyLimit`, `BuyStop`.
 - `is_sell(self) -> bool`: Returns `true` for `Sell`, `SellLimit`, `SellStop`.
 
+#### `TradeStatus`
+[`TradeStatus`](src/types.rs) provides granular classification:
+- `TradeStatus::Filled`: Market order filled in full.
+- `TradeStatus::Placed`: Pending order placed and active in terminal.
+- `TradeStatus::PartiallyFilled`: Order partially executed.
+- `TradeStatus::Rejected`: Order rejected or failed.
+
 #### `TradeResult`
 [`TradeResult`](src/types.rs) returned from order operations:
 ```rust
@@ -591,7 +832,11 @@ pub struct TradeResult {
     pub price: f64,        // Execution price
 }
 ```
-- `is_success(&self) -> bool`: Returns `true` if `retcode` is `10009` (Done), `10008` (Placed), or `10010` (Done Partial).
+- `status(&self) -> TradeStatus`: Returns the classified `TradeStatus`.
+- `is_success(&self) -> bool`: Returns `true` if `status` is `Filled`, `Placed`, or `PartiallyFilled`.
+- `is_filled(&self) -> bool`: Returns `true` if executed in full.
+- `is_placed(&self) -> bool`: Returns `true` if placed as a pending order.
+- `is_partially_filled(&self) -> bool`: Returns `true` if partially filled.
 - `description(&self) -> &'static str`: Returns human-readable explanation of `retcode`.
 
 ---
@@ -608,13 +853,14 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 | `SymbolNotFound { symbol, source }` | Required C ABI symbol missing in the loaded DLL. |
 | `InitFailed(status)` | Bridge handshake or named pipe connection failed. |
 | `CopyRatesFailed { symbol, status }` | Historical rates query failed in MT5. |
+| `RatesLimitExceeded { requested, max }` | Requested historical range exceeds maximum single-request limit (1,000,000 bars). |
 | `AccountInfoFailed(status)` | Failed to retrieve balance or equity. |
 | `SymbolInfoFailed(symbol)` | Unknown symbol or contract specifications unavailable. |
 | `SymbolTickFailed(symbol)` | Tick quote query failed. |
 | `OrderSendFailed { symbol, retcode, description }` | Order rejected by MT5 terminal / trade server. |
-| `OrderCloseFailed { ticket, retcode, description }` | Position closure rejected. |
-| `OrderModifyFailed { ticket, retcode }` | SL/TP modification rejected. |
-| `UnsupportedFeature(name)` | DLL lacks optional export (e.g. `OrderModify`). |
+| `OrderCloseFailed { ticket, retcode, description }` | Position closure or pending order cancellation rejected. |
+| `OrderModifyFailed { ticket, retcode, description }` | SL/TP modification rejected with MT5 retcode. |
+| `UnsupportedFeature(name)` | DLL lacks optional export. |
 | `InvalidTimeRange { start, end }` | Query start timestamp is greater than end timestamp. |
 | `ChannelDisconnected` | Async stream receiver or sender disconnected. |
 | `Other(message)` | General internal bridge error. |
@@ -645,16 +891,18 @@ To connect to multiple MT5 terminals simultaneously on the same machine:
 
 ---
 
-## Low-Level Binary Protocol
+## Low-Level Binary IPC Protocol
 
 For developers writing bridges in other languages (Python, Go, C#, Java), the named pipe uses a clean, packed binary protocol over little-endian bytes:
 
-### Request Packet
+### Packet Framing
+
+#### Request Packet
 ```text
 [uint32 cmd (4 bytes)] [uint32 payload_length (4 bytes)] [payload bytes...]
 ```
 
-### Response Packet
+#### Response Packet
 ```text
 [int32 status (4 bytes)] [uint32 data_length (4 bytes)] [data bytes...]
 ```
@@ -670,15 +918,15 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 | `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) |
 | `4` | `CMD_ACCOUNT` | Query balance, equity, margin, free margin |
 | `5` | `CMD_ORDER_SEND` | Send Market or Pending order |
-| `6` | `CMD_ORDER_CLOSE` | Close position by ticket |
+| `6` | `CMD_ORDER_CLOSE` | Close position or cancel pending order by ticket |
 | `7` | `CMD_ORDER_MODIFY` | Modify SL / TP of an open ticket |
 | `8` | `CMD_SYM_TICK` | Query latest tick quote |
 | `9` | `CMD_SYM_INFO` | Query symbol contract specifications |
 
 ### Packed Struct Layouts (`#pragma pack(push, 1)`)
 
-- **`Mt5SymInfo` (52 bytes)**:
-  `double point`, `double tick_value`, `double lot_step`, `double min_lot`, `double max_lot`, `double spread`, `int32 digits`.
+- **`Mt5SymInfo` (60 bytes)**:
+  `double point`, `double tick_value`, `double tick_size`, `double lot_step`, `double min_lot`, `double max_lot`, `double spread`, `int32 digits`.
 - **`Mt5Rate` (60 bytes)**:
   `int64 time`, `double open`, `double high`, `double low`, `double close`, `int64 volume`, `int32 spread`, `int64 real_volume`.
 - **`Mt5Tick` (44 bytes)**:
@@ -712,14 +960,23 @@ cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_b
 
 ---
 
-## Running on Linux via Wine
+## Testing & Quality Assurance
 
-MetaTrader 5 runs smoothly under Wine on Linux.
-When using `mt5-bridge`:
-1. Ensure MT5 is installed and running inside your Wine prefix (`wine terminal64.exe`).
-2. Attach `mt5_bridge.mq5` to a chart inside MT5.
-3. Wine implements Windows Named Pipes through Unix domain sockets or standard Wine IPC (`\\.\pipe\mt5bridge` translates to `~/.wine/drive_c/...` or socket mapping).
-4. Run your Rust trading engine compiled for Windows (`x86_64-pc-windows-gnu` via Wine) or use a socket bridge if running a purely native Linux process.
+The codebase includes two dedicated test suites under [`tests/`](tests):
+
+### 1. Offline Unit & Property Tests
+Comprehensive unit tests covering timeframe math, calendar intervals, lot rounding edge cases, valid lot checks with `NaN`/`Infinity` guards, price rounding, point value scaling, order builders, and trade status classifications:
+```bash
+cargo test --test bridge_tests
+```
+
+### 2. Live Integration Suite
+Tests executed directly against an active MetaTrader 5 terminal:
+```bash
+# On Windows or via Wine:
+cargo test --target x86_64-pc-windows-gnu --test live_integration
+```
+*Note: The live test suite utilizes a thread-safe mutex and an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending orders are automatically cancelled in `Drop`.*
 
 ---
 
@@ -746,22 +1003,22 @@ When using `mt5-bridge`:
 
 #### 5. "Retcode 10016: Invalid stops (SL/TP)"
 - **Cause**: Stop loss or take profit is placed too close to the current price (within broker freeze levels or stops level).
-- **Fix**: Check `SymbolInfoDouble(sym, SYMBOL_TRADE_STOPS_LEVEL)` and place stops outside that distance.
+- **Fix**: Check `SymbolInfoDouble(sym, SYMBOL_TRADE_STOPS_LEVEL)` and place stops outside that distance using `info.round_price()`.
 
 #### 6. "Historical data is truncated or `copy_rates` returns fewer bars than requested"
 - **Cause**: MetaTrader 5 limits the maximum number of bars saved and cached per chart by default (often 100,000 or fewer).
 - **Fix**: Open MT5 → **Tools** → **Options** → **Charts** tab. Set **"Max bars in chart"** to **"Unlimited"** (or at least `1000000` / `1_000_000`), click **OK**, and restart the MT5 terminal.
 
 ---
- 
+
 ## Author & Contributions
- 
+
 Created and maintained by [**0xbarss**](https://github.com/0xbarss).
- 
+
 Contributions, bug reports, and feature suggestions are welcome! Please check out [**CONTRIBUTING.md**](CONTRIBUTING.md) for development guidelines, testing instructions, and commit conventions before submitting pull requests. Feel free to open an issue or pull request at [**github.com/0xbarss/mt5-bridge**](https://github.com/0xbarss/mt5-bridge).
- 
+
 ---
- 
+
 ## License & Disclaimer
 
 This project is licensed under the **[MIT License](LICENSE)**.

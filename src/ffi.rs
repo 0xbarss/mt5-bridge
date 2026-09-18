@@ -68,7 +68,8 @@ const _: () = {
 // Function pointer signatures for dynamic library loading.
 pub type FnInit = unsafe extern "C" fn(i64, *const c_char, *const c_char) -> c_int;
 pub type FnShut = unsafe extern "C" fn() -> c_int;
-pub type FnRates = unsafe extern "C" fn(*const c_char, c_int, i64, i64, *mut Mt5Rate) -> c_int;
+pub type FnRates =
+    unsafe extern "C" fn(*const c_char, c_int, i64, i64, *mut Mt5Rate, c_int) -> c_int;
 pub type FnAcct = unsafe extern "C" fn(*mut f64, *mut f64, *mut f64, *mut f64) -> c_int;
 pub type FnSend = unsafe extern "C" fn(
     *const c_char,

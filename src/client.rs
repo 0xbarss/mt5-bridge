@@ -36,18 +36,43 @@ pub struct Mt5Client {
     symbol_cache_ttl: Duration,
 }
 
-// Mt5Client is safe to send and share across threads.
-// The underlying C++ DLL guards named pipe I/O with a CRITICAL_SECTION mutex.
+// Safety: Mt5Client is safe to send and share across threads.
+// All pipe I/O and state modifications are serialized via a Win32 CRITICAL_SECTION
+// in the underlying C++ DLL. Note that because of this serialization, concurrent
+// operations across threads (such as streaming ticks/bars and order execution) will
+// serialize and contend on that single global mutex under the hood.
 unsafe impl Send for Mt5Client {}
 unsafe impl Sync for Mt5Client {}
 
 impl Mt5Client {
+    /// Resolve the default DLL path safely, preferring an explicit absolute path adjacent to
+    /// the running executable or in the current working directory, avoiding ambient Windows DLL
+    /// search order side-loading vulnerabilities.
+    fn resolve_default_dll_path() -> std::path::PathBuf {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let exe_dll = parent.join("mt5_bridge.dll");
+                if exe_dll.is_file() {
+                    return exe_dll;
+                }
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_dll = cwd.join("mt5_bridge.dll");
+            if cwd_dll.is_file() {
+                return cwd_dll;
+            }
+        }
+        std::path::PathBuf::from("mt5_bridge.dll")
+    }
+
     /// Connect to MetaTrader 5 using the DLL path from the `MT5_DLL_PATH` environment variable,
-    /// or falling back to searching for `mt5_bridge.dll` in the current directory / PATH.
+    /// or safely resolving `mt5_bridge.dll` adjacent to the executable / current working directory.
     pub fn connect(login: i64, password: &str, server: &str) -> Result<Self> {
-        let dll_path =
-            std::env::var("MT5_DLL_PATH").unwrap_or_else(|_| "mt5_bridge.dll".to_string());
-        Self::connect_with_dll(&dll_path, login, password, server)
+        let dll_path = std::env::var_os("MT5_DLL_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Self::resolve_default_dll_path);
+        Self::connect_with_dll(dll_path, login, password, server)
     }
 
     /// Connect to MetaTrader 5 by loading the specified DLL path.
@@ -58,9 +83,14 @@ impl Mt5Client {
         server: &str,
     ) -> Result<Self> {
         let path_ref = dll_path.as_ref();
-        let path_str = path_ref.to_string_lossy().to_string();
+        let canonical_path = if path_ref.is_relative() && path_ref.exists() {
+            std::fs::canonicalize(path_ref).unwrap_or_else(|_| path_ref.to_path_buf())
+        } else {
+            path_ref.to_path_buf()
+        };
+        let path_str = canonical_path.to_string_lossy().to_string();
 
-        let lib = unsafe { libloading::Library::new(path_ref) }.map_err(|source| {
+        let lib = unsafe { libloading::Library::new(&canonical_path) }.map_err(|source| {
             Mt5Error::DllLoadError {
                 path: path_str.clone(),
                 source,
@@ -293,8 +323,16 @@ impl Mt5Client {
         let estimated_bars = ((to - from_val) / tf_secs + 100).max(100) as usize;
         let mut buf = vec![Mt5Rate::default(); estimated_bars];
 
-        let filled =
-            unsafe { (self.fn_rates)(sym_c.as_ptr(), tf_const, from_val, to, buf.as_mut_ptr()) };
+        let filled = unsafe {
+            (self.fn_rates)(
+                sym_c.as_ptr(),
+                tf_const,
+                from_val,
+                to,
+                buf.as_mut_ptr(),
+                buf.len() as c_int,
+            )
+        };
 
         if filled < 0 {
             return Err(Mt5Error::CopyRatesFailed {
@@ -352,6 +390,7 @@ impl Mt5Client {
                         current_start,
                         current_end,
                         buf.as_mut_ptr(),
+                        buf.len() as c_int,
                     )
                 };
 
@@ -512,7 +551,10 @@ impl Mt5Client {
     pub fn shutdown(&self) -> Result<()> {
         let ret = unsafe { (self.fn_shut)() };
         if ret != 1 {
-            warn!(retcode = ret, "Shutdown returned non-1 status");
+            return Err(Mt5Error::Other(format!(
+                "Shutdown returned non-1 status code: {}",
+                ret
+            )));
         }
         Ok(())
     }
@@ -520,8 +562,9 @@ impl Mt5Client {
 
 impl Drop for Mt5Client {
     fn drop(&mut self) {
+        // Shutdown is intentionally idempotent in the DLL (returns 1 if already disconnected).
         unsafe {
-            (self.fn_shut)();
+            let _ = (self.fn_shut)();
         }
     }
 }

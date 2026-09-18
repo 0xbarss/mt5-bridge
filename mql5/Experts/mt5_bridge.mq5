@@ -73,6 +73,7 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 //---- EA input
 input int InpMagicNumber = 20240101;  // Magic number for bridge orders
 input string InpPipeName = "mt5bridge"; // Custom Named Pipe Name
+input string InpPipeSecret = ""; // Optional shared secret for client authentication
 
 // Automatically select the broker-supported order filling mode for a symbol
 ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
@@ -156,14 +157,12 @@ double UnpackF64(const uchar &b[], int off) {
 
 // Unpack length-prefixed ASCII string.
 string UnpackStr(const uchar &b[], int &off) {
-    uint len = UnpackU32(b, off); off += 4;
-    if (len == 0) return "";
-    uchar tmp[];
-    ArrayResize(tmp, len + 1);
-    ArrayCopy(tmp, b, 0, off, len);
-    tmp[len] = 0;
-    off += len;
-    return CharArrayToString(tmp, 0, len, CP_ACP);
+    int str_len = (int)UnpackU32(b, off);
+    off += 4;
+    if (str_len <= 0) return "";
+    string s = CharArrayToString(b, off, str_len, CP_ACP);
+    off += str_len;
+    return s;
 }
 
 // ── Binary pack helpers ──────────────────────────────────────────────────────
@@ -249,6 +248,13 @@ void HandleInit(long h, const uchar &payload[], uint len) {
     long actual_login = AccountInfoInteger(ACCOUNT_LOGIN);
     string actual_server = AccountInfoString(ACCOUNT_SERVER);
 
+    // If a shared pipe secret is configured on the EA, verify the client supplied it
+    if (StringLen(InpPipeSecret) > 0 && req_password != InpPipeSecret) {
+        Print("MT5Bridge: auth failed — invalid shared secret / pipe token");
+        SendError(h);
+        return;
+    }
+
     // If client supplied a login (> 0), verify it matches the active MT5 terminal account
     if (req_login > 0 && req_login != actual_login) {
         Print("MT5Bridge: auth failed — requested login ", req_login,
@@ -293,19 +299,24 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
 
     MqlRates rates[];
     ArraySetAsSeries(rates, false);
-    
-    // Force MT5 to download history back to the requested start date if not locally cached
-    datetime now = TimeTradeServer();
-    if (dt_from < now) {
-        int required_bars = (int)((now - dt_from) / PeriodSeconds(mtf)) + 100;
-        if (required_bars > 0) {
-            MqlRates dummy[];
-            CopyRates(sym, mtf, 0, required_bars, dummy);
-        }
-    }
 
+    // Try reading directly from MT5 local cache first to avoid hammering broker history server
     ResetLastError();
     int filled = CopyRates(sym, mtf, dt_from, dt_to, rates);
+
+    // If local cache does not have the required range yet, request terminal to sync from server
+    if (filled <= 0) {
+        datetime now = TimeTradeServer();
+        if (dt_from < now) {
+            int required_bars = (int)((now - dt_from) / PeriodSeconds(mtf)) + 100;
+            if (required_bars > 0) {
+                MqlRates dummy[];
+                CopyRates(sym, mtf, 0, required_bars, dummy);
+            }
+        }
+        ResetLastError();
+        filled = CopyRates(sym, mtf, dt_from, dt_to, rates);
+    }
 
     if (filled <= 0) { uchar e[1]; SendCount(h, 0, e, 0); return; }
 

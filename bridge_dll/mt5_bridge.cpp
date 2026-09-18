@@ -170,12 +170,38 @@ int Initialize(int64_t login, const char* password, const char* server) {
     /* Switch to byte-stream mode. */
     DWORD mode = PIPE_READMODE_BYTE;
     SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+
+    // Guard against pipe squatting where current process connects to itself
+    ULONG srv_pid = 0;
+    typedef BOOL (WINAPI *FnGetNamedPipeServerProcessId)(HANDLE, PULONG);
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    if (k32) {
+        FnGetNamedPipeServerProcessId fn_get_pid =
+            (FnGetNamedPipeServerProcessId)GetProcAddress(k32, "GetNamedPipeServerProcessId");
+        if (fn_get_pid && fn_get_pid(pipe, &srv_pid)) {
+            if (srv_pid != 0 && srv_pid == GetCurrentProcessId()) {
+                CloseHandle(pipe);
+                return 0;
+            }
+        }
+    }
+
     g_pipe = pipe;
+
+    // Use MT5_PIPE_SECRET if set and password is empty
+    std::string auth_token = (password != nullptr) ? password : "";
+    if (auth_token.empty()) {
+        char secret_buf[256] = {0};
+        DWORD sec_len = GetEnvironmentVariableA("MT5_PIPE_SECRET", secret_buf, sizeof(secret_buf));
+        if (sec_len > 0 && sec_len < sizeof(secret_buf)) {
+            auth_token = secret_buf;
+        }
+    }
 
     Packer p;
     p.i64(static_cast<int64_t>(login));
-    p.str(password);
-    p.str(server);
+    p.str(auth_token.c_str());
+    p.str(server ? server : "");
 
     if (!send_packet(CMD_INIT, p.buf)) return 0;
 
@@ -194,9 +220,9 @@ int Shutdown(void) {
 }
 
 int CopyRates(const char* symbol, int timeframe, int64_t from,
-              int64_t to, Mt5Rate* buf) {
+              int64_t to, Mt5Rate* buf, int buf_capacity) {
     Lock lk;
-    if (g_pipe == INVALID_HANDLE_VALUE) return -1;
+    if (g_pipe == INVALID_HANDLE_VALUE || !buf || buf_capacity <= 0) return -1;
 
     Packer p;
     p.str(symbol);
@@ -212,6 +238,9 @@ int CopyRates(const char* symbol, int timeframe, int64_t from,
     int32_t filled = st;
     int32_t max_n  = (int32_t)(data.size() / sizeof(Mt5Rate));
     int32_t n      = (filled < max_n) ? filled : max_n;
+    if (n > buf_capacity) {
+        n = buf_capacity;
+    }
     if (n > 0)
         std::memcpy(buf, data.data(), static_cast<size_t>(n) * sizeof(Mt5Rate));
     return n;

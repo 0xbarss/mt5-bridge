@@ -10,6 +10,7 @@ bridge_dll/build/
 *.obj
 *.exp
 *.lib
+*.ex5
 
 # IDE & Editor files
 .vscode/

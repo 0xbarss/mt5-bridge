@@ -136,11 +136,14 @@ mt5-bridge/
 │   └── stream.rs            # Async Tokio tick & bar stream implementations
 │
 └── examples/                # Runnable demonstration scripts
-    ├── 01_account_info.rs   # Check balance, equity, and margin
-    ├── 02_symbol_info.rs    # Inspect symbol specifications & lot rounding
-    ├── 03_fetch_rates.rs    # Download historical OHLCV candles
-    ├── 04_stream_ticks.rs   # Stream live price quotes
-    └── 05_order_send.rs     # Open, modify, and close a trade
+    ├── 01_account_info.rs   # Account balance, equity, margin, and margin level
+    ├── 02_symbol_info.rs    # Symbol specifications, lot rounding, and point value
+    ├── 03_fetch_rates.rs    # Historical OHLCV candles, raw rates, and bar metrics
+    ├── 04_stream_ticks.rs   # Real-time live tick quote streaming
+    ├── 05_order_send.rs     # Market orders, Stop Loss / Take Profit, and closing
+    ├── 06_pending_order.rs  # Pending orders (BuyLimit) and order cancellation
+    ├── 07_stream_bars.rs    # Real-time closed-bar streaming via Tokio channels
+    └── 08_chunked_history.rs# Deep history downloader with chunking & retry loops
 ```
 
 ---

@@ -65,9 +65,9 @@ MT5_API int Initialize(int64_t login, const char* password, const char* server);
 /* Disconnect and clean up. */
 MT5_API int Shutdown(void);
 
-/* Fetch OHLCV bars in [from, to] UTC range. Returns bar count filled, -1 on error. */
+/* Fetch OHLCV bars in [from, to] UTC range into buf (up to buf_capacity items). Returns bar count filled, -1 on error. */
 MT5_API int CopyRates(const char* symbol, int timeframe, int64_t from,
-                      int64_t to, Mt5Rate* buf);
+                      int64_t to, Mt5Rate* buf, int buf_capacity);
 
 /* Account balances. Returns 1 on success. */
 MT5_API int AccountInfo(double* balance, double* equity,

@@ -568,14 +568,65 @@ impl OrderRequest {
         }
         Ok(())
     }
+
+    /// Validates the order request against live symbol specifications:
+    /// minimum/maximum lot sizes, lot step alignment, and tick size alignment.
+    pub fn validate_with_symbol(&self, info: &SymbolInfo) -> crate::error::Result<()> {
+        self.validate()?;
+        if !info.is_valid_lot(self.volume) {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "Order volume {} does not satisfy symbol {} lot constraints (min={}, max={}, step={})",
+                self.volume, self.symbol, info.min_lot, info.max_lot, info.lot_step
+            )));
+        }
+        if info.tick_size > 0.0 {
+            if self.price > 0.0 {
+                let steps = self.price / info.tick_size;
+                if (steps - steps.round()).abs() > 1e-4 {
+                    return Err(crate::error::Mt5Error::Other(format!(
+                        "Order price {} is not aligned to tick size {}",
+                        self.price, info.tick_size
+                    )));
+                }
+            }
+            if self.stop_loss > 0.0 {
+                let steps = self.stop_loss / info.tick_size;
+                if (steps - steps.round()).abs() > 1e-4 {
+                    return Err(crate::error::Mt5Error::Other(format!(
+                        "Stop loss {} is not aligned to tick size {}",
+                        self.stop_loss, info.tick_size
+                    )));
+                }
+            }
+            if self.take_profit > 0.0 {
+                let steps = self.take_profit / info.tick_size;
+                if (steps - steps.round()).abs() > 1e-4 {
+                    return Err(crate::error::Mt5Error::Other(format!(
+                        "Take profit {} is not aligned to tick size {}",
+                        self.take_profit, info.tick_size
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Trade execution status classification.
+/// Trade execution status classification (high-level convenience classification).
+///
+/// **Authoritative Semantics:**
+/// The authoritative field for MT5 execution outcome is always [`TradeResult::retcode`].
+/// This enum provides an ergonomic classification of common MT5 outcomes:
+/// - `Filled`: Market order executed immediately with a deal ticket (`TRADE_RETCODE_DONE` = 10009, `deal > 0`).
+/// - `Placed`: Pending order accepted and currently working in the terminal (`TRADE_RETCODE_PLACED` = 10008,
+///   or 10009 with `deal == 0` and `order > 0`).
+/// - `PartiallyFilled`: Order partially executed (`TRADE_RETCODE_DONE_PARTIAL` = 10010).
+/// - `Rejected`: Order rejected or failed (any error retcode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TradeStatus {
-    /// Request completed in full (`TRADE_RETCODE_DONE` = 10009).
+    /// Request completed in full (`TRADE_RETCODE_DONE` = 10009 with `deal > 0`).
     Filled,
-    /// Pending order placed (`TRADE_RETCODE_PLACED` = 10008).
+    /// Pending order placed and working (`TRADE_RETCODE_PLACED` = 10008 or 10009 with `deal == 0`).
     Placed,
     /// Only part of the requested volume was filled (`TRADE_RETCODE_DONE_PARTIAL` = 10010).
     PartiallyFilled,
@@ -584,15 +635,22 @@ pub enum TradeStatus {
 }
 
 /// Result returned from an order placement or closure.
+///
+/// **Authoritative Outcome:**
+/// The authoritative status of the order is [`retcode`](Self::retcode).
+/// Use [`is_deal()`](Self::is_deal) to check if a deal was executed immediately,
+/// [`is_working_order()`](Self::is_working_order) to check if a pending order is active,
+/// and [`has_position()`](Self::has_position) to check if a position ticket was assigned.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TradeResult {
     /// MT5 Trade execution return code (e.g. 10009 for `TRADE_RETCODE_DONE`).
+    /// This is the authoritative raw status code returned by MetaTrader 5.
     pub retcode: u32,
-    /// Deal ticket number if a deal was executed.
+    /// Deal ticket number if a deal was executed (0 for pending orders).
     pub deal: u64,
     /// Order ticket number.
     pub order: u64,
-    /// Position ticket number associated with the trade.
+    /// Position ticket number associated with the trade (0 if pending or unknown).
     pub position: u64,
     /// Executed trade volume.
     pub volume: f64,
@@ -638,12 +696,12 @@ impl TradeResult {
         )
     }
 
-    /// Returns `true` if the order was executed in full.
+    /// Returns `true` if the order was executed in full as an immediate deal.
     pub fn is_filled(&self) -> bool {
         self.status() == TradeStatus::Filled
     }
 
-    /// Returns `true` if a pending order was placed.
+    /// Returns `true` if a pending order was placed and is working.
     pub fn is_placed(&self) -> bool {
         self.status() == TradeStatus::Placed
     }
@@ -651,6 +709,21 @@ impl TradeResult {
     /// Returns `true` if only part of the requested volume was filled.
     pub fn is_partially_filled(&self) -> bool {
         self.status() == TradeStatus::PartiallyFilled
+    }
+
+    /// Returns `true` if a deal was executed immediately (`deal > 0`).
+    pub fn is_deal(&self) -> bool {
+        self.deal > 0
+    }
+
+    /// Returns `true` if this result represents a working pending order (`deal == 0 && order > 0`).
+    pub fn is_working_order(&self) -> bool {
+        self.deal == 0 && self.order > 0
+    }
+
+    /// Returns `true` if a non-zero position ticket is present.
+    pub fn has_position(&self) -> bool {
+        self.position > 0
     }
 
     /// Human-readable explanation of the return code.

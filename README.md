@@ -105,7 +105,7 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 
 - **IPC via Windows Named Pipes**: Operates locally via kernel memory with microsecond latency.
 - **Thread-safe & Resilient I/O**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing packet interleaving. When pipe I/O breaks or the terminal closes, the DLL automatically tears down and invalidates the pipe handle (`disconnect_locked`) to fail fast and cleanly reconnect.
-- **High-Throughput EA Timer Loop**: The MQL5 EA non-blockingly polls client connections on an optimized 5ms timer loop (`InpTimerIntervalMs`), draining all buffered requests per tick for minimal IPC latency.
+- **Bounded High-Throughput EA Timer Loop**: The MQL5 EA non-blockingly polls client connections on an optimized 5ms timer loop (`InpTimerIntervalMs`), draining queued requests with strict execution bounds (`InpMaxRequestsPerTimer = 32` and `InpMaxTimerBudgetUs = 2000 µs`). This prevents request floods from ever starving MT5's single-threaded event loop or freezing the terminal UI.
 
 ### Security Model & Threat Assumptions
 
@@ -117,8 +117,10 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. For production deployments, configure a non-empty secret on the EA and provide it via the `MT5_PIPE_SECRET` environment variable. Set `InpRequireSecret = true` to prevent the EA from starting without a secret configured.
 5. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
 6. **Memory & Bounds Safety**: All packet parsing helpers enforce strict bounds checks before reading (`SafeUnpack*`), rejecting truncated or malformed payloads without crashing the EA event loop.
-7. **Pre-Flight Validation**: Both the Rust client and MQL5 EA enforce pre-flight validation. The EA verifies that the symbol is enabled for trading (`SYMBOL_TRADE_MODE_DISABLED`), checks pending order limits (`SYMBOL_LIMIT_ORDERS`), validates lot sizes against broker min/max/step constraints, and ensures prices, Stop Loss, and Take Profit values are finite, non-negative numbers before submission.
-8. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
+7. **Pre-Flight Validation**: Both the Rust client and MQL5 EA enforce pre-flight validation. The EA verifies that the symbol is enabled for trading (`SYMBOL_TRADE_MODE_DISABLED`), checks pending order limits, validates lot sizes against broker min/max/step constraints (`SYMBOL_VOLUME_STEP`), checks stops and freeze level distances (`SYMBOL_TRADE_STOPS_LEVEL`), ensures tick size alignment (`SYMBOL_TRADE_TICK_SIZE`), and verifies prices, Stop Loss, and Take Profit values before submission.
+8. **Deterministic Position Resolution (Hedging Safe)**: In hedging accounts with multiple positions per symbol, the bridge strictly resolves position IDs via deal history (`DEAL_POSITION_ID`) or ticket selection (`PositionSelectByTicket`). It deliberately avoids ambiguous symbol-only lookups (`PositionSelect(sym)`); if position tracking cannot be verified, `position = 0` is safely returned instead of guessing an arbitrary position ticket.
+9. **Market Watch Control**: `InpAutoSelectSymbols` (default `true`) allows configuring whether queries automatically select symbols into Market Watch or strictly require them to already exist.
+10. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
 
 ### Trade Ownership & Magic Number Scope
 
@@ -131,8 +133,9 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 ### Concurrency, Latency & Serialization
 
 - **Single-Channel Serialization**: All requests through `Mt5Client` are serialized through a Win32 `CRITICAL_SECTION` in `mt5_bridge.dll` and handled sequentially by the MQL5 EA on a timer loop.
-- **Optimized Timer Draining**: The EA runs an optimized 5ms timer (`InpTimerIntervalMs = 5`) and drains **all** buffered pipe requests in a loop on each tick rather than servicing only a single request per tick, drastically decreasing response latency under streaming or multi-query workflows.
+- **Bounded Timer Draining**: The EA runs an optimized 5ms timer (`InpTimerIntervalMs = 5`) and drains buffered pipe requests up to `InpMaxRequestsPerTimer` (32) or `InpMaxTimerBudgetUs` (2000 µs) per tick. This yields ultra-low latency while preserving MT5 terminal UI responsiveness.
 - **Broken Pipe Invalidation**: On pipe I/O failure (`ERROR_BROKEN_PIPE`, broken socket/pipe, or client crash), the C++ DLL automatically closes and invalidates the pipe handle (`disconnect_locked()`), allowing downstream callers to handle the error immediately without deadlocking.
+- **Multi-Symbol Throughput Guidelines**: For multi-symbol streaming, configure balanced polling intervals (e.g. 50ms–100ms across 10+ symbols) to prevent pipe queue serialization backpressure, or run separate dedicated MT5 terminal instances with independent pipe names (`InpPipeName`).
 - **Latency Expectations**:
   - Live order execution (`order_send`, `order_close`) takes typical local pipe turn-around plus broker execution round-trip latency.
   - Large historical data requests (`copy_rates` or `copy_rates_chunked`) can take seconds as MT5 queries the broker history server.
@@ -249,8 +252,11 @@ mt5-bridge/
 | `InpPipeSecret` | `string` | `""` | Optional shared secret token for client authentication |
 | `InpRequireSecret` | `bool` | `false` | Require non-empty secret token before allowing initialization |
 | `InpEnforceMagicNumber` | `bool` | `false` | Strictly reject modify/close for tickets not matching `InpMagicNumber` (no zero-bypass) |
-| `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC |
+| `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC (disable for raw broker time) |
 | `InpTimerIntervalMs` | `int` | `5` | Timer polling and pipe draining loop frequency in milliseconds |
+| `InpMaxRequestsPerTimer` | `int` | `32` | Max requests serviced per timer tick (prevents terminal UI starvation) |
+| `InpMaxTimerBudgetUs` | `uint` | `2000` | Max execution budget per timer tick in microseconds (2000 µs = 2 ms) |
+| `InpAutoSelectSymbols` | `bool` | `true` | Automatically select queried/traded symbols into Market Watch |
 
 ### Step 2: Deploy or Build `mt5_bridge.dll`
 
@@ -693,7 +699,7 @@ Asynchronous real-time streaming built on Tokio channels (enabled via default `a
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task polling for new ticks, deduplicating unchanged quotes, and emitting new `Tick` values. Task shuts down when receiver is dropped. |
+| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for new quotes via `symbol_tick()`, deduplicates identical ticks (inspecting time, bid, ask, last, volume, and flags), and yields updated `Tick` values. Operates via latest-quote polling (not a lossless queue). Task terminates when receiver is dropped. |
 | [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). Task shuts down when receiver is dropped. |
 
 ---
@@ -856,12 +862,16 @@ pub struct TradeResult {
     pub price: f64,        // Execution price
 }
 ```
-- `position: u64`: Position ticket number. When a market order executes, MetaTrader 5 assigns an open position ticket (`DEAL_POSITION_ID` / `POSITION_TICKET`). Subsequent position modifications (`order_modify`) and closures (`order_close`) should reference this position ticket.
-- `status(&self) -> TradeStatus`: Returns the classified `TradeStatus`.
+- `retcode: u32`: **Authoritative MT5 return code** (e.g. `10009` for `TRADE_RETCODE_DONE`). All downstream decision logic should inspect this field.
+- `position: u64`: Position ticket number (0 if pending or unknown). In hedging accounts, position tickets are safely identified via `DEAL_POSITION_ID` or ticket selection without guessing.
+- `status(&self) -> TradeStatus`: High-level convenience classification (`Filled` for immediate deal executions, `Placed` for working pending orders).
 - `is_success(&self) -> bool`: Returns `true` if `status` is `Filled`, `Placed`, or `PartiallyFilled`.
-- `is_filled(&self) -> bool`: Returns `true` if executed in full.
-- `is_placed(&self) -> bool`: Returns `true` if placed as a pending order.
+- `is_filled(&self) -> bool`: Returns `true` if executed in full as an immediate deal.
+- `is_placed(&self) -> bool`: Returns `true` if placed as a pending order and currently working.
 - `is_partially_filled(&self) -> bool`: Returns `true` if partially filled.
+- `is_deal(&self) -> bool`: Returns `true` if a deal was executed (`deal > 0`).
+- `is_working_order(&self) -> bool`: Returns `true` if an order was placed without immediate execution (`deal == 0 && order > 0`).
+- `has_position(&self) -> bool`: Returns `true` if a valid non-zero position ticket is assigned.
 - `description(&self) -> &'static str`: Returns human-readable explanation of `retcode`.
 
 ---

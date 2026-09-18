@@ -72,13 +72,26 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
 #define CMD_SYM_INFO     9
 
 //---- EA input
-input int InpMagicNumber = 20240101;  // Magic number for bridge orders
-input string InpPipeName = "mt5bridge"; // Custom Named Pipe Name
-input string InpPipeSecret = ""; // Optional shared secret for client authentication
-input bool InpRequireSecret = false; // Require non-empty InpPipeSecret on initialization
-input bool InpEnforceMagicNumber = false; // Reject close/modify for positions not matching InpMagicNumber
-input bool InpConvertToUTC = true; // Convert history timestamps to UTC
-input int InpTimerIntervalMs = 5; // Timer polling interval in milliseconds (default 5ms)
+input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
+input string InpPipeName             = "mt5bridge"; // Custom Named Pipe Name
+input string InpPipeSecret           = "";          // Optional shared secret for client authentication
+input bool   InpRequireSecret        = false;       // Require non-empty InpPipeSecret on initialization
+input bool   InpEnforceMagicNumber   = false;       // Reject close/modify for positions not matching InpMagicNumber
+input bool   InpConvertToUTC         = true;        // Convert history timestamps to UTC (set false for raw broker time)
+input int    InpTimerIntervalMs      = 5;           // Timer polling interval in milliseconds (default 5ms)
+input int    InpMaxRequestsPerTimer  = 32;          // Max pipe requests serviced per timer tick (prevents UI starvation)
+input uint   InpMaxTimerBudgetUs     = 2000;        // Max execution budget per timer tick in microseconds (2000us = 2ms)
+input bool   InpAutoSelectSymbols    = true;        // Automatically select queried/traded symbols into Market Watch
+
+// Ensure symbol is available in Market Watch, respecting InpAutoSelectSymbols
+bool EnsureSymbolAvailable(string sym) {
+    if (SymbolInfoInteger(sym, SYMBOL_SELECT) != 0)
+        return true;
+    if (InpAutoSelectSymbols)
+        return SymbolSelect(sym, true);
+    Print("MT5Bridge: symbol '", sym, "' is not in Market Watch and InpAutoSelectSymbols is disabled");
+    return false;
+}
 
 // Automatically select the broker-supported order filling mode for a symbol
 ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
@@ -375,6 +388,10 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
     int max_bars = 0;
     SafeUnpackI32(payload, off, len, max_bars);
 
+    if (!EnsureSymbolAvailable(sym)) {
+        uchar e[1]; SendCount(h, 0, e, 0); return;
+    }
+
     long offset = 0;
     if (InpConvertToUTC) {
         offset = (long)TimeTradeServer() - (long)TimeGMT();
@@ -478,7 +495,7 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     SafeUnpackU64(payload, off, len, magic);
 
     // EA-side pre-flight validation
-    if (!SymbolSelect(sym, true)) {
+    if (!EnsureSymbolAvailable(sym)) {
         Print("MT5Bridge: symbol '", sym, "' not available in Market Watch");
         SendError(h);
         return;
@@ -508,6 +525,20 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         Print("MT5Bridge: volume ", volume, " exceeds max lot ", max_vol, " for ", sym);
         SendError(h);
         return;
+    }
+
+    double step_vol = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+    if (step_vol > 0.0) {
+        double base = (min_vol > 0.0) ? min_vol : 0.0;
+        double steps = (volume - base) / step_vol;
+        double rounded_steps = MathRound(steps);
+        if (MathAbs(steps - rounded_steps) > 1e-4) {
+            Print("MT5Bridge: volume ", DoubleToString(volume, 4),
+                  " does not align with lot step ", DoubleToString(step_vol, 4),
+                  " (min=", DoubleToString(min_vol, 4), ") for ", sym);
+            SendError(h);
+            return;
+        }
     }
 
     if (!MathIsValidNumber(price) || price < 0.0 ||
@@ -555,6 +586,134 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
             return;
     }
 
+    // Broker constraint validation: tick size & stops level distance
+    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+    double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+    double tick_size = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+    if (tick_size <= 0.0) tick_size = point;
+    long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+    double min_stop_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
+
+    // Check tick size alignment
+    if (tick_size > 0.0) {
+        if (req_price > 0.0 && action == TRADE_ACTION_PENDING) {
+            double p_steps = req_price / tick_size;
+            if (MathAbs(p_steps - MathRound(p_steps)) > 1e-4) {
+                Print("MT5Bridge: order price ", DoubleToString(req_price, 5),
+                      " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+        }
+        if (sl > 0.0) {
+            double sl_steps = sl / tick_size;
+            if (MathAbs(sl_steps - MathRound(sl_steps)) > 1e-4) {
+                Print("MT5Bridge: SL ", DoubleToString(sl, 5),
+                      " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+        }
+        if (tp > 0.0) {
+            double tp_steps = tp / tick_size;
+            if (MathAbs(tp_steps - MathRound(tp_steps)) > 1e-4) {
+                Print("MT5Bridge: TP ", DoubleToString(tp, 5),
+                      " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+        }
+    }
+
+    // Directional and stops level validation
+    if (action == TRADE_ACTION_DEAL) {
+        if (order_type == ORDER_TYPE_BUY) {
+            if (sl > 0.0 && (bid - sl) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Buy SL ", DoubleToString(sl, 5),
+                      " violates stops level (bid=", DoubleToString(bid, 5),
+                      ", min_dist=", DoubleToString(min_stop_dist, 5), ")");
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (tp - bid) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Buy TP ", DoubleToString(tp, 5),
+                      " violates stops level (bid=", DoubleToString(bid, 5),
+                      ", min_dist=", DoubleToString(min_stop_dist, 5), ")");
+                SendError(h);
+                return;
+            }
+        } else if (order_type == ORDER_TYPE_SELL) {
+            if (sl > 0.0 && (sl - ask) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Sell SL ", DoubleToString(sl, 5),
+                      " violates stops level (ask=", DoubleToString(ask, 5),
+                      ", min_dist=", DoubleToString(min_stop_dist, 5), ")");
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (ask - tp) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Sell TP ", DoubleToString(tp, 5),
+                      " violates stops level (ask=", DoubleToString(ask, 5),
+                      ", min_dist=", DoubleToString(min_stop_dist, 5), ")");
+                SendError(h);
+                return;
+            }
+        }
+    } else if (action == TRADE_ACTION_PENDING) {
+        if (order_type == ORDER_TYPE_BUY_LIMIT && (ask - req_price) < min_stop_dist - 1e-8) {
+            Print("MT5Bridge: Buy Limit price ", DoubleToString(req_price, 5),
+                  " violates stops level from current ask ", DoubleToString(ask, 5));
+            SendError(h);
+            return;
+        }
+        if (order_type == ORDER_TYPE_BUY_STOP && (req_price - ask) < min_stop_dist - 1e-8) {
+            Print("MT5Bridge: Buy Stop price ", DoubleToString(req_price, 5),
+                  " violates stops level from current ask ", DoubleToString(ask, 5));
+            SendError(h);
+            return;
+        }
+        if (order_type == ORDER_TYPE_SELL_LIMIT && (req_price - bid) < min_stop_dist - 1e-8) {
+            Print("MT5Bridge: Sell Limit price ", DoubleToString(req_price, 5),
+                  " violates stops level from current bid ", DoubleToString(bid, 5));
+            SendError(h);
+            return;
+        }
+        if (order_type == ORDER_TYPE_SELL_STOP && (bid - req_price) < min_stop_dist - 1e-8) {
+            Print("MT5Bridge: Sell Stop price ", DoubleToString(req_price, 5),
+                  " violates stops level from current bid ", DoubleToString(bid, 5));
+            SendError(h);
+            return;
+        }
+
+        if (order_type == ORDER_TYPE_BUY_LIMIT || order_type == ORDER_TYPE_BUY_STOP) {
+            if (sl > 0.0 && (req_price - sl) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Buy pending SL ", DoubleToString(sl, 5),
+                      " violates stops level relative to price ", DoubleToString(req_price, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (tp - req_price) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Buy pending TP ", DoubleToString(tp, 5),
+                      " violates stops level relative to price ", DoubleToString(req_price, 5));
+                SendError(h);
+                return;
+            }
+        } else if (order_type == ORDER_TYPE_SELL_LIMIT || order_type == ORDER_TYPE_SELL_STOP) {
+            if (sl > 0.0 && (sl - req_price) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Sell pending SL ", DoubleToString(sl, 5),
+                      " violates stops level relative to price ", DoubleToString(req_price, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (req_price - tp) < min_stop_dist - 1e-8) {
+                Print("MT5Bridge: Sell pending TP ", DoubleToString(tp, 5),
+                      " violates stops level relative to price ", DoubleToString(req_price, 5));
+                SendError(h);
+                return;
+            }
+        }
+    }
+
     MqlTradeRequest req = {};
     req.action      = action;
     req.symbol      = sym;
@@ -584,8 +743,8 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         if (exec_price <= 0.0 && res.order > 0 && PositionSelectByTicket(res.order)) {
             exec_price = PositionGetDouble(POSITION_PRICE_OPEN);
         }
-        if (exec_price <= 0.0 && PositionSelect(sym)) {
-            exec_price = PositionGetDouble(POSITION_PRICE_OPEN);
+        if (exec_price <= 0.0 && res.price > 0.0) {
+            exec_price = res.price;
         }
         if (exec_price <= 0.0) {
             exec_price = req.price;
@@ -599,9 +758,9 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     if (pos_ticket == 0 && res.order > 0 && PositionSelectByTicket(res.order)) {
         pos_ticket = res.order;
     }
-    if (pos_ticket == 0 && PositionSelect(sym)) {
-        pos_ticket = PositionGetInteger(POSITION_TICKET);
-    }
+    // Deliberately do NOT fall back to PositionSelect(sym): in hedging accounts, selecting
+    // by symbol returns an arbitrary position, which can cause operations on the wrong ticket.
+    // Returning 0 (pending/unknown) is strictly safer than returning the wrong ticket.
 
     // Serialise as packed wire format: u32 retcode + u64 deal + u64 order +
     // u64 position + f64 volume + f64 price = 44 bytes (matches Mt5TradeResult in mt5_bridge.h).
@@ -760,6 +919,52 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         }
 
         string sym   = PositionGetString(POSITION_SYMBOL);
+        ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+        double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+        double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+        double tick_size = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+        if (tick_size <= 0.0) tick_size = point;
+        long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+        double min_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
+
+        if (tick_size > 0.0) {
+            if (sl > 0.0 && MathAbs(sl / tick_size - MathRound(sl / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify SL ", DoubleToString(sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && MathAbs(tp / tick_size - MathRound(tp / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify TP ", DoubleToString(tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+        }
+
+        if (ptype == POSITION_TYPE_BUY) {
+            if (sl > 0.0 && (bid - sl) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Buy SL ", DoubleToString(sl, 5), " violates stops level from bid ", DoubleToString(bid, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (tp - bid) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Buy TP ", DoubleToString(tp, 5), " violates stops level from bid ", DoubleToString(bid, 5));
+                SendError(h);
+                return;
+            }
+        } else if (ptype == POSITION_TYPE_SELL) {
+            if (sl > 0.0 && (sl - ask) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Sell SL ", DoubleToString(sl, 5), " violates stops level from ask ", DoubleToString(ask, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (ask - tp) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Sell TP ", DoubleToString(tp, 5), " violates stops level from ask ", DoubleToString(ask, 5));
+                SendError(h);
+                return;
+            }
+        }
+
         req.action   = TRADE_ACTION_SLTP;
         req.position = ticket;
         req.symbol   = sym;
@@ -777,10 +982,55 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         }
 
         string sym   = OrderGetString(ORDER_SYMBOL);
+        ENUM_ORDER_TYPE otype = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+        double ord_price = OrderGetDouble(ORDER_PRICE_OPEN);
+        double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+        double tick_size = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+        if (tick_size <= 0.0) tick_size = point;
+        long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+        double min_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
+
+        if (tick_size > 0.0) {
+            if (sl > 0.0 && MathAbs(sl / tick_size - MathRound(sl / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify pending SL ", DoubleToString(sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && MathAbs(tp / tick_size - MathRound(tp / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify pending TP ", DoubleToString(tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+                SendError(h);
+                return;
+            }
+        }
+
+        if (otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP) {
+            if (sl > 0.0 && (ord_price - sl) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify pending Buy SL violates stops level relative to price");
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (tp - ord_price) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify pending Buy TP violates stops level relative to price");
+                SendError(h);
+                return;
+            }
+        } else if (otype == ORDER_TYPE_SELL_LIMIT || otype == ORDER_TYPE_SELL_STOP) {
+            if (sl > 0.0 && (sl - ord_price) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify pending Sell SL violates stops level relative to price");
+                SendError(h);
+                return;
+            }
+            if (tp > 0.0 && (ord_price - tp) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify pending Sell TP violates stops level relative to price");
+                SendError(h);
+                return;
+            }
+        }
+
         req.action   = TRADE_ACTION_MODIFY;
         req.order    = ticket;
         req.symbol   = sym;
-        req.price    = OrderGetDouble(ORDER_PRICE_OPEN);
+        req.price    = ord_price;
         req.sl       = sl;
         req.tp       = tp;
         req.magic    = InpMagicNumber;
@@ -815,7 +1065,7 @@ void HandleSymbolInfoFull(long h, const uchar &payload[], uint len) {
     string sym = "";
     if (!SafeUnpackStr(payload, off, len, sym)) { SendError(h); return; }
 
-    if (!SymbolSelect(sym, true)) {
+    if (!EnsureSymbolAvailable(sym)) {
         Print("MT5Bridge: symbol '", sym, "' not available in Market Watch");
         SendError(h);
         return;
@@ -859,7 +1109,7 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     string sym = "";
     if (!SafeUnpackStr(payload, off, len, sym)) { SendError(h); return; }
 
-    if (!SymbolSelect(sym, true)) {
+    if (!EnsureSymbolAvailable(sym)) {
         Print("MT5Bridge: symbol '", sym, "' not available in Market Watch");
         SendError(h);
         return;
@@ -1020,8 +1270,15 @@ void OnTimer() {
         return;
     }
 
-    // Service all available requests per timer tick (non-blocking check first).
-    while (true) {
+    // Service a bounded number of requests per timer tick to prevent starving MT5's event loop.
+    ulong start_us = GetMicrosecondCount();
+    int processed = 0;
+
+    while (processed < InpMaxRequestsPerTimer) {
+        if (GetMicrosecondCount() - start_us >= InpMaxTimerBudgetUs) {
+            break; // Time budget elapsed; yield to MT5 event loop until next timer tick
+        }
+
         uchar peek_hdr[8];
         uint  peek_read = 0, peek_avail = 0, peek_left = 0;
         bool has_data = PeekNamedPipe(g_client, peek_hdr, 8,
@@ -1049,6 +1306,7 @@ void OnTimer() {
             ResetPipeServer("client disconnected");
             return;
         }
+        processed++;
     }
 }
 

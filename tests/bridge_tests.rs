@@ -252,6 +252,10 @@ fn test_trade_result_success_retcodes() {
     assert!(!res_filled.is_placed());
     assert!(!res_filled.is_partially_filled());
 
+    assert!(res_filled.is_deal());
+    assert!(!res_filled.is_working_order());
+    assert!(res_filled.has_position());
+
     // 10009 with deal == 0 and order > 0 => Placed (pending order)
     let res_done_pending = TradeResult {
         retcode: 10009,
@@ -265,6 +269,9 @@ fn test_trade_result_success_retcodes() {
     assert_eq!(res_done_pending.status(), TradeStatus::Placed);
     assert!(res_done_pending.is_placed());
     assert!(!res_done_pending.is_filled());
+    assert!(!res_done_pending.is_deal());
+    assert!(res_done_pending.is_working_order());
+    assert!(!res_done_pending.has_position());
 
     // 10008 PLACED
     let res_placed = TradeResult {
@@ -279,6 +286,8 @@ fn test_trade_result_success_retcodes() {
     assert_eq!(res_placed.status(), TradeStatus::Placed);
     assert!(res_placed.is_placed());
     assert!(!res_placed.is_filled());
+    assert!(!res_placed.is_deal());
+    assert!(res_placed.is_working_order());
 
     // 10010 DONE_PARTIAL
     let res_partial = TradeResult {
@@ -293,6 +302,9 @@ fn test_trade_result_success_retcodes() {
     assert_eq!(res_partial.status(), TradeStatus::PartiallyFilled);
     assert!(res_partial.is_partially_filled());
     assert!(!res_partial.is_filled());
+    assert!(res_partial.is_deal());
+    assert!(!res_partial.is_working_order());
+    assert!(res_partial.has_position());
 
     // 10019 NO_MONEY
     let res_err = TradeResult {
@@ -309,6 +321,51 @@ fn test_trade_result_success_retcodes() {
         res_err.description(),
         "TRADE_RETCODE_NO_MONEY: There is not enough money to complete the request"
     );
+}
+
+#[test]
+fn test_order_request_validate_with_symbol() {
+    let sym = SymbolInfo {
+        symbol: "EURUSD".to_string(),
+        point: 0.00001,
+        tick_value: 1.0,
+        tick_size: 0.00005,
+        lot_step: 0.01,
+        min_lot: 0.01,
+        max_lot: 100.0,
+        spread: 1.2,
+        digits: 5,
+    };
+
+    // Valid request
+    let req_ok = OrderRequest::buy("EURUSD", 0.10);
+    assert!(req_ok.validate_with_symbol(&sym).is_ok());
+
+    // Invalid volume step (0.015 when step is 0.01)
+    let req_bad_step = OrderRequest::buy("EURUSD", 0.015);
+    assert!(req_bad_step.validate_with_symbol(&sym).is_err());
+
+    // Below min lot (0.005 when min is 0.01)
+    let req_low_vol = OrderRequest::buy("EURUSD", 0.005);
+    assert!(req_low_vol.validate_with_symbol(&sym).is_err());
+
+    // Price not aligned with tick size (0.00005 tick size, price ending in 0.00003)
+    let req_bad_price = OrderRequest::pending(
+        "EURUSD",
+        OrderType::BuyLimit,
+        0.10,
+        1.10003,
+    );
+    assert!(req_bad_price.validate_with_symbol(&sym).is_err());
+
+    // Price correctly aligned with tick size
+    let req_good_price = OrderRequest::pending(
+        "EURUSD",
+        OrderType::BuyLimit,
+        0.10,
+        1.10005,
+    );
+    assert!(req_good_price.validate_with_symbol(&sym).is_ok());
 }
 
 #[test]

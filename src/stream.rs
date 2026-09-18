@@ -13,11 +13,18 @@ const DEFAULT_BAR_BUFFER: usize = 256;
 
 const DUP_PRICE_THRESHOLD: f64 = 1e-9;
 
-/// Stream real-time ticks for a symbol.
+/// Stream real-time ticks for a symbol using latest-quote polling.
 ///
-/// Spawns a background Tokio task that polls the bridge for new ticks,
-/// filters out duplicates, and yields new `Tick` values through a `mpsc::Receiver`.
-/// The background polling task terminates automatically when the receiver is dropped.
+/// **Streaming Semantics:**
+/// Spawns a background Tokio task that periodically polls the bridge for new quotes
+/// via `symbol_tick()` at the specified `poll_interval`. New quotes (changes in timestamp,
+/// bid, ask, last price, volume, or tick flags) are yielded through an `mpsc::Receiver`.
+/// The task terminates automatically when the receiver is dropped.
+///
+/// *Note on High Frequency:* This is **latest-quote polling**, not a lossless tick queue.
+/// Intermediate sub-millisecond price ticks occurring within a single polling interval are
+/// coalesced into the latest quote. For multi-symbol streaming, use balanced intervals (e.g. 20–100ms)
+/// to maintain efficient IPC pipe throughput.
 pub fn stream_ticks(
     client: Arc<Mt5Client>,
     symbol: &str,
@@ -32,6 +39,9 @@ pub fn stream_ticks(
         let mut prev_time_msc: i64 = 0;
         let mut prev_bid: f64 = 0.0;
         let mut prev_ask: f64 = 0.0;
+        let mut prev_last: f64 = 0.0;
+        let mut prev_volume: u64 = 0;
+        let mut prev_flags: u32 = 0;
 
         loop {
             let client_clone = Arc::clone(&client);
@@ -47,11 +57,17 @@ pub fn stream_ticks(
                         let time_dup = tick.time_msc == prev_time_msc;
                         let bid_dup = (tick.bid - prev_bid).abs() < DUP_PRICE_THRESHOLD;
                         let ask_dup = (tick.ask - prev_ask).abs() < DUP_PRICE_THRESHOLD;
+                        let last_dup = (tick.last - prev_last).abs() < DUP_PRICE_THRESHOLD;
+                        let vol_dup = tick.volume == prev_volume;
+                        let flags_dup = tick.flags == prev_flags;
 
-                        if !(time_dup && bid_dup && ask_dup) {
+                        if !(time_dup && bid_dup && ask_dup && last_dup && vol_dup && flags_dup) {
                             prev_time_msc = tick.time_msc;
                             prev_bid = tick.bid;
                             prev_ask = tick.ask;
+                            prev_last = tick.last;
+                            prev_volume = tick.volume;
+                            prev_flags = tick.flags;
 
                             if tx.send(tick).await.is_err() {
                                 debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");

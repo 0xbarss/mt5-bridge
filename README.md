@@ -29,11 +29,17 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
   - [5. Real-Time Tick Streaming](#5-real-time-tick-streaming)
   - [6. Real-Time Closed Bar Streaming](#6-real-time-closed-bar-streaming)
   - [7. Placing, Modifying & Closing Orders](#7-placing-modifying--closing-orders)
+- [API Reference](#api-reference)
+  - [Mt5Client](#mt5client)
+  - [Streaming APIs](#streaming-apis)
+  - [Data Structures & Models](#data-structures--models)
+  - [Error Handling](#error-handling)
 - [Multi-Instance / Multi-Account Support](#multi-instance--multi-account-support)
 - [Low-Level Binary Protocol](#low-level-binary-protocol)
 - [Building the C++ DLL from Source](#building-the-c-dll-from-source)
 - [Running on Linux via Wine](#running-on-linux-via-wine)
 - [Troubleshooting & FAQ](#troubleshooting--faq)
+- [Author & Contributions](#author--contributions)
 - [License & Disclaimer](#license--disclaimer)
 
 ---
@@ -173,6 +179,7 @@ mt5-bridge/
    - Go to **Tools** → **Options** → **Expert Advisors**.
    - Check **"Allow algorithmic trading"**.
    - Check **"Allow DLL imports"** *(essential! The EA uses `kernel32.dll` to create named pipes)*.
+   - Go to **Charts** tab: Set **"Max bars in chart"** to **"Unlimited"** (or `1000000`) so deep historical OHLCV queries are not truncated.
    - Click **OK**.
 8. Ensure the **"Algo Trading"** button in the top toolbar is **Green** (enabled).
 9. From the **Navigator** panel (Ctrl+N), expand **Expert Advisors**, find `mt5_bridge`, and drag it onto **any active chart** (e.g., EURUSD).
@@ -397,6 +404,232 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## API Reference
+
+Comprehensive reference for public structs, enums, methods, and functions in `mt5-bridge`.
+
+### `Mt5Client`
+
+[`Mt5Client`](src/client.rs) is the primary thread-safe client managing dynamic DLL loading, named pipe IPC, market data queries, and trade execution.
+
+#### Connection & Lifecycle
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| [`connect`](src/client.rs) | `pub fn connect(login: i64, password: &str, server: &str) -> Result<Self>` | Connects to MT5. Resolves `mt5_bridge.dll` via `MT5_DLL_PATH` environment variable, or checks adjacent to executable / current working directory. |
+| [`connect_with_dll`](src/client.rs) | `pub fn connect_with_dll(dll_path: impl AsRef<Path>, login: i64, password: &str, server: &str) -> Result<Self>` | Connects by loading the bridge DLL from an explicit file path. |
+| [`set_symbol_cache_ttl`](src/client.rs) | `pub fn set_symbol_cache_ttl(&mut self, ttl: Duration)` | Overrides the in-memory cache time-to-live for `symbol_info` lookups (default: 60 seconds). |
+| [`shutdown`](src/client.rs) | `pub fn shutdown(&self) -> Result<()>` | Gracefully disconnects from the MT5 pipe server. Automatically called when the client is dropped (`Drop`). |
+
+#### Account & Symbol Data
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| [`account_info`](src/client.rs) | `pub fn account_info(&self) -> Result<AccountInfo>` | Queries real-time balance, equity, margin, and free margin in deposit currency. |
+| [`symbol_info`](src/client.rs) | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Queries contract specifications (point size, lot step, min/max lots, spread, digits) with thread-safe caching. |
+| [`symbol_tick`](src/client.rs) | `pub fn symbol_tick(&self, symbol: &str) -> Result<Tick>` | Queries the latest quote tick (bid, ask, last, volume, flags). |
+
+#### Historical Market Data
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| [`copy_rates`](src/client.rs) | `pub fn copy_rates(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Rate>>` | Fetches raw `Rate` structs within UTC timestamp range `[from, to]`. |
+| [`copy_bars`](src/client.rs) | `pub fn copy_bars(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Bar>>` | Convenience wrapper around `copy_rates` that returns clean `Bar` records. |
+| [`copy_rates_chunked`](src/client.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries to allow MT5 to sync older bars from broker servers. |
+
+#### Order Management
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| [`order_send`](src/client.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
+| [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position by ticket ID. |
+| [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<()>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
+
+---
+
+### Streaming APIs
+
+Asynchronous real-time streaming built on Tokio channels (enabled via default `async` feature).
+
+| Function | Signature | Description |
+| :--- | :--- | :--- |
+| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task polling for new ticks, deduplicating unchanged quotes, and emitting new `Tick` values. Task shuts down when receiver is dropped. |
+| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Task shuts down when receiver is dropped. |
+
+---
+
+### Data Structures & Models
+
+#### `AccountInfo`
+[`AccountInfo`](src/types.rs) holds current account equity and margin metrics:
+```rust
+pub struct AccountInfo {
+    pub balance: f64,      // Balance in deposit currency
+    pub equity: f64,       // Current equity (balance + floating PnL)
+    pub margin: f64,       // Reserved margin
+    pub free_margin: f64,  // Available free margin for trading
+}
+```
+- `profit(&self) -> f64`: Returns floating profit/loss (`equity - balance`).
+- `margin_level(&self) -> Option<f64>`: Returns margin percentage (`equity / margin * 100.0`), or `None` if margin is zero.
+
+#### `SymbolInfo`
+[`SymbolInfo`](src/types.rs) contains contract specifications:
+```rust
+pub struct SymbolInfo {
+    pub symbol: String,    // Symbol name (e.g., "EURUSD")
+    pub point: f64,        // Smallest price change unit (e.g. 0.00001)
+    pub tick_value: f64,   // Monetary value of 1 tick per 1.0 lot
+    pub lot_step: f64,     // Minimum volume increment (e.g. 0.01)
+    pub min_lot: f64,      // Minimum allowed trade volume
+    pub max_lot: f64,      // Maximum allowed trade volume
+    pub spread: f64,       // Current spread in points
+    pub digits: u32,       // Price decimal places (e.g. 5)
+}
+```
+- `round_lot(&self, lot: f64) -> f64`: Rounds `lot` to the nearest valid `lot_step`, clamped between `min_lot` and `max_lot`. Returns `0.0` if `lot < min_lot`.
+- `is_valid_lot(&self, lot: f64) -> bool`: Verifies whether a lot size satisfies min, max, and step increments.
+- `point_value(&self, volume: f64) -> f64`: Returns currency value of a 1-point move for the given volume (`tick_value * volume`).
+
+#### `Tick`
+[`Tick`](src/types.rs) represents a live price quote:
+```rust
+pub struct Tick {
+    pub symbol: String,    // Symbol name
+    pub time_msc: i64,     // Quote timestamp in milliseconds (UTC)
+    pub time: i64,         // Quote timestamp in seconds (UTC)
+    pub bid: f64,          // Current bid price
+    pub ask: f64,          // Current ask price
+    pub last: f64,         // Last deal execution price
+    pub volume: u64,       // Volume for last deal
+    pub flags: u32,        // MT5 tick flags (TICK_FLAG_BID, etc.)
+}
+```
+- `spread(&self) -> f64`: Returns `ask - bid`.
+- `mid(&self) -> f64`: Returns mid-market price `(ask + bid) / 2.0`.
+
+#### `Bar`
+[`Bar`](src/types.rs) is a clean OHLCV candle representation:
+```rust
+pub struct Bar {
+    pub time: i64,         // Candle open timestamp in seconds (UTC)
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,       // Tick or real volume
+}
+```
+- `mid(&self) -> f64`: `(high + low) / 2.0`
+- `typical_price(&self) -> f64`: `(high + low + close) / 3.0`
+- `range(&self) -> f64`: `high - low`
+- `true_range(&self, prev_close: f64) -> f64`: Maximum of `high - low`, `|high - prev_close|`, and `|low - prev_close|`.
+- `is_bullish(&self) -> bool`: Returns `true` if `close > open`.
+- `is_bearish(&self) -> bool`: Returns `true` if `close < open`.
+
+#### `Rate`
+[`Rate`](src/types.rs) is the raw 1-to-1 binary equivalent of MT5 `MqlRates`:
+```rust
+pub struct Rate {
+    pub time: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: i64,
+    pub spread: i32,
+    pub real_volume: i64,
+}
+```
+
+#### `Timeframe`
+[`Timeframe`](src/types.rs) covers standard chart intervals:
+- **Variants**: `M1`, `M2`, `M3`, `M5`, `M6`, `M10`, `M12`, `M15`, `M20`, `M30`, `H1`, `H2`, `H3`, `H4`, `H6`, `H8`, `H12`, `D1`, `W1`, `MN1`.
+- `to_mt5_const(self) -> i32`: Translates to MT5 `ENUM_TIMEFRAMES` constant.
+- `seconds(self) -> i64`: Bar duration in seconds (e.g. `Timeframe::M15.seconds()` -> `900`).
+- `as_str(self) -> &'static str`: Returns standard code (e.g. `"M15"`).
+- `FromStr`: Parses standard representations (e.g. `"m15"`, `"15m"`, `"h1"`, `"1h"`, `"d1"`).
+
+#### `OrderRequest`
+[`OrderRequest`](src/types.rs) provides a fluent builder for trades:
+```rust
+// Instant Market Orders
+let req = OrderRequest::buy("EURUSD", 0.1)
+    .stop_loss(1.0800)
+    .take_profit(1.0950)
+    .comment("my_bot_buy");
+
+let req = OrderRequest::sell("EURUSD", 0.1)
+    .stop_loss(1.0950)
+    .take_profit(1.0800);
+
+// Pending Orders (Limit / Stop)
+let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, 1.0820)
+    .stop_loss(1.0770)
+    .take_profit(1.0920);
+```
+
+#### `OrderType`
+[`OrderType`](src/types.rs) corresponds to MT5 `ENUM_ORDER_TYPE`:
+- `OrderType::Buy` (0)
+- `OrderType::Sell` (1)
+- `OrderType::BuyLimit` (2)
+- `OrderType::SellLimit` (3)
+- `OrderType::BuyStop` (4)
+- `OrderType::SellStop` (5)
+- `is_buy(self) -> bool`: Returns `true` for `Buy`, `BuyLimit`, `BuyStop`.
+- `is_sell(self) -> bool`: Returns `true` for `Sell`, `SellLimit`, `SellStop`.
+
+#### `TradeResult`
+[`TradeResult`](src/types.rs) returned from order operations:
+```rust
+pub struct TradeResult {
+    pub retcode: u32,      // MT5 return code (e.g. 10009 = TRADE_RETCODE_DONE)
+    pub deal: u64,         // Deal ticket number (if executed)
+    pub order: u64,        // Order ticket number
+    pub volume: f64,       // Executed trade volume
+    pub price: f64,        // Execution price
+}
+```
+- `is_success(&self) -> bool`: Returns `true` if `retcode` is `10009` (Done), `10008` (Placed), or `10010` (Done Partial).
+- `description(&self) -> &'static str`: Returns human-readable explanation of `retcode`.
+
+---
+
+### Error Handling
+
+All client methods return [`Result<T, Mt5Error>`](src/error.rs).
+
+#### `Mt5Error`
+
+| Variant | Description |
+| :--- | :--- |
+| `DllLoadError { path, source }` | Failed to load `mt5_bridge.dll` from specified path. |
+| `SymbolNotFound { symbol, source }` | Required C ABI symbol missing in the loaded DLL. |
+| `InitFailed(status)` | Bridge handshake or named pipe connection failed. |
+| `CopyRatesFailed { symbol, status }` | Historical rates query failed in MT5. |
+| `AccountInfoFailed(status)` | Failed to retrieve balance or equity. |
+| `SymbolInfoFailed(symbol)` | Unknown symbol or contract specifications unavailable. |
+| `SymbolTickFailed(symbol)` | Tick quote query failed. |
+| `OrderSendFailed { symbol, retcode, description }` | Order rejected by MT5 terminal / trade server. |
+| `OrderCloseFailed { ticket, retcode, description }` | Position closure rejected. |
+| `OrderModifyFailed { ticket, retcode }` | SL/TP modification rejected. |
+| `UnsupportedFeature(name)` | DLL lacks optional export (e.g. `OrderModify`). |
+| `InvalidTimeRange { start, end }` | Query start timestamp is greater than end timestamp. |
+| `ChannelDisconnected` | Async stream receiver or sender disconnected. |
+| `Other(message)` | General internal bridge error. |
+
+#### Return Code Translator
+Call [`mt5_retcode_description(retcode: u32) -> &'static str`](src/error.rs) to inspect any MT5 return code:
+```rust
+use mt5_bridge::mt5_retcode_description;
+
+let msg = mt5_retcode_description(10016);
+println!("{}", msg); // "TRADE_RETCODE_INVALID_STOPS: Invalid stops (SL/TP) in the request"
+```
+
+---
+
 ## Multi-Instance / Multi-Account Support
 
 To connect to multiple MT5 terminals simultaneously on the same machine:
@@ -514,6 +747,10 @@ When using `mt5-bridge`:
 #### 5. "Retcode 10016: Invalid stops (SL/TP)"
 - **Cause**: Stop loss or take profit is placed too close to the current price (within broker freeze levels or stops level).
 - **Fix**: Check `SymbolInfoDouble(sym, SYMBOL_TRADE_STOPS_LEVEL)` and place stops outside that distance.
+
+#### 6. "Historical data is truncated or `copy_rates` returns fewer bars than requested"
+- **Cause**: MetaTrader 5 limits the maximum number of bars saved and cached per chart by default (often 100,000 or fewer).
+- **Fix**: Open MT5 → **Tools** → **Options** → **Charts** tab. Set **"Max bars in chart"** to **"Unlimited"** (or at least `1000000` / `1_000_000`), click **OK**, and restart the MT5 terminal.
 
 ---
  

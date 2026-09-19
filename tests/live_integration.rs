@@ -70,7 +70,7 @@ fn test_live_copy_rates_and_bars() {
     };
 
     let now = Utc::now().timestamp();
-    let from = now - (12 * 3600);
+    let from = now - (48 * 3600); // 48h lookback ensures Friday bars are retrieved on weekends
     let rates = client
         .copy_rates("EURUSD", Timeframe::M15, from, now)
         .expect("copy_rates failed");

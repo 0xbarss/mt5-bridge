@@ -135,6 +135,7 @@ struct Packer {
     void u64(uint64_t v) { append(&v, 8); }
     void f64(double   v) { append(&v, 8); }
     void str(const char* s) {
+        if (!s) s = "";
         uint32_t n = static_cast<uint32_t>(std::strlen(s));
         append(&n, 4);
         buf.append(s, n);
@@ -170,7 +171,8 @@ int Initialize(int64_t login, const char* password, const char* server) {
     for (int i = 0; i < 60 && pipe == INVALID_HANDLE_VALUE; ++i) {
         pipe = CreateFileA(pipe_path.c_str(),
                            GENERIC_READ | GENERIC_WRITE,
-                           0, nullptr, OPEN_EXISTING, 0, nullptr);
+                           0, nullptr, OPEN_EXISTING,
+                           SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
             DWORD err = GetLastError();
             if (err == ERROR_PIPE_BUSY)

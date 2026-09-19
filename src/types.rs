@@ -212,29 +212,156 @@ impl SymbolInfo {
         }
     }
 
+    /// Calculates the number of decimal places for a given lot step (e.g. 0.01 -> 2, 0.001 -> 3, 1.0 -> 0).
+    pub fn calculate_lot_digits(lot_step: f64) -> u32 {
+        if lot_step <= 0.0 || !lot_step.is_finite() {
+            return 2;
+        }
+        let mut step = lot_step;
+        let mut digits = 0;
+        while digits < 8 {
+            let diff = (step - step.round()).abs();
+            if diff < 1e-4 {
+                break;
+            }
+            step *= 10.0;
+            digits += 1;
+        }
+        digits
+    }
+
+    /// Number of decimal digits for trade volumes on this symbol based on `lot_step`.
+    pub fn lot_digits(&self) -> u32 {
+        Self::calculate_lot_digits(self.lot_step)
+    }
+
+    /// Returns `true` if `min_lot` is an integer multiple of `lot_step` from zero.
+    /// When `false`, the symbol uses a grid offset from `min_lot` (`min_lot + k * lot_step`).
+    pub fn is_min_lot_zero_aligned(&self) -> bool {
+        if self.lot_step <= 0.0 || self.min_lot <= 0.0 {
+            return true;
+        }
+        let steps = self.min_lot / self.lot_step;
+        (steps - steps.round()).abs() <= 1e-4
+    }
+
     /// Normalizes and clamps a lot size according to `lot_step`, `min_lot`, and `max_lot`.
-    /// Returns 0.0 if the requested lot is non-finite, <= 0.0, or strictly below `min_lot` (does not silently inflate risk).
+    ///
+    /// Handles both zero-offset and `min_lot`-offset lot step grids, cleans up
+    /// floating-point binary representation artifacts using [`lot_digits`],
+    /// and prevents risk inflation by returning 0.0 if the lot is strictly below `min_lot`
+    /// (with tolerance for floating-point underflow).
     pub fn round_lot(&self, lot: f64) -> f64 {
         if !lot.is_finite() || lot <= 0.0 || self.lot_step <= 0.0 {
             return 0.0;
         }
-        if lot < self.min_lot {
+        // Protect against risk inflation when lot is below min_lot.
+        // Tolerates 1e-7 floating-point underflow (e.g. 0.009999999999999998 for 0.01 min_lot).
+        if self.min_lot > 0.0 && lot < self.min_lot - 1e-7 {
             return 0.0;
         }
-        let steps = (lot / self.lot_step).round();
-        let rounded = steps * self.lot_step;
-        rounded.max(self.min_lot).min(self.max_lot)
+
+        let rounded = if self.min_lot > 0.0 && !self.is_min_lot_zero_aligned() {
+            let steps = ((lot - self.min_lot + 1e-9) / self.lot_step).round();
+            self.min_lot + steps.max(0.0) * self.lot_step
+        } else {
+            let steps = ((lot + 1e-9) / self.lot_step).round();
+            steps * self.lot_step
+        };
+
+        let clamped = if self.max_lot > 0.0 {
+            rounded.max(self.min_lot).min(self.max_lot)
+        } else {
+            rounded.max(self.min_lot)
+        };
+
+        let digits = self.lot_digits();
+        let factor = 10f64.powi(digits as i32);
+        (clamped * factor).round() / factor
+    }
+
+    /// Floors a lot size down to the nearest valid step according to `lot_step`, `min_lot`, and `max_lot`.
+    ///
+    /// Unlike [`round_lot`], `floor_lot` will **never round up**, ensuring that strict risk limits
+    /// (e.g. max dollar risk sizing) are never exceeded. Returns 0.0 if the floored volume is below `min_lot`.
+    pub fn floor_lot(&self, lot: f64) -> f64 {
+        if !lot.is_finite() || lot <= 0.0 || self.lot_step <= 0.0 {
+            return 0.0;
+        }
+        if self.min_lot > 0.0 && lot < self.min_lot - 1e-7 {
+            return 0.0;
+        }
+
+        let floored = if self.min_lot > 0.0 && !self.is_min_lot_zero_aligned() {
+            let steps = ((lot - self.min_lot + 1e-9) / self.lot_step).floor();
+            self.min_lot + steps.max(0.0) * self.lot_step
+        } else {
+            let steps = ((lot + 1e-9) / self.lot_step).floor();
+            steps * self.lot_step
+        };
+
+        if self.min_lot > 0.0 && floored < self.min_lot - 1e-7 {
+            return 0.0;
+        }
+
+        let clamped = if self.max_lot > 0.0 {
+            floored.max(self.min_lot).min(self.max_lot)
+        } else {
+            floored.max(self.min_lot)
+        };
+
+        let digits = self.lot_digits();
+        let factor = 10f64.powi(digits as i32);
+        (clamped * factor).round() / factor
+    }
+
+    /// Ceils a lot size up to the nearest valid step according to `lot_step`, `min_lot`, and `max_lot`.
+    pub fn ceil_lot(&self, lot: f64) -> f64 {
+        if !lot.is_finite() || lot <= 0.0 || self.lot_step <= 0.0 {
+            return 0.0;
+        }
+
+        let ceiled = if self.min_lot > 0.0 && !self.is_min_lot_zero_aligned() {
+            let steps = ((lot - self.min_lot - 1e-9) / self.lot_step).ceil();
+            self.min_lot + steps.max(0.0) * self.lot_step
+        } else {
+            let steps = ((lot - 1e-9) / self.lot_step).ceil();
+            steps * self.lot_step
+        };
+
+        let clamped = if self.max_lot > 0.0 {
+            ceiled.max(self.min_lot).min(self.max_lot)
+        } else {
+            ceiled.max(self.min_lot)
+        };
+
+        let digits = self.lot_digits();
+        let factor = 10f64.powi(digits as i32);
+        (clamped * factor).round() / factor
     }
 
     /// Checks if a lot size satisfies broker minimum, maximum, and lot step constraints.
+    /// Supports both zero-based step multiples and `min_lot`-offset grids, with floating-point tolerance.
     pub fn is_valid_lot(&self, lot: f64) -> bool {
-        if !lot.is_finite() || lot < self.min_lot || lot > self.max_lot {
+        if !lot.is_finite() || lot <= 0.0 {
+            return false;
+        }
+        if self.min_lot > 0.0 && lot < self.min_lot - 1e-7 {
+            return false;
+        }
+        if self.max_lot > 0.0 && lot > self.max_lot + 1e-7 {
             return false;
         }
         if self.lot_step > 0.0 {
-            let steps = lot / self.lot_step;
-            let diff = (steps - steps.round()).abs();
-            if diff > 1e-4 {
+            let steps_zero = lot / self.lot_step;
+            let steps_min = if self.min_lot > 0.0 {
+                (lot - self.min_lot) / self.lot_step
+            } else {
+                steps_zero
+            };
+            let ok_zero = (steps_zero - steps_zero.round()).abs() <= 1e-4;
+            let ok_min = (steps_min - steps_min.round()).abs() <= 1e-4;
+            if !ok_zero && !ok_min {
                 return false;
             }
         }
@@ -791,6 +918,65 @@ mod tests {
         assert_eq!(sym.round_lot(150.0), 100.0);
         assert!(sym.is_valid_lot(0.12));
         assert!(!sym.is_valid_lot(0.004));
+
+        // Float noise elimination (0.29 / 0.01)
+        assert_eq!(sym.round_lot(0.29), 0.29);
+        assert_eq!(sym.round_lot(0.07), 0.07);
+
+        // Tolerance for floating-point underflow slightly below min_lot
+        assert_eq!(sym.round_lot(0.009999999999999998), 0.01);
+        assert!(sym.is_valid_lot(0.009999999999999998));
+
+        // Floor lot (essential for risk management so risk is not exceeded)
+        assert_eq!(sym.floor_lot(0.129), 0.12);
+        assert_eq!(sym.floor_lot(0.009), 0.0);
+
+        // Ceil lot
+        assert_eq!(sym.ceil_lot(0.121), 0.13);
+        assert_eq!(sym.ceil_lot(0.001), 0.01);
+    }
+
+    #[test]
+    fn test_lot_rounding_min_offset_pairs() {
+        // Many CFD/crypto/index pairs have min_lot that is NOT a multiple of lot_step
+        // E.g., min_lot = 0.05, lot_step = 0.02 -> allowed: 0.05, 0.07, 0.09, 0.11...
+        let sym = SymbolInfo {
+            symbol: "CFD_INDEX".to_string(),
+            point: 0.01,
+            tick_value: 1.0,
+            tick_size: 0.01,
+            lot_step: 0.02,
+            min_lot: 0.05,
+            max_lot: 50.0,
+            spread: 2.0,
+            digits: 2,
+        };
+
+        assert!(!sym.is_min_lot_zero_aligned());
+        assert_eq!(sym.lot_digits(), 2);
+
+        // Minimum lot itself MUST be valid and round to itself
+        assert!(sym.is_valid_lot(0.05));
+        assert_eq!(sym.round_lot(0.05), 0.05);
+
+        // Step increments from min_lot (0.05 + 0.02 = 0.07)
+        assert!(sym.is_valid_lot(0.07));
+        assert_eq!(sym.round_lot(0.07), 0.07);
+
+        assert!(sym.is_valid_lot(0.09));
+        assert_eq!(sym.round_lot(0.09), 0.09);
+
+        // Rounding nearest to min_lot grid
+        assert_eq!(sym.round_lot(0.06), 0.07);
+        assert_eq!(sym.floor_lot(0.06), 0.05);
+        assert_eq!(sym.ceil_lot(0.06), 0.07);
+
+        // Invalid lot not on step grid
+        assert!(!sym.is_valid_lot(0.065));
+
+        // Sub-min lot returns 0.0
+        assert_eq!(sym.round_lot(0.02), 0.0);
+        assert_eq!(sym.floor_lot(0.04), 0.0);
     }
 
     #[test]

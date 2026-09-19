@@ -120,6 +120,11 @@ ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
         return ORDER_FILLING_FOK;
     if ((filling & SYMBOL_FILLING_IOC) != 0)
         return ORDER_FILLING_IOC;
+    // Fallback based on trade execution mode when SYMBOL_FILLING_MODE reports 0
+    long exec = SymbolInfoInteger(sym, SYMBOL_TRADE_EXEMODE);
+    if (exec == SYMBOL_TRADE_EXECUTION_MARKET || exec == SYMBOL_TRADE_EXECUTION_INSTANT) {
+        return ORDER_FILLING_IOC;
+    }
     return ORDER_FILLING_RETURN;
 }
 
@@ -412,7 +417,10 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
 
     long offset = 0;
     if (InpConvertToUTC) {
-        offset = (long)TimeTradeServer() - (long)TimeGMT();
+        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
+        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
+            offset = sec_diff;
+        }
     }
     ENUM_TIMEFRAMES mtf     = (ENUM_TIMEFRAMES)tf;
     datetime        dt_from = (datetime)(from + offset);
@@ -741,14 +749,31 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         }
     }
 
+    int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+    double norm_price = NormalizeDouble(req_price, sym_digits);
+    double norm_sl    = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+    double norm_tp    = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
+
+    double norm_vol = volume;
+    if (step_vol > 0.0) {
+        double s = step_vol;
+        int d = 0;
+        while (d < 8) {
+            if (MathAbs(s - MathRound(s)) < 1e-4) break;
+            s *= 10.0;
+            d++;
+        }
+        norm_vol = NormalizeDouble(volume, d);
+    }
+
     MqlTradeRequest req = {};
     req.action      = action;
     req.symbol      = sym;
-    req.volume      = volume;
+    req.volume      = norm_vol;
     req.type        = order_type;
-    req.price       = req_price;
-    req.sl          = sl;
-    req.tp          = tp;
+    req.price       = norm_price;
+    req.sl          = norm_sl;
+    req.tp          = norm_tp;
     req.deviation   = deviation;
     req.magic       = (magic > 0) ? (long)magic : InpMagicNumber;
     req.comment     = comment;
@@ -999,11 +1024,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
             }
         }
 
+        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
         req.action   = TRADE_ACTION_SLTP;
         req.position = ticket;
         req.symbol   = sym;
-        req.sl       = sl;
-        req.tp       = tp;
+        req.sl       = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+        req.tp       = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
         req.magic    = (pos_magic > 0) ? pos_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else if (OrderSelect(ticket)) {
@@ -1064,12 +1090,13 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
             }
         }
 
+        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
         req.action   = TRADE_ACTION_MODIFY;
         req.order    = ticket;
         req.symbol   = sym;
-        req.price    = ord_price;
-        req.sl       = sl;
-        req.tp       = tp;
+        req.price    = NormalizeDouble(ord_price, sym_digits);
+        req.sl       = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+        req.tp       = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
         req.magic    = (ord_magic > 0) ? ord_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else {
@@ -1155,7 +1182,13 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     MqlTick tick;
     if (!SymbolInfoTick(sym, tick)) { SendError(h); return; }
 
-    long offset_ms = ((long)TimeTradeServer() - (long)TimeGMT()) * 1000;
+    long offset_ms = 0;
+    if (InpConvertToUTC) {
+        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
+        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
+            offset_ms = sec_diff * 1000;
+        }
+    }
     long tick_ms = (long)tick.time_msc;
     if (tick_ms <= 0) {
         tick_ms = (long)tick.time * 1000;
@@ -1240,7 +1273,7 @@ long CreatePipeHandle() {
 
     long h = CreateNamedPipeW(
         g_pipe_path,
-        PIPE_ACCESS_DUPLEX,
+        PIPE_ACCESS_DUPLEX | 0x00080000 /* FILE_FLAG_FIRST_PIPE_INSTANCE */,
         PIPE_TYPE_BYTE | PIPE_NOWAIT,
         1,
         65536,
@@ -1254,7 +1287,7 @@ long CreatePipeHandle() {
         sa.lpSecurityDescriptor = 0;
         h = CreateNamedPipeW(
             g_pipe_path,
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | 0x00080000 /* FILE_FLAG_FIRST_PIPE_INSTANCE */,
             PIPE_TYPE_BYTE | PIPE_NOWAIT,
             1,
             65536,
@@ -1300,7 +1333,8 @@ void OnDeinit(const int reason) {
     g_authenticated = false;
     if (g_client != INVALID_HANDLE) {
         DisconnectNamedPipe(g_client);
-        CloseHandle(g_client);
+        // Do not close g_client: g_client aliases g_server (g_client = g_server).
+        // Closing it here and closing g_server below would cause a Win32 double-close.
         g_client = INVALID_HANDLE;
     }
     if (g_server != INVALID_HANDLE) {

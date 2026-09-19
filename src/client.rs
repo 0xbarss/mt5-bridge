@@ -295,6 +295,36 @@ impl Mt5Client {
         Ok(info)
     }
 
+    /// Query symbol specifications directly from MT5, bypassing the in-memory cache,
+    /// and update the cache with fresh values.
+    pub fn symbol_info_fresh(&self, symbol: &str) -> Result<SymbolInfo> {
+        let upper = symbol.to_uppercase();
+        let fn_sym = self
+            .fn_sym_info
+            .ok_or(Mt5Error::UnsupportedFeature("SymbolInfoFull"))?;
+
+        let sym_c = CString::new(symbol)?;
+        let mut raw = Mt5SymInfo::default();
+
+        let ret = unsafe { fn_sym(sym_c.as_ptr(), &mut raw) };
+        if ret != 1 {
+            return Err(Mt5Error::SymbolInfoFailed(symbol.to_string()));
+        }
+
+        let info = SymbolInfo::from_raw(symbol, raw);
+        self.symbol_cache
+            .lock()
+            .unwrap()
+            .insert(upper, (info.clone(), Instant::now()));
+
+        Ok(info)
+    }
+
+    /// Clear all cached symbol specifications.
+    pub fn clear_symbol_cache(&self) {
+        self.symbol_cache.lock().unwrap().clear();
+    }
+
     /// Query the latest price tick for a symbol.
     pub fn symbol_tick(&self, symbol: &str) -> Result<Tick> {
         let fn_sym_tick = self
@@ -589,6 +619,15 @@ impl Mt5Client {
         );
 
         Ok(trade_result)
+    }
+
+    /// Cancel an active pending order (Buy/Sell Limit or Buy/Sell Stop) by its ticket number.
+    ///
+    /// This is an ergonomic alias for [`order_close`](Self::order_close) specifically intended
+    /// for pending orders. Under the hood, the EA detects that the ticket represents a pending order
+    /// and issues an MT5 `TRADE_ACTION_REMOVE` order request.
+    pub fn order_cancel(&self, ticket: u64) -> Result<TradeResult> {
+        self.order_close(ticket)
     }
 
     /// Modify the Stop Loss and/or Take Profit of an open position or pending order.

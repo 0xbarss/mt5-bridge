@@ -82,6 +82,31 @@ pub enum Mt5Error {
     #[error("Reconciliation error: {0}")]
     ReconciliationError(String),
 
+    #[error("Deal history query failed (status {0})")]
+    DealsFailed(i32),
+
+    #[error("client_order_id '{client_order_id}' conflicts with an existing order: {reason}")]
+    ClientOrderIdConflict {
+        client_order_id: String,
+        reason: String,
+    },
+
+    #[error("{} order(s) with an unresolved (UNKNOWN) execution outcome block new submissions{}: {client_order_ids:?}. Call reconcile() until they are resolved; do not retry blindly.", .client_order_ids.len(), if .symbol.is_empty() { String::new() } else { format!(" for symbol '{}'", .symbol) })]
+    UnresolvedUnknownOrders {
+        /// Symbol of the blocked submission (empty when the block scope is the whole strategy).
+        symbol: String,
+        client_order_ids: Vec<String>,
+    },
+
+    #[error("Retry of order '{client_order_id}' is not allowed: {reason}")]
+    RetryNotAllowed {
+        client_order_id: String,
+        reason: String,
+    },
+
+    #[error("Order state persistence error: {0}")]
+    PersistenceError(String),
+
     #[error("Optional export '{0}' is not supported by the loaded DLL")]
     UnsupportedFeature(&'static str),
 

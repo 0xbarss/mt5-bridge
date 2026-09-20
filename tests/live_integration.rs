@@ -18,9 +18,18 @@ fn get_client() -> Option<(Mt5Client, MutexGuard<'static, ()>)> {
         .unwrap_or_default();
     let server = env::var("MT5_SERVER").unwrap_or_default();
 
+    let require_live = env::var("MT5_REQUIRE_LIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     match Mt5Client::connect(login, &password, &server) {
         Ok(client) => Some((client, guard)),
-        Err(_) => None, // Gracefully skip if MT5 bridge is not active/available
+        Err(e) => {
+            if require_live {
+                panic!("MT5_REQUIRE_LIVE is set, but Mt5Client::connect failed: {e:?}");
+            }
+            None // Gracefully skip if MT5 bridge is not active/available
+        }
     }
 }
 
@@ -278,5 +287,42 @@ fn test_live_reconciliation_engine() {
         report.positions.len(),
         report.pending_orders.len(),
         report.is_clean()
+    );
+}
+
+#[test]
+fn test_live_deal_history() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let now = Utc::now().timestamp();
+    let from = now - (30 * 86400); // 30 days lookback
+    let deals = client.deals(from, now).expect("client.deals failed");
+    println!("Live deals retrieved from history: {}", deals.len());
+    for deal in &deals {
+        assert!(deal.ticket > 0);
+        assert!(!deal.symbol.is_empty());
+    }
+}
+
+#[test]
+fn test_live_order_manager_reconciliation_with_deals() {
+    use mt5_bridge::{LifecycleState, OrderManager};
+
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let mut manager = OrderManager::new(998877);
+    assert_eq!(manager.lifecycle(), LifecycleState::Starting);
+
+    let report = manager.reconcile(&client).expect("manager.reconcile failed");
+    assert_eq!(manager.lifecycle(), LifecycleState::Ready);
+    assert!(
+        report.unresolved_orders.is_empty(),
+        "Fresh manager should have 0 unresolved orders"
     );
 }

@@ -86,10 +86,32 @@ typedef struct {
     char     comment[32];
 } Mt5Order;              /* 140 bytes */
 
+/* Completed trade deal from MT5 history (protocol v4+).
+ * Only BUY/SELL deals are returned; balance/credit/etc. deals are filtered out by the EA. */
+typedef struct {
+    uint64_t ticket;
+    uint64_t order;         /* ticket of the order that produced this deal */
+    uint64_t position_id;   /* DEAL_POSITION_ID */
+    int64_t  time;          /* UTC seconds when the EA is configured with InpConvertToUTC */
+    int32_t  type;          /* 0 = Buy, 1 = Sell */
+    int32_t  entry;         /* 0 = In, 1 = Out, 2 = InOut, 3 = OutBy */
+    uint64_t magic;
+    double   volume;
+    double   price;
+    double   commission;
+    double   swap;
+    double   profit;
+    char     symbol[32];
+    char     comment[32];
+} Mt5Deal;               /* 152 bytes */
+
 #pragma pack(pop)
 
-/* Protocol version for wire handshake compatibility checks */
-#define MT5_BRIDGE_PROTOCOL_VERSION 3
+/* Protocol version for wire handshake compatibility checks.
+ * v4: adds CMD_DEALS_GET / Mt5Deal, and changes the order comment wire format from
+ *     "cid:<truncated raw id>" to "cid:<13-char hash token>". Must match PROTOCOL_VERSION in
+ *     src/ffi.rs and the EA's PROTOCOL_VERSION; the handshake rejects mismatched pairs. */
+#define MT5_BRIDGE_PROTOCOL_VERSION 4
 
 /* Standard bridge operation return codes */
 #define MT5_OK                     1
@@ -105,6 +127,7 @@ static_assert(sizeof(Mt5Tick) == 44, "Mt5Tick size must be exactly 44 bytes");
 static_assert(sizeof(Mt5TradeResult) == 44, "Mt5TradeResult size must be exactly 44 bytes");
 static_assert(sizeof(Mt5Position) == 148, "Mt5Position size must be exactly 148 bytes");
 static_assert(sizeof(Mt5Order) == 140, "Mt5Order size must be exactly 140 bytes");
+static_assert(sizeof(Mt5Deal) == 152, "Mt5Deal size must be exactly 152 bytes");
 #endif
 
 #ifdef __cplusplus
@@ -155,6 +178,11 @@ MT5_API int PositionsGet(Mt5Position* buf, int buf_capacity, uint64_t magic_filt
 
 /* Query pending orders. Returns count filled into buf, or -1 on error. */
 MT5_API int OrdersGet(Mt5Order* buf, int buf_capacity, uint64_t magic_filter, const char* symbol_filter);
+
+/* Query completed trade deals with from <= time <= to (UTC seconds). magic_filter 0 = any,
+ * symbol_filter NULL/"" = any. Returns count filled into buf, or -1 on error.
+ * A return value equal to buf_capacity means the result may have been truncated. */
+MT5_API int DealsGet(Mt5Deal* buf, int buf_capacity, int64_t from, int64_t to, uint64_t magic_filter, const char* symbol_filter);
 
 #ifdef __cplusplus
 }

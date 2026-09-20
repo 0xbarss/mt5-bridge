@@ -1,5 +1,7 @@
 use crate::error::mt5_retcode_description;
-use crate::ffi::{Mt5Order, Mt5Position, Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TradeResult};
+use crate::ffi::{
+    Mt5Deal, Mt5Order, Mt5Position, Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TradeResult,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -563,6 +565,227 @@ impl OrderType {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Client order ID ⇄ MT5 wire comment identity
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum length of an MT5 order/position comment in bytes.
+pub const MT5_COMMENT_MAX_BYTES: usize = 31;
+
+/// Length in characters of the fixed-width wire token derived from a `client_order_id`.
+pub const WIRE_ID_LEN: usize = 13;
+
+/// Maximum accepted length of a caller-supplied `client_order_id`, in bytes.
+///
+/// The full ID is never sent over the wire (only its [`wire_id`] is), so this limit exists
+/// purely to keep persisted state and log lines sane.
+pub const MAX_CLIENT_ORDER_ID_BYTES: usize = 128;
+
+/// Reserved comment prefix used to embed the wire token in MT5 comments.
+pub const WIRE_COMMENT_PREFIX: &str = "cid:";
+
+const CROCKFORD32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Truncate `s` to at most `max_bytes` bytes **without splitting a UTF-8 character**.
+///
+/// Unlike a raw `&s[..n]` slice this can never panic, no matter what the caller supplied.
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Derive the short, deterministic wire token for a `client_order_id`.
+///
+/// MT5 comments are limited to 31 bytes, so the full client order ID cannot be embedded
+/// verbatim without truncation (which would make IDs sharing a prefix indistinguishable).
+/// Instead the *entire* ID is hashed to 64 bits (FNV-1a with a murmur3 `fmix64` finalizer)
+/// and rendered as [`WIRE_ID_LEN`] Crockford-base32 characters, e.g. `"3K9Q0MZ7V1XTB"`.
+///
+/// **Stability contract:** this function is part of the persisted/wire format. Changing it
+/// would orphan every in-flight order across an upgrade, so it is pinned by test vectors.
+/// The mapping `client_order_id → wire_id` is recorded on every [`TrackedOrder`], and
+/// [`OrderManager`](crate::OrderManager) refuses any submission whose wire token collides
+/// with a *different* client order ID, so a hash collision surfaces as an explicit error
+/// instead of a silent wrong-order replay.
+pub fn wire_id(client_order_id: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in client_order_id.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // murmur3 fmix64 avalanche so structurally similar IDs diverge across all bits
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+
+    let mut out = String::with_capacity(WIRE_ID_LEN);
+    for i in 0..WIRE_ID_LEN {
+        let shift = 60 - 5 * i as u32;
+        out.push(CROCKFORD32[((h >> shift) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+fn is_wire_token(s: &str) -> bool {
+    s.len() == WIRE_ID_LEN && s.bytes().all(|b| CROCKFORD32.contains(&b))
+}
+
+/// Extract the wire token from an MT5 comment produced by [`OrderRequest::effective_comment`].
+///
+/// Returns `Some(token)` only for a well-formed `cid:<13 base32 chars>` prefix that is
+/// followed by the end of the string or a non-alphanumeric separator (brokers sometimes
+/// append suffixes such as `[sl 1.0850]` on closing deals). Free-text comments, including
+/// ones that merely start with `cid:`, return `None`.
+pub fn parse_wire_id(comment: &str) -> Option<&str> {
+    let rest = comment.strip_prefix(WIRE_COMMENT_PREFIX)?;
+    let token = rest.get(..WIRE_ID_LEN)?;
+    if !is_wire_token(token) {
+        return None;
+    }
+    match rest[WIRE_ID_LEN..].chars().next() {
+        None => Some(token),
+        Some(c) if !c.is_ascii_alphanumeric() => Some(token),
+        Some(_) => None,
+    }
+}
+
+/// Returns `true` if `comment` carries the wire token belonging to `client_order_id`.
+pub fn comment_matches_client_order_id(comment: &str, client_order_id: &str) -> bool {
+    match parse_wire_id(comment) {
+        Some(token) => token == wire_id(client_order_id),
+        None => false,
+    }
+}
+
+/// Category of disagreement between what was requested and what the broker reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MismatchKind {
+    Symbol,
+    /// Buy vs. sell.
+    Direction,
+    /// Order type differs (e.g. requested `BuyLimit`, found `BuyStop`).
+    OrderType,
+    Volume,
+    Price,
+    StopLoss,
+    TakeProfit,
+    Magic,
+}
+
+/// One attribute of a broker-side position/order that differs from the original request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttributeMismatch {
+    pub kind: MismatchKind,
+    /// What the local request asked for.
+    pub expected: String,
+    /// What the broker reports.
+    pub actual: String,
+}
+
+fn approx_volume_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-8
+}
+
+fn approx_price_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// Direction of a completed deal on the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DealEntry {
+    /// Opens or increases a position.
+    In,
+    /// Closes or reduces a position.
+    Out,
+    /// Reverses a position.
+    InOut,
+    /// Closed by an opposite position.
+    OutBy,
+    /// Any other/unrecognised entry code.
+    Other,
+}
+
+impl DealEntry {
+    /// `true` if this deal opened or increased exposure (the fills that satisfy an order).
+    pub fn is_entry(self) -> bool {
+        matches!(self, DealEntry::In | DealEntry::InOut)
+    }
+
+    fn from_raw(v: i32) -> Self {
+        match v {
+            0 => DealEntry::In,
+            1 => DealEntry::Out,
+            2 => DealEntry::InOut,
+            3 => DealEntry::OutBy,
+            _ => DealEntry::Other,
+        }
+    }
+}
+
+/// A completed broker-side deal from MT5 trade history.
+///
+/// Deal history is the authoritative record of what actually executed, independent of
+/// whether the synchronous [`TradeResult`] ever made it back over the pipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deal {
+    pub ticket: u64,
+    /// Ticket of the order that produced this deal.
+    pub order: u64,
+    /// Position this deal belongs to (`DEAL_POSITION_ID`).
+    pub position_id: u64,
+    /// Execution time (UTC seconds unless the EA is configured for raw broker time).
+    pub time: i64,
+    pub direction: OrderType,
+    pub entry: DealEntry,
+    pub magic: u64,
+    pub volume: f64,
+    pub price: f64,
+    pub commission: f64,
+    pub swap: f64,
+    pub profit: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+
+impl Deal {
+    pub fn from_raw(raw: Mt5Deal) -> Self {
+        let fixed = |bytes: &[u8; 32]| {
+            let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..len]).trim().to_string()
+        };
+        // Copy packed fields to locals (avoids taking references to packed fields).
+        let (sym, cmt) = (raw.symbol, raw.comment);
+        Self {
+            ticket: raw.ticket,
+            order: raw.order,
+            position_id: raw.position_id,
+            time: raw.time,
+            direction: if raw.deal_type == 1 {
+                OrderType::Sell
+            } else {
+                OrderType::Buy
+            },
+            entry: DealEntry::from_raw(raw.entry),
+            magic: raw.magic,
+            volume: raw.volume,
+            price: raw.price,
+            commission: raw.commission,
+            swap: raw.swap,
+            profit: raw.profit,
+            symbol: fixed(&sym),
+            comment: fixed(&cmt),
+        }
+    }
+}
+
 /// Parameters for placing an order via `order_send`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderRequest {
@@ -676,39 +899,59 @@ impl OrderRequest {
         self
     }
 
-    /// Formats the effective MT5 wire comment embedding client_order_id if present:
-    /// e.g. "cid:<client_order_id>" or "cid:<client_order_id>:<comment>", truncated to 31 chars max.
+    /// Formats the effective MT5 wire comment, embedding the order's identity if present.
+    ///
+    /// With a `client_order_id` the result is `cid:<wire_id>` or `cid:<wire_id>:<comment>`,
+    /// where `<wire_id>` is the fixed-width hash from [`wire_id`] — **not** a prefix of the
+    /// raw ID — so two different client order IDs can never be truncated into the same wire
+    /// identity. The whole string is capped at [`MT5_COMMENT_MAX_BYTES`] bytes; only the
+    /// free-text `comment` part is ever shortened, and always on a UTF-8 character boundary,
+    /// so this function cannot panic on non-ASCII input.
     pub fn effective_comment(&self) -> String {
-        match &self.client_order_id {
+        let full = match &self.client_order_id {
             Some(cid) if !cid.is_empty() => {
+                let token = wire_id(cid);
                 if self.comment.is_empty() {
-                    let s = format!("cid:{cid}");
-                    if s.len() > 31 {
-                        s[..31].to_string()
-                    } else {
-                        s
-                    }
+                    format!("{WIRE_COMMENT_PREFIX}{token}")
                 } else {
-                    let s = format!("cid:{cid}:{}", self.comment);
-                    if s.len() > 31 {
-                        s[..31].to_string()
-                    } else {
-                        s
-                    }
+                    format!("{WIRE_COMMENT_PREFIX}{token}:{}", self.comment)
                 }
             }
-            _ => {
-                if self.comment.len() > 31 {
-                    self.comment[..31].to_string()
-                } else {
-                    self.comment.clone()
-                }
-            }
-        }
+            _ => self.comment.clone(),
+        };
+        truncate_utf8(&full, MT5_COMMENT_MAX_BYTES).to_string()
     }
 
     /// Validates the order request parameters before submitting to the MT5 bridge.
     pub fn validate(&self) -> crate::error::Result<()> {
+        if let Some(cid) = &self.client_order_id {
+            if cid.trim().is_empty() {
+                return Err(crate::error::Mt5Error::Other(
+                    "client_order_id must not be empty or whitespace-only".to_string(),
+                ));
+            }
+            if cid.len() > MAX_CLIENT_ORDER_ID_BYTES {
+                return Err(crate::error::Mt5Error::Other(format!(
+                    "client_order_id is {} bytes; maximum is {MAX_CLIENT_ORDER_ID_BYTES}",
+                    cid.len()
+                )));
+            }
+            if cid.chars().any(char::is_control) {
+                return Err(crate::error::Mt5Error::Other(
+                    "client_order_id must not contain control characters".to_string(),
+                ));
+            }
+        }
+        if self.comment.chars().any(char::is_control) {
+            return Err(crate::error::Mt5Error::Other(
+                "order comment must not contain control characters".to_string(),
+            ));
+        }
+        if self.client_order_id.is_none() && self.comment.starts_with(WIRE_COMMENT_PREFIX) {
+            return Err(crate::error::Mt5Error::Other(format!(
+                "comment prefix '{WIRE_COMMENT_PREFIX}' is reserved for client order ID tracking"
+            )));
+        }
         if self.symbol.trim().is_empty() {
             return Err(crate::error::Mt5Error::Other(
                 "OrderRequest symbol cannot be empty".to_string(),
@@ -1067,47 +1310,92 @@ pub enum OrderState {
     Unknown,
     /// Order confirmed and reconstructed via reconciliation.
     Reconciled,
+    /// Reconciliation found the order on the broker, but one or more attributes
+    /// (volume, direction, SL/TP, symbol, magic…) differ from the original request.
+    /// Real exposure exists; an operator/strategy must review [`TrackedOrder::mismatches`]
+    /// and call [`OrderManager::acknowledge_mismatch`](crate::OrderManager::acknowledge_mismatch).
+    Mismatched,
 }
 
 /// Order tracker maintaining full execution lifecycle, volume accounting, and reconciliation state.
+///
+/// Every field is serialisable so a `TrackedOrder` can be journaled to durable storage before
+/// the corresponding request is transmitted (see [`OrderStore`](crate::OrderStore)). Fields
+/// added after the first release carry `#[serde(default)]`, so state exported by older
+/// versions still deserialises.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackedOrder {
+    /// Caller-facing idempotency key (full, untruncated).
     pub client_order_id: String,
+    /// The short token that identifies this order on the wire and in MT5 comments
+    /// (see [`wire_id`]). Persisted so the `client_order_id ⇄ wire token` mapping survives restarts.
+    #[serde(default)]
+    pub wire_id: String,
     pub symbol: String,
     pub order_type: OrderType,
     pub requested_volume: f64,
+    /// Requested limit/stop price (0 for market orders).
+    #[serde(default)]
+    pub requested_price: f64,
+    /// Requested stop loss (0 = none).
+    #[serde(default)]
+    pub requested_stop_loss: f64,
+    /// Requested take profit (0 = none).
+    #[serde(default)]
+    pub requested_take_profit: f64,
     pub filled_volume: f64,
     pub remaining_volume: f64,
     pub average_price: f64,
     pub order_ticket: u64,
     pub deal_ticket: u64,
+    /// Every entry-deal ticket attributed to this order (populated by deal-history reconciliation).
+    #[serde(default)]
+    pub deal_tickets: Vec<u64>,
     pub position_ticket: u64,
     pub state: OrderState,
     pub magic: u64,
     pub created_at: i64,
     pub updated_at: i64,
     pub error_message: Option<String>,
+    /// How many consecutive reconciliation passes found this unresolved order absent everywhere.
+    #[serde(default)]
+    pub absent_observations: u32,
+    /// Timestamp of the first of those passes.
+    #[serde(default)]
+    pub first_absent_at: Option<i64>,
+    /// Attribute disagreements found when this order was matched to broker state.
+    #[serde(default)]
+    pub mismatches: Vec<AttributeMismatch>,
 }
 
 impl TrackedOrder {
     pub fn new(req: &OrderRequest, client_order_id: impl Into<String>) -> Self {
         let now = chrono::Utc::now().timestamp();
+        let client_order_id = client_order_id.into();
         Self {
-            client_order_id: client_order_id.into(),
+            wire_id: wire_id(&client_order_id),
+            client_order_id,
             symbol: req.symbol.clone(),
             order_type: req.order_type,
             requested_volume: req.volume,
+            requested_price: req.price,
+            requested_stop_loss: req.stop_loss,
+            requested_take_profit: req.take_profit,
             filled_volume: 0.0,
             remaining_volume: req.volume,
             average_price: 0.0,
             order_ticket: 0,
             deal_ticket: 0,
+            deal_tickets: Vec::new(),
             position_ticket: 0,
             state: OrderState::Created,
             magic: req.magic.unwrap_or(0),
             created_at: now,
             updated_at: now,
             error_message: None,
+            absent_observations: 0,
+            first_absent_at: None,
+            mismatches: Vec::new(),
         }
     }
 
@@ -1122,6 +1410,9 @@ impl TrackedOrder {
         self.updated_at = chrono::Utc::now().timestamp();
         self.order_ticket = res.order;
         self.deal_ticket = res.deal;
+        if res.deal > 0 && !self.deal_tickets.contains(&res.deal) {
+            self.deal_tickets.push(res.deal);
+        }
         if res.position > 0 {
             self.position_ticket = res.position;
         }
@@ -1156,23 +1447,214 @@ impl TrackedOrder {
         self.updated_at = chrono::Utc::now().timestamp();
     }
 
-    /// Update state when confirmed active or filled via position reconciliation.
-    pub fn reconcile_with_position(&mut self, pos: &Position) {
+    /// Returns `true` while the outcome of the request is still undetermined
+    /// (`Unknown`, or `Submitting` — which after a crash is equivalent to `Unknown`).
+    pub fn is_unresolved(&self) -> bool {
+        matches!(self.state, OrderState::Unknown | OrderState::Submitting)
+    }
+
+    /// Clear the "absent from broker" observation counters (the order was seen, or was resolved).
+    pub fn reset_absence(&mut self) {
+        self.absent_observations = 0;
+        self.first_absent_at = None;
+    }
+
+    fn check_symbol(&self, actual: &str, out: &mut Vec<AttributeMismatch>) {
+        if !self.symbol.eq_ignore_ascii_case(actual) {
+            out.push(AttributeMismatch {
+                kind: MismatchKind::Symbol,
+                expected: self.symbol.clone(),
+                actual: actual.to_string(),
+            });
+        }
+    }
+
+    fn check_direction(&self, actual_is_buy: bool, out: &mut Vec<AttributeMismatch>) {
+        if self.order_type.is_buy() != actual_is_buy {
+            let name = |b: bool| if b { "buy" } else { "sell" }.to_string();
+            out.push(AttributeMismatch {
+                kind: MismatchKind::Direction,
+                expected: name(self.order_type.is_buy()),
+                actual: name(actual_is_buy),
+            });
+        }
+    }
+
+    fn check_magic(&self, actual: u64, out: &mut Vec<AttributeMismatch>) {
+        // A tracked order created without an explicit magic (0) makes no ownership claim.
+        if self.magic != 0 && self.magic != actual {
+            out.push(AttributeMismatch {
+                kind: MismatchKind::Magic,
+                expected: self.magic.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
+
+    fn check_volume(&self, expected: f64, actual: f64, out: &mut Vec<AttributeMismatch>) {
+        if !approx_volume_eq(expected, actual) {
+            out.push(AttributeMismatch {
+                kind: MismatchKind::Volume,
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
+
+    fn check_protection(&self, sl: f64, tp: f64, out: &mut Vec<AttributeMismatch>) {
+        if !approx_price_eq(self.requested_stop_loss, sl) {
+            out.push(AttributeMismatch {
+                kind: MismatchKind::StopLoss,
+                expected: self.requested_stop_loss.to_string(),
+                actual: sl.to_string(),
+            });
+        }
+        if !approx_price_eq(self.requested_take_profit, tp) {
+            out.push(AttributeMismatch {
+                kind: MismatchKind::TakeProfit,
+                expected: self.requested_take_profit.to_string(),
+                actual: tp.to_string(),
+            });
+        }
+    }
+
+    fn compare_working_order(
+        &self,
+        ord: &WorkingOrder,
+        check_volume: bool,
+    ) -> Vec<AttributeMismatch> {
+        let mut mm = Vec::new();
+        self.check_symbol(&ord.symbol, &mut mm);
+        if self.order_type != ord.order_type {
+            if self.order_type.is_buy() != ord.order_type.is_buy() {
+                self.check_direction(ord.order_type.is_buy(), &mut mm);
+            }
+            mm.push(AttributeMismatch {
+                kind: MismatchKind::OrderType,
+                expected: format!("{:?}", self.order_type),
+                actual: format!("{:?}", ord.order_type),
+            });
+        }
+        if check_volume {
+            self.check_volume(self.requested_volume, ord.volume_initial, &mut mm);
+        }
+        if !approx_price_eq(self.requested_price, ord.price_open) {
+            mm.push(AttributeMismatch {
+                kind: MismatchKind::Price,
+                expected: self.requested_price.to_string(),
+                actual: ord.price_open.to_string(),
+            });
+        }
+        self.check_protection(ord.stop_loss, ord.take_profit, &mut mm);
+        self.check_magic(ord.magic, &mut mm);
+        mm
+    }
+
+    fn finish_reconcile(&mut self, ok_state: OrderState, mm: Vec<AttributeMismatch>) {
+        self.state = if mm.is_empty() {
+            ok_state
+        } else {
+            OrderState::Mismatched
+        };
+        self.mismatches = mm;
+        self.reset_absence();
+        self.error_message = None;
+        self.updated_at = chrono::Utc::now().timestamp();
+    }
+
+    /// Reconcile against a live position, **comparing** symbol, direction, volume, SL, TP and
+    /// magic with the original request.
+    ///
+    /// The order becomes `Reconciled` only if every attribute agrees; otherwise it becomes
+    /// `Mismatched` and the returned list (also stored in [`mismatches`](Self::mismatches))
+    /// says exactly what differs. Fill data is taken from the position either way, because
+    /// the exposure is real regardless.
+    pub fn reconcile_with_position(&mut self, pos: &Position) -> Vec<AttributeMismatch> {
+        let mut mm = Vec::new();
+        self.check_symbol(&pos.symbol, &mut mm);
+        self.check_direction(pos.is_buy(), &mut mm);
+        self.check_volume(self.requested_volume, pos.volume, &mut mm);
+        self.check_protection(pos.stop_loss, pos.take_profit, &mut mm);
+        self.check_magic(pos.magic, &mut mm);
+
         self.position_ticket = pos.ticket;
         self.filled_volume = pos.volume;
         self.remaining_volume = (self.requested_volume - pos.volume).max(0.0);
         self.average_price = pos.price_open;
-        self.state = OrderState::Reconciled;
-        self.updated_at = chrono::Utc::now().timestamp();
+        self.finish_reconcile(OrderState::Reconciled, mm.clone());
+        mm
     }
 
-    /// Update state when confirmed active via working pending order reconciliation.
-    pub fn reconcile_with_working_order(&mut self, ord: &WorkingOrder) {
+    /// Reconcile against a live pending order, comparing type, symbol, volume, price, SL, TP and magic.
+    pub fn reconcile_with_working_order(&mut self, ord: &WorkingOrder) -> Vec<AttributeMismatch> {
+        let mm = self.compare_working_order(ord, true);
         self.order_ticket = ord.ticket;
         self.filled_volume = ord.volume_initial - ord.volume_current;
         self.remaining_volume = ord.volume_current;
-        self.state = OrderState::Accepted;
-        self.updated_at = chrono::Utc::now().timestamp();
+        self.finish_reconcile(OrderState::Accepted, mm.clone());
+        mm
+    }
+
+    /// Reconstruct fills from deal history — the authoritative record of what executed.
+    ///
+    /// `entry_deals` must be the entry deals attributed to this order. Filled volume becomes
+    /// their sum and the average price their volume-weighted mean, so an order filled as
+    /// 0.4 + 0.6 lots is reconstructed as exactly 1.0 lot even if the position has since been
+    /// closed or (netting accounts) merged with other exposure.
+    ///
+    /// * `position` — the live position these deals belong to, if any; used to verify SL/TP.
+    /// * `working` — a still-working remainder of this order, if any; the order is then
+    ///   `PartiallyFilled` rather than volume-mismatched.
+    pub fn reconcile_with_deals(
+        &mut self,
+        entry_deals: &[&Deal],
+        position: Option<&Position>,
+        working: Option<&WorkingOrder>,
+    ) -> Vec<AttributeMismatch> {
+        let mut mm = Vec::new();
+        let filled: f64 = entry_deals.iter().map(|d| d.volume).sum();
+        let notional: f64 = entry_deals.iter().map(|d| d.volume * d.price).sum();
+
+        let mut tickets: Vec<u64> = entry_deals.iter().map(|d| d.ticket).collect();
+        tickets.sort_unstable();
+        tickets.dedup();
+        self.deal_ticket = tickets.last().copied().unwrap_or(self.deal_ticket);
+        self.deal_tickets = tickets;
+        self.filled_volume = filled;
+        self.average_price = if filled > 0.0 { notional / filled } else { 0.0 };
+        if let Some(d) = entry_deals.iter().find(|d| d.position_id > 0) {
+            self.position_ticket = d.position_id;
+        }
+        if self.order_ticket == 0 {
+            if let Some(d) = entry_deals.iter().find(|d| d.order > 0) {
+                self.order_ticket = d.order;
+            }
+        }
+
+        // Every deal must agree on symbol / direction / magic with the request.
+        for d in entry_deals {
+            self.check_symbol(&d.symbol, &mut mm);
+            self.check_direction(d.direction.is_buy(), &mut mm);
+            self.check_magic(d.magic, &mut mm);
+        }
+        mm.dedup_by(|a, b| a.kind == b.kind && a.actual == b.actual);
+
+        let ok_state;
+        if let Some(w) = working {
+            mm.extend(self.compare_working_order(w, false));
+            self.order_ticket = w.ticket;
+            self.remaining_volume = w.volume_current;
+            ok_state = OrderState::PartiallyFilled;
+        } else {
+            self.remaining_volume = (self.requested_volume - filled).max(0.0);
+            self.check_volume(self.requested_volume, filled, &mut mm);
+            if let Some(pos) = position {
+                self.check_protection(pos.stop_loss, pos.take_profit, &mut mm);
+            }
+            ok_state = OrderState::Reconciled;
+        }
+        self.finish_reconcile(ok_state, mm.clone());
+        mm
     }
 
     /// Returns `true` if this order has reached a final state (Filled, Cancelled, Rejected).
@@ -1183,7 +1665,7 @@ impl TrackedOrder {
         )
     }
 
-    /// Returns `true` if this order is still open or working (Created, Submitting, Accepted, PartiallyFilled, Unknown).
+    /// Returns `true` if this order is still open or working (anything that is not terminal).
     pub fn is_active(&self) -> bool {
         !self.is_terminal()
     }
@@ -1214,10 +1696,13 @@ pub fn calculate_sl_ticks(
     digits: u32,
 ) -> f64 {
     let entry_ticks = price_to_ticks(entry, tick_size);
+    // Saturating arithmetic: `i64::MIN.abs()` overflows (panic in debug, silent wrap to a
+    // *negative* distance in release, which would put a buy's stop above entry).
+    let dist = distance_ticks.saturating_abs();
     let sl_ticks = if is_buy {
-        entry_ticks - distance_ticks.abs()
+        entry_ticks.saturating_sub(dist)
     } else {
-        entry_ticks + distance_ticks.abs()
+        entry_ticks.saturating_add(dist)
     };
     ticks_to_price(sl_ticks, tick_size, digits)
 }
@@ -1231,10 +1716,11 @@ pub fn calculate_tp_ticks(
     digits: u32,
 ) -> f64 {
     let entry_ticks = price_to_ticks(entry, tick_size);
+    let dist = distance_ticks.saturating_abs();
     let tp_ticks = if is_buy {
-        entry_ticks + distance_ticks.abs()
+        entry_ticks.saturating_add(dist)
     } else {
-        entry_ticks - distance_ticks.abs()
+        entry_ticks.saturating_sub(dist)
     };
     ticks_to_price(tp_ticks, tick_size, digits)
 }

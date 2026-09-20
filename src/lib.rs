@@ -59,23 +59,34 @@
 //! }
 //! ```
 
+pub mod backend;
 pub mod client;
 pub mod error;
 pub mod ffi;
+pub mod journal;
 pub mod reconciliation;
 pub mod types;
 
 #[cfg(feature = "async")]
 pub mod stream;
 
+pub use backend::TradingBackend;
 pub use client::Mt5Client;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
-pub use reconciliation::{LifecycleState, OrderManager, ReconciliationReport};
+#[cfg(feature = "serde_json")]
+pub use journal::JsonFileStore;
+pub use journal::OrderStore;
+pub use reconciliation::{
+    BrokerSnapshot, LifecycleState, OrderManager, ReconciliationReport, SafetyPolicy,
+    SharedOrderManager, UnknownBlockScope,
+};
 pub use types::{
-    calculate_sl_ticks, calculate_tp_ticks, price_to_ticks, ticks_to_price, AccountInfo, Bar,
-    HistoryResult, OrderRequest, OrderState, OrderType, Position, Rate, SymbolInfo, Tick,
-    Timeframe, TrackedOrder, TradeResult, TradeStatus, WorkingOrder,
+    MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
+    calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
+    price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
+    Deal, DealEntry, HistoryResult, MismatchKind, OrderRequest, OrderState, OrderType, Position,
+    Rate, SymbolInfo, Tick, Timeframe, TrackedOrder, TradeResult, TradeStatus, WorkingOrder,
 };
 
 #[cfg(feature = "async")]

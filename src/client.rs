@@ -36,6 +36,7 @@ pub struct Mt5Client {
     fn_sym_info: Option<FnSymInfo>,
     fn_positions: Option<FnPositions>,
     fn_orders: Option<FnOrders>,
+    fn_deals: Option<FnDeals>,
     symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     symbol_cache_ttl: Duration,
 }
@@ -134,6 +135,7 @@ impl Mt5Client {
             fn_sym_info,
             fn_positions,
             fn_orders,
+            fn_deals,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -222,6 +224,14 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_deals: Option<FnDeals> = lib
+                .get::<FnDeals>(b"DealsGet\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'DealsGet' not found — deal-history reconciliation disabled")
+                })
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -236,6 +246,7 @@ impl Mt5Client {
                 fn_sym_info,
                 fn_positions,
                 fn_orders,
+                fn_deals,
             )
         };
 
@@ -254,6 +265,7 @@ impl Mt5Client {
             fn_sym_info,
             fn_positions,
             fn_orders,
+            fn_deals,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: DEFAULT_SYMBOL_CACHE_TTL,
         };
@@ -886,6 +898,76 @@ impl Mt5Client {
         let n = (count as usize).min(buf.len());
         let orders = buf[..n].iter().copied().map(WorkingOrder::from_raw).collect();
         Ok(orders)
+    }
+
+    /// Maximum number of deals fetched by a single [`deals_filtered`](Self::deals_filtered) call.
+    pub const DEALS_CAPACITY: usize = 4096;
+
+    /// Query all completed trade deals (MT5 trade history) within `from <= time <= to`, in UTC seconds.
+    pub fn deals(&self, from: i64, to: i64) -> Result<Vec<Deal>> {
+        self.deals_filtered(from, to, None, None)
+    }
+
+    /// Query completed trade deals (MT5 trade history) with `from <= time <= to`, in UTC seconds,
+    /// optionally filtered by magic number and/or symbol.
+    ///
+    /// Deal history is the authoritative record of what actually executed. It lets
+    /// reconciliation reconstruct fill-by-fill volume, average price and deal tickets
+    /// independently of whether a synchronous [`TradeResult`] ever reached the caller, and it
+    /// still shows fills whose position has since been closed.
+    ///
+    /// If the result would exceed [`DEALS_CAPACITY`](Self::DEALS_CAPACITY) an error is returned
+    /// instead of a silently truncated list: an incomplete history could make an executed
+    /// order look absent. Narrow the time window or filters and retry.
+    pub fn deals_filtered(
+        &self,
+        from: i64,
+        to: i64,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Deal>> {
+        if from > to {
+            return Err(Mt5Error::InvalidTimeRange {
+                start: from,
+                end: to,
+            });
+        }
+        let fn_deals = self
+            .fn_deals
+            .ok_or(Mt5Error::UnsupportedFeature("DealsGet"))?;
+
+        let mag = magic.unwrap_or(0);
+        let sym_c = match symbol {
+            Some(s) => Some(CString::new(s)?),
+            None => None,
+        };
+        let sym_ptr = sym_c
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        let mut buf = vec![Mt5Deal::default(); Self::DEALS_CAPACITY];
+        let count = unsafe {
+            fn_deals(
+                buf.as_mut_ptr(),
+                Self::DEALS_CAPACITY as c_int,
+                from,
+                to,
+                mag,
+                sym_ptr,
+            )
+        };
+        if count < 0 {
+            return Err(Mt5Error::DealsFailed(count));
+        }
+        let n = (count as usize).min(buf.len());
+        if n >= Self::DEALS_CAPACITY {
+            return Err(Mt5Error::ReconciliationError(format!(
+                "deal history for the requested window reached the {} deal buffer limit and may be truncated; narrow the window or filters",
+                Self::DEALS_CAPACITY
+            )));
+        }
+        Ok(buf[..n].iter().copied().map(Deal::from_raw).collect())
     }
 
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.

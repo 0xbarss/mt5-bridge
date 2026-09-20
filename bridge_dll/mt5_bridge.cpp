@@ -45,6 +45,7 @@ enum Cmd : uint32_t {
     CMD_SYM_INFO      = 9,
     CMD_POSITIONS_GET = 10,
     CMD_ORDERS_GET    = 11,
+    CMD_DEALS_GET     = 12,
 };
 
 /* ── Pipe state ───────────────────────────────────────────────────────────── */
@@ -418,6 +419,33 @@ int OrdersGet(Mt5Order* buf, int buf_capacity, uint64_t magic_filter, const char
     if (n > buf_capacity) n = buf_capacity;
     if (n > 0) {
         std::memcpy(buf, data.data(), static_cast<size_t>(n) * sizeof(Mt5Order));
+    }
+    return n;
+}
+
+int DealsGet(Mt5Deal* buf, int buf_capacity, int64_t from, int64_t to, uint64_t magic_filter, const char* symbol_filter) {
+    Lock lk;
+    if (g_pipe == INVALID_HANDLE_VALUE || !buf || buf_capacity <= 0) return -1;
+
+    /* Request layout (must match HandleDealsGet in the EA): from, to, magic, symbol, capacity */
+    Packer p;
+    p.i64(from);
+    p.i64(to);
+    p.u64(magic_filter);
+    p.str(symbol_filter ? symbol_filter : "");
+    p.i32(buf_capacity);
+
+    if (!send_packet(CMD_DEALS_GET, p.buf)) return -1;
+
+    int32_t st = 0; std::string data;
+    if (!recv_packet(st, data) || st < 0) return -1;
+
+    int32_t count = st;
+    int32_t max_items = static_cast<int32_t>(data.size() / sizeof(Mt5Deal));
+    int32_t n = (count < max_items) ? count : max_items;
+    if (n > buf_capacity) n = buf_capacity;
+    if (n > 0) {
+        std::memcpy(buf, data.data(), static_cast<size_t>(n) * sizeof(Mt5Deal));
     }
     return n;
 }

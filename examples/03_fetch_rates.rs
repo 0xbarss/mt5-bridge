@@ -16,9 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let symbol = "EURUSD";
     let timeframe = Timeframe::M15;
 
-    // Fetch bars for the last 24 hours
+    // Fetch bars for the last 72 hours (ensures Friday bars are retrieved on weekends)
     let now = Utc::now().timestamp();
-    let from = now - (24 * 3600);
+    let from = now - (72 * 3600);
 
     println!(
         "1. Fetching raw {} {} rates (with spread) from {} to {}...",

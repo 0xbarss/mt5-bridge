@@ -135,8 +135,53 @@ impl Default for Mt5Order {
     }
 }
 
+/// Wire format for a completed deal from MT5 history (152 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5Deal {
+    pub ticket: u64,
+    pub order: u64,
+    pub position_id: u64,
+    pub time: i64,
+    pub deal_type: i32, // 0 = Buy, 1 = Sell (non-trade deals are filtered out by the EA)
+    pub entry: i32,     // 0 = In, 1 = Out, 2 = InOut, 3 = OutBy
+    pub magic: u64,
+    pub volume: f64,
+    pub price: f64,
+    pub commission: f64,
+    pub swap: f64,
+    pub profit: f64,
+    pub symbol: [u8; 32],
+    pub comment: [u8; 32],
+}
+
+impl Default for Mt5Deal {
+    fn default() -> Self {
+        Self {
+            ticket: 0,
+            order: 0,
+            position_id: 0,
+            time: 0,
+            deal_type: 0,
+            entry: 0,
+            magic: 0,
+            volume: 0.0,
+            price: 0.0,
+            commission: 0.0,
+            swap: 0.0,
+            profit: 0.0,
+            symbol: [0u8; 32],
+            comment: [0u8; 32],
+        }
+    }
+}
+
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
-pub const PROTOCOL_VERSION: u32 = 3;
+//
+// v4: adds `CMD_DEALS_GET` / `Mt5Deal` (trade-history query) and changes the order comment
+//     wire format from `cid:<truncated raw id>` to `cid:<13-char hash token>`. A v3 EA would
+//     mis-handle both, so the handshake refuses to pair mismatched halves.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub const MT5_OK: i32 = 1;
 pub const MT5_ERR_GENERAL: i32 = 0;
@@ -152,6 +197,7 @@ const _: () = {
     assert!(std::mem::size_of::<Mt5TradeResult>() == 44);
     assert!(std::mem::size_of::<Mt5Position>() == 148);
     assert!(std::mem::size_of::<Mt5Order>() == 140);
+    assert!(std::mem::size_of::<Mt5Deal>() == 152);
 };
 
 // Function pointer signatures for dynamic library loading.
@@ -183,6 +229,8 @@ pub type FnSymInfo = unsafe extern "C" fn(*const c_char, *mut Mt5SymInfo) -> c_i
 pub type FnPositions =
     unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const c_char) -> c_int;
 pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_char) -> c_int;
+pub type FnDeals =
+    unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
 
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]
@@ -199,4 +247,5 @@ pub enum ProtocolCmd {
     SymInfo = 9,
     PositionsGet = 10,
     OrdersGet = 11,
+    DealsGet = 12,
 }

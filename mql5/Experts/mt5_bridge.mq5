@@ -77,7 +77,11 @@ long  LocalFree(long hMem);
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-#define PROTOCOL_VERSION        3        // Wire protocol handshake version
+// Wire protocol handshake version. v4: adds CMD_DEALS_GET and changes the order comment wire
+// format from "cid:<truncated raw id>" to "cid:<13-char hash token>". Must equal PROTOCOL_VERSION in
+// src/ffi.rs and MT5_BRIDGE_PROTOCOL_VERSION in bridge_dll/mt5_bridge.h.
+#define PROTOCOL_VERSION        4
+#define WIRE_ID_LEN             13       // length of the hashed client-order-id token in comments
 
 //---- Protocol commands
 #define CMD_INIT          1
@@ -91,6 +95,7 @@ long  LocalFree(long hMem);
 #define CMD_SYM_INFO      9
 #define CMD_POSITIONS_GET 10
 #define CMD_ORDERS_GET    11
+#define CMD_DEALS_GET     12
 
 //---- EA input
 input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
@@ -496,7 +501,10 @@ struct BridgeTradeResult {
 
 //---- Order idempotency cache (stores recent executions to prevent duplicate fills on retry)
 struct OrderExecutionRecord {
-    string client_order_id;
+    string client_order_id;   // 13-char wire token (see ExtractClientOrderId), NOT the raw client ID
+    string symbol;            // request fingerprint: a replay is only valid for the SAME request
+    int    otype;
+    double req_volume;
     uint   retcode;
     ulong  deal;
     ulong  order;
@@ -511,9 +519,13 @@ OrderExecutionRecord g_order_cache[ORDER_CACHE_CAPACITY];
 int g_order_cache_count = 0;
 int g_order_cache_head  = 0;
 
-void CacheOrderExecution(const string cid, uint retcode, ulong deal, ulong order, ulong pos, double vol, double price) {
+void CacheOrderExecution(const string cid, const string req_symbol, int req_otype, double req_volume,
+                         uint retcode, ulong deal, ulong order, ulong pos, double vol, double price) {
     if (StringLen(cid) == 0) return;
     g_order_cache[g_order_cache_head].client_order_id = cid;
+    g_order_cache[g_order_cache_head].symbol          = req_symbol;
+    g_order_cache[g_order_cache_head].otype           = req_otype;
+    g_order_cache[g_order_cache_head].req_volume      = req_volume;
     g_order_cache[g_order_cache_head].retcode         = retcode;
     g_order_cache[g_order_cache_head].deal            = deal;
     g_order_cache[g_order_cache_head].order           = order;
@@ -525,32 +537,44 @@ void CacheOrderExecution(const string cid, uint retcode, ulong deal, ulong order
     if (g_order_cache_count < ORDER_CACHE_CAPACITY) g_order_cache_count++;
 }
 
-bool FindCachedOrderExecution(const string cid, uint &retcode, ulong &deal, ulong &order, ulong &pos, double &vol, double &price) {
-    if (StringLen(cid) == 0) return false;
+// Returns the ring-buffer index of a live (within 24 h) cached execution for this token, or -1.
+int FindCachedOrderIndex(const string cid) {
+    if (StringLen(cid) == 0) return -1;
     datetime cutoff = TimeCurrent() - 86400; // 24-hour cache TTL
     for (int i = 0; i < g_order_cache_count; i++) {
         if (g_order_cache[i].client_order_id == cid && g_order_cache[i].timestamp >= cutoff) {
-            retcode = g_order_cache[i].retcode;
-            deal    = g_order_cache[i].deal;
-            order   = g_order_cache[i].order;
-            pos     = g_order_cache[i].position;
-            vol     = g_order_cache[i].volume;
-            price   = g_order_cache[i].price;
-            return true;
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
+// Crockford base32 alphabet used by the Rust client's wire_id(): 0-9 and A-Z without I, L, O, U.
+bool IsWireTokenChar(const ushort c) {
+    if (c >= '0' && c <= '9') return true;
+    if (c < 'A' || c > 'Z') return false;
+    return (c != 'I' && c != 'L' && c != 'O' && c != 'U');
+}
+
+// Extract the idempotency key from an order comment.
+//
+// Returns the 13-character wire token ONLY for a well-formed identity prefix
+//     cid:<13 Crockford-base32 chars>            or
+//     cid:<13 Crockford-base32 chars>:<free text>
+// and "" for everything else. In particular a plain free-text comment (e.g. "scalp") is NEVER an
+// idempotency key: earlier versions returned the whole comment, so two unrelated orders sharing a
+// comment were treated as duplicates and the second silently received the first one's execution.
+// The token is a hash of the FULL client_order_id computed by the client, so distinct IDs that
+// merely share a long prefix can no longer collide (the old scheme truncated the raw ID).
 string ExtractClientOrderId(const string cmt) {
-    if (StringFind(cmt, "cid:") == 0) {
-        int next_colon = StringFind(cmt, ":", 4);
-        if (next_colon > 4) {
-            return StringSubstr(cmt, 4, next_colon - 4);
-        }
-        return StringSubstr(cmt, 4);
+    if (StringFind(cmt, "cid:") != 0) return "";
+    int n = StringLen(cmt);
+    if (n < 4 + WIRE_ID_LEN) return "";
+    for (int i = 4; i < 4 + WIRE_ID_LEN; i++) {
+        if (!IsWireTokenChar(StringGetCharacter(cmt, i))) return "";
     }
-    return cmt;
+    if (n > 4 + WIRE_ID_LEN && StringGetCharacter(cmt, 4 + WIRE_ID_LEN) != ':') return "";
+    return StringSubstr(cmt, 4, WIRE_ID_LEN);
 }
 
 void HandleOrderSend(long h, const uchar &payload[], uint len) {
@@ -577,18 +601,29 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         cid = ExtractClientOrderId(comment);
     }
 
-    uint cached_retcode = 0;
-    ulong cached_deal = 0, cached_order = 0, cached_pos = 0;
-    double cached_vol = 0.0, cached_price = 0.0;
-    if (StringLen(cid) > 0 && FindCachedOrderExecution(cid, cached_retcode, cached_deal, cached_order, cached_pos, cached_vol, cached_price)) {
-        Print("MT5Bridge: idempotent order replay for client_order_id=", cid, " (returning cached deal=", cached_deal, ", order=", cached_order, ")");
+    int cache_idx = (StringLen(cid) > 0) ? FindCachedOrderIndex(cid) : -1;
+    if (cache_idx >= 0) {
+        // Defence in depth: only replay an execution recorded for the SAME request. If the key matches
+        // but symbol/type/volume differ, replaying would hand this caller someone else's fill, so refuse.
+        if (g_order_cache[cache_idx].symbol != sym ||
+            g_order_cache[cache_idx].otype != otype ||
+            MathAbs(g_order_cache[cache_idx].req_volume - volume) > 1e-9) {
+            Print("MT5Bridge: REJECTED order — idempotency key ", cid, " was already used for a different request (",
+                  g_order_cache[cache_idx].symbol, " type=", g_order_cache[cache_idx].otype,
+                  " vol=", g_order_cache[cache_idx].req_volume, "); refusing to replay it for ",
+                  sym, " type=", otype, " vol=", volume);
+            SendError(h);
+            return;
+        }
+        Print("MT5Bridge: idempotent order replay for key=", cid, " (returning cached deal=", g_order_cache[cache_idx].deal,
+              ", order=", g_order_cache[cache_idx].order, ")");
         uchar cdata[];
-        PackU32(cdata, cached_retcode);
-        PackU64(cdata, cached_deal);
-        PackU64(cdata, cached_order);
-        PackU64(cdata, cached_pos);
-        PackF64(cdata, cached_vol);
-        PackF64(cdata, cached_price);
+        PackU32(cdata, g_order_cache[cache_idx].retcode);
+        PackU64(cdata, g_order_cache[cache_idx].deal);
+        PackU64(cdata, g_order_cache[cache_idx].order);
+        PackU64(cdata, g_order_cache[cache_idx].position);
+        PackF64(cdata, g_order_cache[cache_idx].volume);
+        PackF64(cdata, g_order_cache[cache_idx].price);
         SendOkData(h, cdata, (uint)ArraySize(cdata));
         return;
     }
@@ -912,7 +947,7 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
                res.retcode == TRADE_RETCODE_PLACED ||
                res.retcode == TRADE_RETCODE_DONE_PARTIAL)) {
         if (StringLen(cid) > 0) {
-            CacheOrderExecution(cid, res.retcode, res.deal, res.order, pos_ticket, res.volume, exec_price);
+            CacheOrderExecution(cid, sym, otype, volume, res.retcode, res.deal, res.order, pos_ticket, res.volume, exec_price);
         }
         SendOkData(h, data, (uint)ArraySize(data));
     } else {
@@ -1441,6 +1476,85 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
     SendCount(h, count, data, (uint)ArraySize(data));
 }
 
+// Completed trade deals (MT5 history) in [from, to] (UTC seconds), filtered by magic / symbol.
+// Request layout (must match DealsGet in bridge_dll/mt5_bridge.cpp):
+//     i64 from, i64 to, u64 magic_filter, str symbol_filter, i32 max_items
+// Response: count + count * 152-byte Mt5Deal records (layout in bridge_dll/mt5_bridge.h / src/ffi.rs).
+// Only BUY/SELL deals are returned. If more than max_items match, output stops at max_items and the
+// client treats count == max_items as "possibly truncated" (it never silently accepts a partial history).
+void HandleDealsGet(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    long from_utc = 0, to_utc = 0;
+    ulong magic_filter = 0;
+    string symbol_filter = "";
+    int max_items = 0;
+
+    if (!SafeUnpackI64(payload, off, len, from_utc) ||
+        !SafeUnpackI64(payload, off, len, to_utc)) {
+        SendError(h);
+        return;
+    }
+    SafeUnpackU64(payload, off, len, magic_filter);
+    SafeUnpackStr(payload, off, len, symbol_filter);
+    SafeUnpackI32(payload, off, len, max_items);
+    if (max_items <= 0) max_items = 1000;
+    if (to_utc < from_utc) { SendError(h); return; }
+
+    long offset = 0;
+    if (InpConvertToUTC) {
+        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
+        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
+            offset = sec_diff;
+        }
+    }
+
+    if (!HistorySelect((datetime)(from_utc + offset), (datetime)(to_utc + offset))) {
+        Print("MT5Bridge: HistorySelect failed for deals query, error=", GetLastError());
+        SendError(h);
+        return;
+    }
+
+    int total = HistoryDealsTotal();
+    uchar data[];
+    int count = 0;
+
+    for (int i = 0; i < total && count < max_items; i++) {
+        ulong ticket = HistoryDealGetTicket(i);
+        if (ticket == 0) continue;
+
+        long deal_type = HistoryDealGetInteger(ticket, DEAL_TYPE);
+        if (deal_type != DEAL_TYPE_BUY && deal_type != DEAL_TYPE_SELL) continue;  // skip balance/credit/etc.
+
+        ulong deal_magic = (ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+        if (magic_filter > 0 && deal_magic != magic_filter) continue;
+
+        string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
+        if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        long deal_time = HistoryDealGetInteger(ticket, DEAL_TIME);
+        if (InpConvertToUTC) deal_time -= offset;
+
+        PackU64(data, ticket);
+        PackU64(data, (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER));
+        PackU64(data, (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID));
+        PackI64(data, deal_time);
+        PackI32(data, (deal_type == DEAL_TYPE_SELL) ? 1 : 0);
+        PackI32(data, (int)HistoryDealGetInteger(ticket, DEAL_ENTRY));
+        PackU64(data, deal_magic);
+        PackF64(data, HistoryDealGetDouble(ticket, DEAL_VOLUME));
+        PackF64(data, HistoryDealGetDouble(ticket, DEAL_PRICE));
+        PackF64(data, HistoryDealGetDouble(ticket, DEAL_COMMISSION));
+        PackF64(data, HistoryDealGetDouble(ticket, DEAL_SWAP));
+        PackF64(data, HistoryDealGetDouble(ticket, DEAL_PROFIT));
+        PackFixedString32(data, sym);
+        PackFixedString32(data, HistoryDealGetString(ticket, DEAL_COMMENT));
+
+        count++;
+    }
+
+    SendCount(h, count, data, (uint)ArraySize(data));
+}
+
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
@@ -1480,6 +1594,7 @@ bool DispatchRequest(long h) {
         case CMD_SYM_INFO:     HandleSymbolInfoFull(h, payload, pay_len); break;
         case CMD_POSITIONS_GET:HandlePositionsGet(h, payload, pay_len);  break;
         case CMD_ORDERS_GET:   HandleOrdersGet(h, payload, pay_len);     break;
+        case CMD_DEALS_GET:    HandleDealsGet(h, payload, pay_len);      break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

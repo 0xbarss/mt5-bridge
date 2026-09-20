@@ -502,7 +502,8 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+    // v4: DealsGet command + hashed client-order-id wire comments.
+    assert_eq!(PROTOCOL_VERSION, 4);
 }
 
 #[test]
@@ -740,13 +741,20 @@ fn test_order_request_client_order_id_and_comment() {
     let req_no_cid = OrderRequest::buy("EURUSD", 0.1).comment("plain order");
     assert_eq!(req_no_cid.effective_comment(), "plain order");
 
+    // With a client_order_id the wire comment carries a fixed-width hash token, not the raw ID.
     let req_with_cid = OrderRequest::buy("EURUSD", 0.1).client_order_id("abc-123");
-    assert_eq!(req_with_cid.effective_comment(), "cid:abc-123");
+    assert_eq!(
+        req_with_cid.effective_comment(),
+        format!("cid:{}", wire_id("abc-123"))
+    );
 
     let req_both = OrderRequest::buy("EURUSD", 0.1)
         .client_order_id("abc-123")
         .comment("scalp");
-    assert_eq!(req_both.effective_comment(), "cid:abc-123:scalp");
+    assert_eq!(
+        req_both.effective_comment(),
+        format!("cid:{}:scalp", wire_id("abc-123"))
+    );
 
     // Comment truncation at 31 chars
     let long_cmt = "1234567890123456789012345678901234567890";
@@ -754,10 +762,17 @@ fn test_order_request_client_order_id_and_comment() {
     assert_eq!(req_trunc.effective_comment().len(), 31);
     assert_eq!(req_trunc.effective_comment(), &long_cmt[..31]);
 
+    // A very long client_order_id no longer matters to the wire comment length or identity:
+    // only the free-text part is ever shortened.
     let req_cid_trunc = OrderRequest::buy("EURUSD", 0.1)
         .client_order_id("very-long-client-order-id-1234567890")
         .comment("hello");
-    assert_eq!(req_cid_trunc.effective_comment().len(), 31);
+    let eff = req_cid_trunc.effective_comment();
+    assert!(eff.len() <= 31);
+    assert_eq!(
+        eff,
+        format!("cid:{}:hello", wire_id("very-long-client-order-id-1234567890"))
+    );
 }
 
 #[test]
@@ -827,7 +842,14 @@ fn test_tracked_order_lifecycle_and_accounting() {
 
 #[test]
 fn test_order_manager_tracking_and_reconciliation() {
-    let mut mgr = OrderManager::new(777888);
+    // Permissive policy so this test can exercise the "confirmed absent -> Rejected" path in a
+    // single pass. The default policy's grace period is covered in tests/failure_injection.rs.
+    let policy = SafetyPolicy {
+        min_absent_observations: 1,
+        min_absent_secs: 0,
+        ..Default::default()
+    };
+    let mut mgr = OrderManager::with_policy(777888, policy);
     assert_eq!(mgr.strategy_magic(), 777888);
     assert_eq!(mgr.lifecycle(), LifecycleState::Starting);
 
@@ -876,9 +898,10 @@ fn test_order_manager_tracking_and_reconciliation() {
     };
     let pos1 = Position::from_raw(pos_raw1);
 
-    // 2) Position 5002 matches order2 by comment cid:ord-2
+    // 2) Position 5002 matches order2 by its wire-token comment
     let mut cmt_ord2 = [0u8; 32];
-    cmt_ord2[..9].copy_from_slice(b"cid:ord-2");
+    let wire_cmt2 = format!("cid:{}", wire_id("ord-2"));
+    cmt_ord2[..wire_cmt2.len()].copy_from_slice(wire_cmt2.as_bytes());
     let pos_raw2 = mt5_bridge::ffi::Mt5Position {
         ticket: 5002,
         magic: 777888,
@@ -899,10 +922,11 @@ fn test_order_manager_tracking_and_reconciliation() {
     };
     let pos3 = Position::from_raw(pos_raw3);
 
-    // Run reconciliation pass
-    let report = mgr.reconcile_with_snapshot(vec![pos1, pos2, pos3], vec![]);
+    // Run reconciliation pass (empty-but-present deal history: "nothing executed in the window")
+    let report = mgr.reconcile_with_deals(vec![pos1, pos2, pos3], vec![], vec![]);
 
     assert_eq!(mgr.lifecycle(), LifecycleState::Ready);
+    assert!(report.deal_history_available);
     assert!(!report.is_clean()); // because order3 is absent and pos3 is foreign
 
     // order2 was Unknown -> Reconciled via live position comment match
@@ -1129,6 +1153,7 @@ fn test_reconciliation_report_serde_and_clean() {
         absent_orders: vec![],
         foreign_positions: vec![],
         timestamp: 1700000000,
+        ..Default::default()
     };
     assert!(report_clean.is_clean());
 
@@ -1192,11 +1217,12 @@ fn test_order_manager_pending_order_reconciliation() {
     tracked.state = OrderState::Unknown;
     mgr.track_order(tracked);
 
-    // Live working pending order matches by comment cid:ord-limit-1
+    // Live working pending order matches by its wire-token comment
     let mut sym_bytes = [0u8; 32];
     sym_bytes[..6].copy_from_slice(b"EURUSD");
     let mut cmt_bytes = [0u8; 32];
-    cmt_bytes[..15].copy_from_slice(b"cid:ord-limit-1");
+    let wire_cmt = format!("cid:{}", wire_id("ord-limit-1"));
+    cmt_bytes[..wire_cmt.len()].copy_from_slice(wire_cmt.as_bytes());
 
     let live_ord_raw = mt5_bridge::ffi::Mt5Order {
         ticket: 7001,

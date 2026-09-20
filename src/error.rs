@@ -56,6 +56,32 @@ pub enum Mt5Error {
         description: &'static str,
     },
 
+    #[error("Order execution status is UNKNOWN for symbol '{symbol}' (client_order_id: {client_order_id:?}): {description}. A response was not received from MT5; reconciliation against broker state is required before retrying.")]
+    UnknownExecutionState {
+        symbol: String,
+        client_order_id: Option<String>,
+        description: String,
+    },
+
+    #[error("Failed to transmit order request to MT5 bridge before execution: {0}")]
+    TransmissionFailed(String),
+
+    #[error("Positions query failed (status {0})")]
+    PositionsFailed(i32),
+
+    #[error("Working orders query failed (status {0})")]
+    OrdersFailed(i32),
+
+    #[error("Position or order ticket {ticket} has magic {actual_magic}, which does not match expected strategy magic {expected_magic}")]
+    OwnershipMismatch {
+        ticket: u64,
+        expected_magic: u64,
+        actual_magic: u64,
+    },
+
+    #[error("Reconciliation error: {0}")]
+    ReconciliationError(String),
+
     #[error("Optional export '{0}' is not supported by the loaded DLL")]
     UnsupportedFeature(&'static str),
 

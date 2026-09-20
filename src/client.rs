@@ -29,9 +29,13 @@ pub struct Mt5Client {
     fn_acct: FnAcct,
     fn_send: FnSend,
     fn_close: FnClose,
+    fn_close_magic: Option<FnCloseMagic>,
     fn_modify: Option<FnModify>,
+    fn_modify_magic: Option<FnModifyMagic>,
     fn_sym_tick: Option<FnSymTick>,
     fn_sym_info: Option<FnSymInfo>,
+    fn_positions: Option<FnPositions>,
+    fn_orders: Option<FnOrders>,
     symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     symbol_cache_ttl: Duration,
 }
@@ -123,9 +127,13 @@ impl Mt5Client {
             fn_acct,
             fn_send,
             fn_close,
+            fn_close_magic,
             fn_modify,
+            fn_modify_magic,
             fn_sym_tick,
             fn_sym_info,
+            fn_positions,
+            fn_orders,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -172,6 +180,16 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_close_magic: Option<FnCloseMagic> = lib
+                .get::<FnCloseMagic>(b"OrderCloseWithMagic\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_modify_magic: Option<FnModifyMagic> = lib
+                .get::<FnModifyMagic>(b"OrderModifyWithMagic\0")
+                .map(|s| *s)
+                .ok();
+
             let fn_sym_tick: Option<FnSymTick> = lib
                 .get::<FnSymTick>(b"SymbolInfoTick\0")
                 .map(|s| *s)
@@ -188,6 +206,22 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_positions: Option<FnPositions> = lib
+                .get::<FnPositions>(b"PositionsGet\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'PositionsGet' not found — positions querying disabled")
+                })
+                .ok();
+
+            let fn_orders: Option<FnOrders> = lib
+                .get::<FnOrders>(b"OrdersGet\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'OrdersGet' not found — pending orders querying disabled")
+                })
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -195,9 +229,13 @@ impl Mt5Client {
                 fn_acct,
                 fn_send,
                 fn_close,
+                fn_close_magic,
                 fn_modify,
+                fn_modify_magic,
                 fn_sym_tick,
                 fn_sym_info,
+                fn_positions,
+                fn_orders,
             )
         };
 
@@ -209,9 +247,13 @@ impl Mt5Client {
             fn_acct,
             fn_send,
             fn_close,
+            fn_close_magic,
             fn_modify,
+            fn_modify_magic,
             fn_sym_tick,
             fn_sym_info,
+            fn_positions,
+            fn_orders,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: DEFAULT_SYMBOL_CACHE_TTL,
         };
@@ -544,7 +586,8 @@ impl Mt5Client {
         req.validate()?;
 
         let sym_c = CString::new(req.symbol.as_str())?;
-        let cmt_c = CString::new(req.comment.as_str())?;
+        let effective_cmt = req.effective_comment();
+        let cmt_c = CString::new(effective_cmt.as_str())?;
         let otype = req.order_type as c_int;
         let dev = req.deviation.unwrap_or(10);
         let exp = req.expiration.unwrap_or(0);
@@ -567,6 +610,27 @@ impl Mt5Client {
             )
         };
 
+        if ret == MT5_ERR_UNKNOWN_EXECUTION {
+            return Err(Mt5Error::UnknownExecutionState {
+                symbol: req.symbol.clone(),
+                client_order_id: req.client_order_id.clone(),
+                description: "Order request sent, but pipe response was lost or timed out. Reconcile broker state before retrying.".to_string(),
+            });
+        }
+
+        if ret == MT5_ERR_SEND_FAILED {
+            return Err(Mt5Error::TransmissionFailed(format!(
+                "Failed to transmit OrderSend packet to MT5 bridge for symbol {}",
+                req.symbol
+            )));
+        }
+
+        if ret == MT5_ERR_PIPE_DISCONNECTED {
+            return Err(Mt5Error::TransmissionFailed(
+                "Bridge pipe is disconnected".to_string(),
+            ));
+        }
+
         let trade_result = TradeResult::from_raw(res);
 
         if ret != 1 || !trade_result.is_success() {
@@ -585,6 +649,7 @@ impl Mt5Client {
             deal = trade_result.deal,
             price = trade_result.price,
             status = ?trade_result.status(),
+            client_order_id = ?req.client_order_id,
             "Order executed successfully"
         );
 
@@ -593,12 +658,35 @@ impl Mt5Client {
 
     /// Close an existing position by its ticket number.
     pub fn order_close(&self, ticket: u64) -> Result<TradeResult> {
+        self.order_close_with_magic(ticket, 0)
+    }
+
+    /// Close an existing position by ticket number, verifying that it belongs to the given magic number.
+    pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
         if ticket == 0 {
             return Err(Mt5Error::Other("Order ticket cannot be 0".to_string()));
         }
 
         let mut res = Mt5TradeResult::default();
-        let ret = unsafe { (self.fn_close)(ticket, &mut res) };
+        let ret = if let Some(fn_close_mag) = self.fn_close_magic {
+            unsafe { fn_close_mag(ticket, magic, &mut res) }
+        } else {
+            unsafe { (self.fn_close)(ticket, &mut res) }
+        };
+
+        if ret == MT5_ERR_UNKNOWN_EXECUTION {
+            return Err(Mt5Error::UnknownExecutionState {
+                symbol: String::new(),
+                client_order_id: None,
+                description: format!("OrderClose sent for ticket {ticket}, but pipe response was lost. Reconcile broker state before retrying."),
+            });
+        }
+
+        if ret == MT5_ERR_SEND_FAILED {
+            return Err(Mt5Error::TransmissionFailed(format!(
+                "Failed to transmit OrderClose packet for ticket {ticket}"
+            )));
+        }
 
         let trade_result = TradeResult::from_raw(res);
 
@@ -637,6 +725,18 @@ impl Mt5Client {
         stop_loss: f64,
         take_profit: f64,
     ) -> Result<TradeResult> {
+        self.order_modify_with_magic(ticket, 0, stop_loss, take_profit)
+    }
+
+    /// Modify the Stop Loss and/or Take Profit of an open position or pending order,
+    /// verifying that it belongs to the given magic number.
+    pub fn order_modify_with_magic(
+        &self,
+        ticket: u64,
+        magic: u64,
+        stop_loss: f64,
+        take_profit: f64,
+    ) -> Result<TradeResult> {
         if ticket == 0 {
             return Err(Mt5Error::Other("Order ticket cannot be 0".to_string()));
         }
@@ -653,19 +753,44 @@ impl Mt5Client {
             )));
         }
 
-        let fn_mod = self
-            .fn_modify
-            .ok_or(Mt5Error::UnsupportedFeature("OrderModify"))?;
-
         let mut res = Mt5TradeResult::default();
-        let ret = unsafe {
-            fn_mod(
-                ticket,
-                stop_loss as c_double,
-                take_profit as c_double,
-                &mut res,
-            )
+        let ret = if let Some(fn_mod_mag) = self.fn_modify_magic {
+            unsafe {
+                fn_mod_mag(
+                    ticket,
+                    magic,
+                    stop_loss as c_double,
+                    take_profit as c_double,
+                    &mut res,
+                )
+            }
+        } else {
+            let fn_mod = self
+                .fn_modify
+                .ok_or(Mt5Error::UnsupportedFeature("OrderModify"))?;
+            unsafe {
+                fn_mod(
+                    ticket,
+                    stop_loss as c_double,
+                    take_profit as c_double,
+                    &mut res,
+                )
+            }
         };
+
+        if ret == MT5_ERR_UNKNOWN_EXECUTION {
+            return Err(Mt5Error::UnknownExecutionState {
+                symbol: String::new(),
+                client_order_id: None,
+                description: format!("OrderModify sent for ticket {ticket}, but pipe response was lost. Reconcile broker state before retrying."),
+            });
+        }
+
+        if ret == MT5_ERR_SEND_FAILED {
+            return Err(Mt5Error::TransmissionFailed(format!(
+                "Failed to transmit OrderModify packet for ticket {ticket}"
+            )));
+        }
 
         let trade_result = TradeResult::from_raw(res);
 
@@ -685,6 +810,82 @@ impl Mt5Client {
             "Order modified successfully"
         );
         Ok(trade_result)
+    }
+
+    /// Query all active open positions in MetaTrader 5.
+    pub fn positions(&self) -> Result<Vec<Position>> {
+        self.positions_filtered(None, None)
+    }
+
+    /// Query open positions filtered by magic number and/or symbol.
+    pub fn positions_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        let fn_pos = self
+            .fn_positions
+            .ok_or(Mt5Error::UnsupportedFeature("PositionsGet"))?;
+
+        let mag = magic.unwrap_or(0);
+        let sym_c = match symbol {
+            Some(s) => Some(CString::new(s)?),
+            None => None,
+        };
+        let sym_ptr = sym_c
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        const CAPACITY: usize = 512;
+        let mut buf = vec![Mt5Position::default(); CAPACITY];
+
+        let count = unsafe { fn_pos(buf.as_mut_ptr(), CAPACITY as c_int, mag, sym_ptr) };
+        if count < 0 {
+            return Err(Mt5Error::PositionsFailed(count));
+        }
+
+        let n = (count as usize).min(buf.len());
+        let positions = buf[..n].iter().copied().map(Position::from_raw).collect();
+        Ok(positions)
+    }
+
+    /// Query all active working pending orders in MetaTrader 5.
+    pub fn pending_orders(&self) -> Result<Vec<WorkingOrder>> {
+        self.pending_orders_filtered(None, None)
+    }
+
+    /// Query active working pending orders filtered by magic number and/or symbol.
+    pub fn pending_orders_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        let fn_ord = self
+            .fn_orders
+            .ok_or(Mt5Error::UnsupportedFeature("OrdersGet"))?;
+
+        let mag = magic.unwrap_or(0);
+        let sym_c = match symbol {
+            Some(s) => Some(CString::new(s)?),
+            None => None,
+        };
+        let sym_ptr = sym_c
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        const CAPACITY: usize = 512;
+        let mut buf = vec![Mt5Order::default(); CAPACITY];
+
+        let count = unsafe { fn_ord(buf.as_mut_ptr(), CAPACITY as c_int, mag, sym_ptr) };
+        if count < 0 {
+            return Err(Mt5Error::OrdersFailed(count));
+        }
+
+        let n = (count as usize).min(buf.len());
+        let orders = buf[..n].iter().copied().map(WorkingOrder::from_raw).collect();
+        Ok(orders)
     }
 
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.

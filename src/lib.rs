@@ -62,6 +62,7 @@
 pub mod client;
 pub mod error;
 pub mod ffi;
+pub mod reconciliation;
 pub mod types;
 
 #[cfg(feature = "async")]
@@ -70,10 +71,14 @@ pub mod stream;
 pub use client::Mt5Client;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
+pub use reconciliation::{LifecycleState, OrderManager, ReconciliationReport};
 pub use types::{
-    AccountInfo, Bar, HistoryResult, OrderRequest, OrderType, Rate, SymbolInfo, Tick, Timeframe,
-    TradeResult, TradeStatus,
+    calculate_sl_ticks, calculate_tp_ticks, price_to_ticks, ticks_to_price, AccountInfo, Bar,
+    HistoryResult, OrderRequest, OrderState, OrderType, Position, Rate, SymbolInfo, Tick,
+    Timeframe, TrackedOrder, TradeResult, TradeStatus, WorkingOrder,
 };
 
 #[cfg(feature = "async")]
-pub use stream::{stream_bars, stream_ticks};
+pub use stream::{
+    stream_bars, stream_ticks, stream_ticks_with_config, BackpressurePolicy, StreamConfig,
+};

@@ -244,3 +244,39 @@ fn test_live_market_order_lifecycle() {
     assert!(close_res.is_success());
     guard.ticket = 0;
 }
+
+#[test]
+fn test_live_positions_and_orders() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let positions = client.positions().expect("client.positions failed");
+    println!("Live positions retrieved: {}", positions.len());
+
+    let orders = client.pending_orders().expect("client.pending_orders failed");
+    println!("Live working orders retrieved: {}", orders.len());
+}
+
+#[test]
+fn test_live_reconciliation_engine() {
+    use mt5_bridge::{LifecycleState, OrderManager};
+
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let mut manager = OrderManager::new(998877);
+    assert_eq!(manager.lifecycle(), LifecycleState::Starting);
+
+    let report = manager.reconcile(&client).expect("manager.reconcile failed");
+    assert_eq!(manager.lifecycle(), LifecycleState::Ready);
+    println!(
+        "Live reconciliation completed: {} positions, {} orders, is_clean: {}",
+        report.positions.len(),
+        report.pending_orders.len(),
+        report.is_clean()
+    );
+}

@@ -502,7 +502,7 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+    assert_eq!(PROTOCOL_VERSION, 3);
 }
 
 #[test]
@@ -610,3 +610,615 @@ fn test_order_request_validation() {
     let nan_tp = OrderRequest::buy("EURUSD", 0.1).take_profit(f64::NAN);
     assert!(nan_tp.validate().is_err());
 }
+
+#[test]
+fn test_position_wire_decoding_and_helpers() {
+    let mut symbol = [0u8; 32];
+    symbol[..6].copy_from_slice(b"EURUSD");
+    let mut comment = [0u8; 32];
+    comment[..12].copy_from_slice(b"cid:ord-1234");
+
+    let mut raw = mt5_bridge::ffi::Mt5Position {
+        ticket: 1001,
+        time: 1700000000,
+        position_type: 0, // Buy
+        magic: 998877,
+        volume: 0.5,
+        price_open: 1.08500,
+        sl: 1.08000,
+        tp: 1.09500,
+        price_current: 1.08750,
+        profit: 125.50,
+        swap: -2.30,
+        symbol,
+        comment,
+    };
+
+    let pos = Position::from_raw(raw);
+    assert_eq!(pos.ticket, 1001);
+    assert_eq!(pos.time, 1700000000);
+    assert_eq!(pos.position_type, OrderType::Buy);
+    assert!(pos.is_buy());
+    assert!(!pos.is_sell());
+    assert!(pos.matches_magic(998877));
+    assert!(!pos.matches_magic(123));
+    assert_eq!(pos.volume, 0.5);
+    assert_eq!(pos.price_open, 1.08500);
+    assert_eq!(pos.stop_loss, 1.08000);
+    assert_eq!(pos.take_profit, 1.09500);
+    assert_eq!(pos.price_current, 1.08750);
+    assert_eq!(pos.profit, 125.50);
+    assert_eq!(pos.swap, -2.30);
+    assert_eq!(pos.symbol, "EURUSD");
+    assert_eq!(pos.comment, "cid:ord-1234");
+
+    // Test Sell position
+    raw.position_type = 1;
+    let pos_sell = Position::from_raw(raw);
+    assert_eq!(pos_sell.position_type, OrderType::Sell);
+    assert!(pos_sell.is_sell());
+    assert!(!pos_sell.is_buy());
+}
+
+#[test]
+fn test_working_order_wire_decoding_and_helpers() {
+    let mut symbol = [0u8; 32];
+    symbol[..6].copy_from_slice(b"GBPUSD");
+    let mut comment = [0u8; 32];
+    comment[..17].copy_from_slice(b"cid:ord-5678:test");
+
+    let mut raw = mt5_bridge::ffi::Mt5Order {
+        ticket: 2002,
+        time_setup: 1700000010,
+        order_type: 2, // BuyLimit
+        magic: 998877,
+        volume_initial: 1.0,
+        volume_current: 0.4,
+        price_open: 1.08000,
+        sl: 1.07500,
+        tp: 1.09000,
+        price_current: 1.08300,
+        symbol,
+        comment,
+    };
+
+    let ord = WorkingOrder::from_raw(raw);
+    assert_eq!(ord.ticket, 2002);
+    assert_eq!(ord.time_setup, 1700000010);
+    assert_eq!(ord.order_type, OrderType::BuyLimit);
+    assert!(ord.matches_magic(998877));
+    assert_eq!(ord.volume_initial, 1.0);
+    assert_eq!(ord.volume_current, 0.4);
+    assert_eq!(ord.price_open, 1.08000);
+    assert_eq!(ord.stop_loss, 1.07500);
+    assert_eq!(ord.take_profit, 1.09000);
+    assert_eq!(ord.price_current, 1.08300);
+    assert_eq!(ord.symbol, "GBPUSD");
+    assert_eq!(ord.comment, "cid:ord-5678:test");
+
+    // Test different order types
+    raw.order_type = 3;
+    assert_eq!(WorkingOrder::from_raw(raw).order_type, OrderType::SellLimit);
+    raw.order_type = 4;
+    assert_eq!(WorkingOrder::from_raw(raw).order_type, OrderType::BuyStop);
+    raw.order_type = 5;
+    assert_eq!(WorkingOrder::from_raw(raw).order_type, OrderType::SellStop);
+    raw.order_type = 1;
+    assert_eq!(WorkingOrder::from_raw(raw).order_type, OrderType::Sell);
+}
+
+#[test]
+fn test_price_tick_calculations() {
+    // Basic conversions
+    assert_eq!(price_to_ticks(1.08500, 0.00001), 108500);
+    assert_eq!(price_to_ticks(0.0, 0.00001), 0);
+    assert_eq!(price_to_ticks(100.0, 0.0), 0);
+    assert_eq!(price_to_ticks(f64::NAN, 0.00001), 0);
+    assert_eq!(price_to_ticks(f64::INFINITY, 0.00001), 0);
+    assert_eq!(price_to_ticks(5250.25, 0.25), 21001);
+
+    assert_eq!(ticks_to_price(108500, 0.00001, 5), 1.08500);
+    assert_eq!(ticks_to_price(21001, 0.25, 2), 5250.25);
+
+    // Stop Loss and Take Profit tick arithmetic
+    // Buy SL should be below entry
+    assert_eq!(calculate_sl_ticks(1.08500, 50, true, 0.00001, 5), 1.08450);
+    // Buy TP should be above entry
+    assert_eq!(calculate_tp_ticks(1.08500, 100, true, 0.00001, 5), 1.08600);
+    // Sell SL should be above entry
+    assert_eq!(calculate_sl_ticks(1.08500, 50, false, 0.00001, 5), 1.08550);
+    // Sell TP should be below entry
+    assert_eq!(calculate_tp_ticks(1.08500, 100, false, 0.00001, 5), 1.08400);
+
+    // Sign of distance_ticks should not flip direction (uses abs)
+    assert_eq!(calculate_sl_ticks(1.08500, -50, true, 0.00001, 5), 1.08450);
+    assert_eq!(calculate_tp_ticks(1.08500, -100, true, 0.00001, 5), 1.08600);
+}
+
+#[test]
+fn test_order_request_client_order_id_and_comment() {
+    let req_no_cid = OrderRequest::buy("EURUSD", 0.1).comment("plain order");
+    assert_eq!(req_no_cid.effective_comment(), "plain order");
+
+    let req_with_cid = OrderRequest::buy("EURUSD", 0.1).client_order_id("abc-123");
+    assert_eq!(req_with_cid.effective_comment(), "cid:abc-123");
+
+    let req_both = OrderRequest::buy("EURUSD", 0.1)
+        .client_order_id("abc-123")
+        .comment("scalp");
+    assert_eq!(req_both.effective_comment(), "cid:abc-123:scalp");
+
+    // Comment truncation at 31 chars
+    let long_cmt = "1234567890123456789012345678901234567890";
+    let req_trunc = OrderRequest::buy("EURUSD", 0.1).comment(long_cmt);
+    assert_eq!(req_trunc.effective_comment().len(), 31);
+    assert_eq!(req_trunc.effective_comment(), &long_cmt[..31]);
+
+    let req_cid_trunc = OrderRequest::buy("EURUSD", 0.1)
+        .client_order_id("very-long-client-order-id-1234567890")
+        .comment("hello");
+    assert_eq!(req_cid_trunc.effective_comment().len(), 31);
+}
+
+#[test]
+fn test_tracked_order_lifecycle_and_accounting() {
+    let req = OrderRequest::buy("EURUSD", 1.0).magic(444);
+    let mut tracked = TrackedOrder::new(&req, "ord-test-1");
+
+    assert_eq!(tracked.client_order_id, "ord-test-1");
+    assert_eq!(tracked.state, OrderState::Created);
+    assert_eq!(tracked.requested_volume, 1.0);
+    assert_eq!(tracked.filled_volume, 0.0);
+    assert_eq!(tracked.remaining_volume, 1.0);
+    assert_eq!(tracked.magic, 444);
+    assert!(tracked.is_active());
+    assert!(!tracked.is_terminal());
+
+    tracked.mark_submitting();
+    assert_eq!(tracked.state, OrderState::Submitting);
+    assert!(tracked.is_active());
+
+    // Partial fill update
+    let partial_res = TradeResult {
+        retcode: 10010, // TRADE_RETCODE_DONE_PARTIAL
+        deal: 101,
+        order: 201,
+        position: 301,
+        volume: 0.4,
+        price: 1.0855,
+    };
+    tracked.update_from_trade_result(&partial_res);
+    assert_eq!(tracked.state, OrderState::PartiallyFilled);
+    assert_eq!(tracked.filled_volume, 0.4);
+    assert!((tracked.remaining_volume - 0.6).abs() < 1e-6);
+    assert_eq!(tracked.deal_ticket, 101);
+    assert_eq!(tracked.order_ticket, 201);
+    assert_eq!(tracked.position_ticket, 301);
+    assert!(tracked.is_active());
+    assert!(!tracked.is_terminal());
+
+    // Complete fill update
+    let fill_res = TradeResult {
+        retcode: 10009, // TRADE_RETCODE_DONE
+        deal: 102,
+        order: 201,
+        position: 301,
+        volume: 1.0,
+        price: 1.0860,
+    };
+    tracked.update_from_trade_result(&fill_res);
+    assert_eq!(tracked.state, OrderState::Filled);
+    assert_eq!(tracked.filled_volume, 1.0);
+    assert_eq!(tracked.remaining_volume, 0.0);
+    assert!(tracked.is_terminal());
+    assert!(!tracked.is_active());
+
+    // Mark unknown and terminal states
+    let mut unknown_order = TrackedOrder::new(&req, "ord-unknown");
+    unknown_order.mark_unknown("Pipe broken after write");
+    assert_eq!(unknown_order.state, OrderState::Unknown);
+    assert_eq!(
+        unknown_order.error_message,
+        Some("Pipe broken after write".to_string())
+    );
+    assert!(unknown_order.is_active());
+    assert!(!unknown_order.is_terminal());
+}
+
+#[test]
+fn test_order_manager_tracking_and_reconciliation() {
+    let mut mgr = OrderManager::new(777888);
+    assert_eq!(mgr.strategy_magic(), 777888);
+    assert_eq!(mgr.lifecycle(), LifecycleState::Starting);
+
+    mgr.set_lifecycle(LifecycleState::Connecting);
+    assert_eq!(mgr.lifecycle(), LifecycleState::Connecting);
+
+    // Track order directly (restart recovery simulation)
+    let req = OrderRequest::buy("EURUSD", 0.5).magic(777888);
+    let mut order1 = TrackedOrder::new(&req, "ord-1");
+    order1.state = OrderState::Filled;
+    order1.position_ticket = 5001;
+    mgr.track_order(order1);
+
+    let mut order2 = TrackedOrder::new(&req, "ord-2");
+    order2.state = OrderState::Unknown;
+    mgr.track_order(order2);
+
+    let mut order3 = TrackedOrder::new(&req, "ord-3");
+    order3.state = OrderState::Unknown;
+    mgr.track_order(order3);
+
+    assert_eq!(mgr.tracked_orders().len(), 3);
+    assert!(mgr.get_order("ord-1").is_some());
+    assert!(mgr.get_order("ord-missing").is_none());
+
+    // Export orders
+    let exported = mgr.export_orders();
+    assert_eq!(exported.len(), 3);
+
+    // Restore into fresh manager
+    let mut restored_mgr = OrderManager::new(777888);
+    restored_mgr.restore_orders(exported);
+    assert_eq!(restored_mgr.tracked_orders().len(), 3);
+
+    // Prepare simulated live positions and orders for reconciliation
+    let mut sym_eurusd = [0u8; 32];
+    sym_eurusd[..6].copy_from_slice(b"EURUSD");
+
+    // 1) Position 5001 matches order1 (already filled)
+    let pos_raw1 = mt5_bridge::ffi::Mt5Position {
+        ticket: 5001,
+        magic: 777888,
+        volume: 0.5,
+        symbol: sym_eurusd,
+        ..Default::default()
+    };
+    let pos1 = Position::from_raw(pos_raw1);
+
+    // 2) Position 5002 matches order2 by comment cid:ord-2
+    let mut cmt_ord2 = [0u8; 32];
+    cmt_ord2[..9].copy_from_slice(b"cid:ord-2");
+    let pos_raw2 = mt5_bridge::ffi::Mt5Position {
+        ticket: 5002,
+        magic: 777888,
+        volume: 0.5,
+        symbol: sym_eurusd,
+        comment: cmt_ord2,
+        ..Default::default()
+    };
+    let pos2 = Position::from_raw(pos_raw2);
+
+    // 3) Foreign position 9999 owned by this magic but not in memory
+    let pos_raw3 = mt5_bridge::ffi::Mt5Position {
+        ticket: 9999,
+        magic: 777888,
+        volume: 1.0,
+        symbol: sym_eurusd,
+        ..Default::default()
+    };
+    let pos3 = Position::from_raw(pos_raw3);
+
+    // Run reconciliation pass
+    let report = mgr.reconcile_with_snapshot(vec![pos1, pos2, pos3], vec![]);
+
+    assert_eq!(mgr.lifecycle(), LifecycleState::Ready);
+    assert!(!report.is_clean()); // because order3 is absent and pos3 is foreign
+
+    // order2 was Unknown -> Reconciled via live position comment match
+    assert_eq!(report.reconciled_orders.len(), 1);
+    assert_eq!(report.reconciled_orders[0].client_order_id, "ord-2");
+    assert_eq!(report.reconciled_orders[0].state, OrderState::Reconciled);
+    assert_eq!(report.reconciled_orders[0].position_ticket, 5002);
+
+    // order3 was Unknown -> Confirmed absent -> Rejected
+    assert_eq!(report.absent_orders.len(), 1);
+    assert_eq!(report.absent_orders[0].client_order_id, "ord-3");
+    assert_eq!(report.absent_orders[0].state, OrderState::Rejected);
+
+    // pos3 was not tracked -> Foreign position detected
+    assert_eq!(report.foreign_positions.len(), 1);
+    assert_eq!(report.foreign_positions[0].ticket, 9999);
+}
+
+#[test]
+fn test_stream_config_and_backpressure() {
+    let cfg = StreamConfig::default();
+    assert_eq!(cfg.buffer_size, 1024);
+    assert_eq!(cfg.poll_interval, std::time::Duration::from_millis(50));
+    assert_eq!(cfg.backpressure, BackpressurePolicy::DropLatest);
+
+    let custom = StreamConfig {
+        buffer_size: 512,
+        poll_interval: std::time::Duration::from_millis(100),
+        backpressure: BackpressurePolicy::Block,
+    };
+    assert_eq!(custom.backpressure, BackpressurePolicy::Block);
+}
+
+#[test]
+fn test_all_wire_abi_layouts_and_sizes() {
+    use mt5_bridge::ffi::*;
+
+    // Compile-time & runtime ABI packing size assertions
+    assert_eq!(std::mem::size_of::<Mt5SymInfo>(), 60);
+    assert_eq!(std::mem::size_of::<Mt5Rate>(), 60);
+    assert_eq!(std::mem::size_of::<Mt5Tick>(), 44);
+    assert_eq!(std::mem::size_of::<Mt5TradeResult>(), 44);
+    assert_eq!(std::mem::size_of::<Mt5Position>(), 148);
+    assert_eq!(std::mem::size_of::<Mt5Order>(), 140);
+}
+
+#[test]
+fn test_mt5_retcode_descriptions() {
+    assert_eq!(
+        mt5_retcode_description(10009),
+        "TRADE_RETCODE_DONE: Request completed"
+    );
+    assert_eq!(
+        mt5_retcode_description(10008),
+        "TRADE_RETCODE_PLACED: Order placed"
+    );
+    assert_eq!(
+        mt5_retcode_description(10010),
+        "TRADE_RETCODE_DONE_PARTIAL: Only part of the request was completed"
+    );
+    assert_eq!(
+        mt5_retcode_description(10004),
+        "TRADE_RETCODE_REQUOTE: Requote"
+    );
+    assert_eq!(
+        mt5_retcode_description(10016),
+        "TRADE_RETCODE_INVALID_STOPS: Invalid stops (SL/TP) in the request"
+    );
+    assert_eq!(
+        mt5_retcode_description(10019),
+        "TRADE_RETCODE_NO_MONEY: There is not enough money to complete the request"
+    );
+    assert_eq!(
+        mt5_retcode_description(10031),
+        "TRADE_RETCODE_CONNECTION: No connection with the trade server"
+    );
+    assert_eq!(
+        mt5_retcode_description(999999),
+        "Unknown MT5 retcode"
+    );
+}
+
+#[test]
+fn test_mt5_error_display_formatting() {
+    let err_unkn = Mt5Error::UnknownExecutionState {
+        symbol: "EURUSD".to_string(),
+        client_order_id: Some("cid-42".to_string()),
+        description: "pipe closed".to_string(),
+    };
+    assert!(err_unkn.to_string().contains("status is UNKNOWN"));
+    assert!(err_unkn.to_string().contains("cid-42"));
+
+    let err_tx = Mt5Error::TransmissionFailed("write error".to_string());
+    assert!(err_tx.to_string().contains("Failed to transmit"));
+
+    let err_own = Mt5Error::OwnershipMismatch {
+        ticket: 100,
+        expected_magic: 555,
+        actual_magic: 666,
+    };
+    assert!(err_own.to_string().contains("does not match expected strategy magic"));
+
+    let err_rec = Mt5Error::ReconciliationError("mismatch".to_string());
+    assert_eq!(err_rec.to_string(), "Reconciliation error: mismatch");
+
+    let err_range = Mt5Error::InvalidTimeRange { start: 200, end: 100 };
+    assert!(err_range.to_string().contains("greater than end timestamp"));
+}
+
+#[test]
+fn test_bar_technical_metrics() {
+    let bullish = Bar {
+        time: 1700000000,
+        open: 1.1000,
+        high: 1.1060,
+        low: 1.0990,
+        close: 1.1050,
+        volume: 100.0,
+    };
+    assert!(bullish.is_bullish());
+    assert!(!bullish.is_bearish());
+    assert!((bullish.mid() - 1.1025).abs() < 1e-6);
+    assert!((bullish.typical_price() - ((1.1060 + 1.0990 + 1.1050) / 3.0)).abs() < 1e-6);
+    assert!((bullish.range() - 0.0070).abs() < 1e-6);
+    // True range compared to prev close 1.0980 (high - prev_close is 0.0080)
+    assert!((bullish.true_range(1.0980) - 0.0080).abs() < 1e-6);
+
+    let bearish = Bar {
+        time: 1700000060,
+        open: 1.1050,
+        high: 1.1055,
+        low: 1.0970,
+        close: 1.0980,
+        volume: 120.0,
+    };
+    assert!(bearish.is_bearish());
+    assert!(!bearish.is_bullish());
+    assert!((bearish.body() - 0.0070).abs() < 1e-6);
+}
+
+#[test]
+fn test_order_type_properties() {
+    assert!(OrderType::Buy.is_buy());
+    assert!(!OrderType::Buy.is_sell());
+
+    assert!(OrderType::BuyLimit.is_buy());
+    assert!(!OrderType::BuyLimit.is_sell());
+
+    assert!(OrderType::BuyStop.is_buy());
+    assert!(!OrderType::BuyStop.is_sell());
+
+    assert!(OrderType::Sell.is_sell());
+    assert!(!OrderType::Sell.is_buy());
+
+    assert!(OrderType::SellLimit.is_sell());
+    assert!(!OrderType::SellLimit.is_buy());
+
+    assert!(OrderType::SellStop.is_sell());
+    assert!(!OrderType::SellStop.is_buy());
+}
+
+#[test]
+fn test_symbol_info_lot_and_point_helpers() {
+    assert_eq!(SymbolInfo::calculate_lot_digits(0.01), 2);
+    assert_eq!(SymbolInfo::calculate_lot_digits(0.001), 3);
+    assert_eq!(SymbolInfo::calculate_lot_digits(0.1), 1);
+    assert_eq!(SymbolInfo::calculate_lot_digits(1.0), 0);
+    assert_eq!(SymbolInfo::calculate_lot_digits(-0.01), 2);
+
+    let sym = SymbolInfo {
+        symbol: "TEST".to_string(),
+        point: 0.0001,
+        tick_value: 10.0,
+        tick_size: 0.0001,
+        lot_step: 0.01,
+        min_lot: 0.01,
+        max_lot: 50.0,
+        spread: 1.5,
+        digits: 4,
+    };
+    assert_eq!(sym.lot_digits(), 2);
+    assert!(sym.is_min_lot_zero_aligned());
+    assert!((sym.point_value(1.0) - 10.0).abs() < 1e-6);
+    assert_eq!(sym.round_price(1.23456), 1.2346);
+}
+
+#[test]
+fn test_order_request_stops_validation_with_symbol() {
+    let sym = SymbolInfo {
+        symbol: "EURUSD".to_string(),
+        point: 0.00001,
+        tick_value: 1.0,
+        tick_size: 0.00005,
+        lot_step: 0.01,
+        min_lot: 0.01,
+        max_lot: 100.0,
+        spread: 1.2,
+        digits: 5,
+    };
+
+    // SL not aligned to tick size (0.00005)
+    let bad_sl = OrderRequest::buy("EURUSD", 0.1)
+        .stop_loss(1.08003);
+    assert!(bad_sl.validate_with_symbol(&sym).is_err());
+
+    // TP not aligned to tick size (0.00005)
+    let bad_tp = OrderRequest::buy("EURUSD", 0.1)
+        .take_profit(1.09002);
+    assert!(bad_tp.validate_with_symbol(&sym).is_err());
+
+    // Both properly aligned
+    let good_stops = OrderRequest::buy("EURUSD", 0.1)
+        .stop_loss(1.08000)
+        .take_profit(1.09005);
+    assert!(good_stops.validate_with_symbol(&sym).is_ok());
+}
+
+#[test]
+fn test_reconciliation_report_serde_and_clean() {
+    let report_clean = ReconciliationReport {
+        positions: vec![],
+        pending_orders: vec![],
+        reconciled_orders: vec![],
+        absent_orders: vec![],
+        foreign_positions: vec![],
+        timestamp: 1700000000,
+    };
+    assert!(report_clean.is_clean());
+
+    let json = serde_json::to_string(&report_clean).expect("Failed to serialize report");
+    let deserialized: ReconciliationReport = serde_json::from_str(&json).expect("Failed to deserialize report");
+    assert_eq!(deserialized, report_clean);
+
+    let state = LifecycleState::Reconciling;
+    let state_json = serde_json::to_string(&state).unwrap();
+    let state_deser: LifecycleState = serde_json::from_str(&state_json).unwrap();
+    assert_eq!(state_deser, LifecycleState::Reconciling);
+}
+
+#[test]
+fn test_order_manager_magic_and_idempotency_check() {
+    let mut mgr = OrderManager::new(888999);
+
+    // 1. Order with no magic gets strategy magic assigned
+    let mut req_no_magic = OrderRequest::buy("EURUSD", 0.1);
+    assert_eq!(req_no_magic.magic, None);
+    let check_res = mgr.check_idempotency_and_magic(&mut req_no_magic);
+    assert!(check_res.is_ok());
+    assert!(check_res.unwrap().is_none());
+    assert_eq!(req_no_magic.magic, Some(888999));
+
+    // 2. Order with wrong magic is rejected
+    let mut req_wrong_magic = OrderRequest::buy("EURUSD", 0.1).magic(111222);
+    let check_err = mgr.check_idempotency_and_magic(&mut req_wrong_magic);
+    assert!(check_err.is_err());
+    match check_err.unwrap_err() {
+        Mt5Error::OwnershipMismatch { expected_magic, actual_magic, .. } => {
+            assert_eq!(expected_magic, 888999);
+            assert_eq!(actual_magic, 111222);
+        }
+        other => panic!("Unexpected error: {:?}", other),
+    }
+
+    // 3. Order already tracked returns Some(tracked) without re-submitting
+    let req_tracked = OrderRequest::buy("EURUSD", 0.2).magic(888999);
+    let mut tracked = TrackedOrder::new(&req_tracked, "ord-already-there");
+    tracked.state = OrderState::Filled;
+    mgr.track_order(tracked);
+
+    let mut req_replay = OrderRequest::buy("EURUSD", 0.2)
+        .magic(888999)
+        .client_order_id("ord-already-there");
+    let replay_res = mgr.check_idempotency_and_magic(&mut req_replay).unwrap();
+    assert!(replay_res.is_some());
+    let tracked_ret = replay_res.unwrap();
+    assert_eq!(tracked_ret.client_order_id, "ord-already-there");
+    assert_eq!(tracked_ret.state, OrderState::Filled);
+}
+
+#[test]
+fn test_order_manager_pending_order_reconciliation() {
+    let mut mgr = OrderManager::new(555666);
+
+    // Track order with Unknown state
+    let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800).magic(555666);
+    let mut tracked = TrackedOrder::new(&req, "ord-limit-1");
+    tracked.state = OrderState::Unknown;
+    mgr.track_order(tracked);
+
+    // Live working pending order matches by comment cid:ord-limit-1
+    let mut sym_bytes = [0u8; 32];
+    sym_bytes[..6].copy_from_slice(b"EURUSD");
+    let mut cmt_bytes = [0u8; 32];
+    cmt_bytes[..15].copy_from_slice(b"cid:ord-limit-1");
+
+    let live_ord_raw = mt5_bridge::ffi::Mt5Order {
+        ticket: 7001,
+        time_setup: 1700000000,
+        order_type: 2, // BuyLimit
+        magic: 555666,
+        volume_initial: 1.0,
+        volume_current: 0.6,
+        price_open: 1.0800,
+        symbol: sym_bytes,
+        comment: cmt_bytes,
+        ..Default::default()
+    };
+    let live_ord = WorkingOrder::from_raw(live_ord_raw);
+
+    let report = mgr.reconcile_with_snapshot(vec![], vec![live_ord]);
+    assert_eq!(report.reconciled_orders.len(), 1);
+    let rec_ord = &report.reconciled_orders[0];
+    assert_eq!(rec_ord.client_order_id, "ord-limit-1");
+    assert_eq!(rec_ord.order_ticket, 7001);
+    assert_eq!(rec_ord.state, OrderState::Accepted);
+    assert_eq!(rec_ord.remaining_volume, 0.6);
+    assert!((rec_ord.filled_volume - 0.4).abs() < 1e-6);
+}
+

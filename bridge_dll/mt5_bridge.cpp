@@ -34,15 +34,17 @@
  */
 
 enum Cmd : uint32_t {
-    CMD_INIT         = 1,
-    CMD_SHUTDOWN     = 2,
-    CMD_RATES        = 3,
-    CMD_ACCOUNT      = 4,
-    CMD_ORDER_SEND   = 5,
-    CMD_ORDER_CLOSE  = 6,
-    CMD_ORDER_MODIFY = 7,
-    CMD_SYM_TICK     = 8,
-    CMD_SYM_INFO     = 9,
+    CMD_INIT          = 1,
+    CMD_SHUTDOWN      = 2,
+    CMD_RATES         = 3,
+    CMD_ACCOUNT       = 4,
+    CMD_ORDER_SEND    = 5,
+    CMD_ORDER_CLOSE   = 6,
+    CMD_ORDER_MODIFY  = 7,
+    CMD_SYM_TICK      = 8,
+    CMD_SYM_INFO      = 9,
+    CMD_POSITIONS_GET = 10,
+    CMD_ORDERS_GET    = 11,
 };
 
 /* ── Pipe state ───────────────────────────────────────────────────────────── */
@@ -298,7 +300,7 @@ int OrderSend(const char* symbol, int type, double volume,
               int64_t expiration, uint64_t magic,
               Mt5TradeResult* result) {
     Lock lk;
-    if (g_pipe == INVALID_HANDLE_VALUE) return 0;
+    if (g_pipe == INVALID_HANDLE_VALUE) return MT5_ERR_PIPE_DISCONNECTED;
 
     Packer p;
     p.str(symbol);
@@ -312,54 +314,112 @@ int OrderSend(const char* symbol, int type, double volume,
     p.i64(expiration);
     p.u64(magic);
 
-    if (!send_packet(CMD_ORDER_SEND, p.buf)) return 0;
+    if (!send_packet(CMD_ORDER_SEND, p.buf)) return MT5_ERR_SEND_FAILED;
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data)) return 0;
+    if (!recv_packet(st, data)) return MT5_ERR_UNKNOWN_EXECUTION;
 
     // Preserve MT5 trade result details (including error retcodes) whenever payload is present
     if (result && data.size() >= sizeof(Mt5TradeResult)) {
         std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
     }
-    return (st == 1) ? 1 : 0;
+    return (st == 1) ? MT5_OK : MT5_ERR_GENERAL;
 }
 
-int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
+int OrderCloseWithMagic(uint64_t ticket, uint64_t magic, Mt5TradeResult* result) {
     Lock lk;
-    if (g_pipe == INVALID_HANDLE_VALUE) return 0;
+    if (g_pipe == INVALID_HANDLE_VALUE) return MT5_ERR_PIPE_DISCONNECTED;
 
     Packer p;
     p.u64(ticket);
+    p.u64(magic);
 
-    if (!send_packet(CMD_ORDER_CLOSE, p.buf)) return 0;
+    if (!send_packet(CMD_ORDER_CLOSE, p.buf)) return MT5_ERR_SEND_FAILED;
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data)) return 0;
+    if (!recv_packet(st, data)) return MT5_ERR_UNKNOWN_EXECUTION;
 
     if (result && data.size() >= sizeof(Mt5TradeResult)) {
         std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
     }
-    return (st == 1) ? 1 : 0;
+    return (st == 1) ? MT5_OK : MT5_ERR_GENERAL;
 }
 
-int OrderModify(uint64_t ticket, double sl, double tp, Mt5TradeResult* result) {
+int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
+    return OrderCloseWithMagic(ticket, 0, result);
+}
+
+int OrderModifyWithMagic(uint64_t ticket, uint64_t magic, double sl, double tp, Mt5TradeResult* result) {
     Lock lk;
-    if (g_pipe == INVALID_HANDLE_VALUE) return 0;
+    if (g_pipe == INVALID_HANDLE_VALUE) return MT5_ERR_PIPE_DISCONNECTED;
 
     Packer p;
     p.u64(ticket);
     p.f64(sl);
     p.f64(tp);
+    p.u64(magic);
 
-    if (!send_packet(CMD_ORDER_MODIFY, p.buf)) return 0;
+    if (!send_packet(CMD_ORDER_MODIFY, p.buf)) return MT5_ERR_SEND_FAILED;
 
     int32_t st = 0; std::string data;
-    if (!recv_packet(st, data)) return 0;
+    if (!recv_packet(st, data)) return MT5_ERR_UNKNOWN_EXECUTION;
 
     if (result && data.size() >= sizeof(Mt5TradeResult)) {
         std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
     }
-    return (st == 1) ? 1 : 0;
+    return (st == 1) ? MT5_OK : MT5_ERR_GENERAL;
+}
+
+int OrderModify(uint64_t ticket, double sl, double tp, Mt5TradeResult* result) {
+    return OrderModifyWithMagic(ticket, 0, sl, tp, result);
+}
+
+int PositionsGet(Mt5Position* buf, int buf_capacity, uint64_t magic_filter, const char* symbol_filter) {
+    Lock lk;
+    if (g_pipe == INVALID_HANDLE_VALUE || !buf || buf_capacity <= 0) return -1;
+
+    Packer p;
+    p.u64(magic_filter);
+    p.str(symbol_filter ? symbol_filter : "");
+    p.i32(buf_capacity);
+
+    if (!send_packet(CMD_POSITIONS_GET, p.buf)) return -1;
+
+    int32_t st = 0; std::string data;
+    if (!recv_packet(st, data) || st < 0) return -1;
+
+    int32_t count = st;
+    int32_t max_items = static_cast<int32_t>(data.size() / sizeof(Mt5Position));
+    int32_t n = (count < max_items) ? count : max_items;
+    if (n > buf_capacity) n = buf_capacity;
+    if (n > 0) {
+        std::memcpy(buf, data.data(), static_cast<size_t>(n) * sizeof(Mt5Position));
+    }
+    return n;
+}
+
+int OrdersGet(Mt5Order* buf, int buf_capacity, uint64_t magic_filter, const char* symbol_filter) {
+    Lock lk;
+    if (g_pipe == INVALID_HANDLE_VALUE || !buf || buf_capacity <= 0) return -1;
+
+    Packer p;
+    p.u64(magic_filter);
+    p.str(symbol_filter ? symbol_filter : "");
+    p.i32(buf_capacity);
+
+    if (!send_packet(CMD_ORDERS_GET, p.buf)) return -1;
+
+    int32_t st = 0; std::string data;
+    if (!recv_packet(st, data) || st < 0) return -1;
+
+    int32_t count = st;
+    int32_t max_items = static_cast<int32_t>(data.size() / sizeof(Mt5Order));
+    int32_t n = (count < max_items) ? count : max_items;
+    if (n > buf_capacity) n = buf_capacity;
+    if (n > 0) {
+        std::memcpy(buf, data.data(), static_cast<size_t>(n) * sizeof(Mt5Order));
+    }
+    return n;
 }
 
 int SymbolInfoFull(const char* symbol, Mt5SymInfo* info) {

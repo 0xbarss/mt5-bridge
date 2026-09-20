@@ -77,18 +77,20 @@ long  LocalFree(long hMem);
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-#define PROTOCOL_VERSION        2        // Wire protocol handshake version
+#define PROTOCOL_VERSION        3        // Wire protocol handshake version
 
 //---- Protocol commands
-#define CMD_INIT         1
-#define CMD_SHUTDOWN     2
-#define CMD_RATES        3
-#define CMD_ACCOUNT      4
-#define CMD_ORDER_SEND   5
-#define CMD_ORDER_CLOSE  6
-#define CMD_ORDER_MODIFY 7
-#define CMD_SYM_TICK     8
-#define CMD_SYM_INFO     9
+#define CMD_INIT          1
+#define CMD_SHUTDOWN      2
+#define CMD_RATES         3
+#define CMD_ACCOUNT       4
+#define CMD_ORDER_SEND    5
+#define CMD_ORDER_CLOSE   6
+#define CMD_ORDER_MODIFY  7
+#define CMD_SYM_TICK      8
+#define CMD_SYM_INFO      9
+#define CMD_POSITIONS_GET 10
+#define CMD_ORDERS_GET    11
 
 //---- EA input
 input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
@@ -492,6 +494,65 @@ struct BridgeTradeResult {
     double price;
 };
 
+//---- Order idempotency cache (stores recent executions to prevent duplicate fills on retry)
+struct OrderExecutionRecord {
+    string client_order_id;
+    uint   retcode;
+    ulong  deal;
+    ulong  order;
+    ulong  position;
+    double volume;
+    double price;
+    datetime timestamp;
+};
+
+#define ORDER_CACHE_CAPACITY 512
+OrderExecutionRecord g_order_cache[ORDER_CACHE_CAPACITY];
+int g_order_cache_count = 0;
+int g_order_cache_head  = 0;
+
+void CacheOrderExecution(const string cid, uint retcode, ulong deal, ulong order, ulong pos, double vol, double price) {
+    if (StringLen(cid) == 0) return;
+    g_order_cache[g_order_cache_head].client_order_id = cid;
+    g_order_cache[g_order_cache_head].retcode         = retcode;
+    g_order_cache[g_order_cache_head].deal            = deal;
+    g_order_cache[g_order_cache_head].order           = order;
+    g_order_cache[g_order_cache_head].position        = pos;
+    g_order_cache[g_order_cache_head].volume          = vol;
+    g_order_cache[g_order_cache_head].price           = price;
+    g_order_cache[g_order_cache_head].timestamp       = TimeCurrent();
+    g_order_cache_head = (g_order_cache_head + 1) % ORDER_CACHE_CAPACITY;
+    if (g_order_cache_count < ORDER_CACHE_CAPACITY) g_order_cache_count++;
+}
+
+bool FindCachedOrderExecution(const string cid, uint &retcode, ulong &deal, ulong &order, ulong &pos, double &vol, double &price) {
+    if (StringLen(cid) == 0) return false;
+    datetime cutoff = TimeCurrent() - 86400; // 24-hour cache TTL
+    for (int i = 0; i < g_order_cache_count; i++) {
+        if (g_order_cache[i].client_order_id == cid && g_order_cache[i].timestamp >= cutoff) {
+            retcode = g_order_cache[i].retcode;
+            deal    = g_order_cache[i].deal;
+            order   = g_order_cache[i].order;
+            pos     = g_order_cache[i].position;
+            vol     = g_order_cache[i].volume;
+            price   = g_order_cache[i].price;
+            return true;
+        }
+    }
+    return false;
+}
+
+string ExtractClientOrderId(const string cmt) {
+    if (StringFind(cmt, "cid:") == 0) {
+        int next_colon = StringFind(cmt, ":", 4);
+        if (next_colon > 4) {
+            return StringSubstr(cmt, 4, next_colon - 4);
+        }
+        return StringSubstr(cmt, 4);
+    }
+    return cmt;
+}
+
 void HandleOrderSend(long h, const uchar &payload[], uint len) {
     int off = 0;
     string sym = "";
@@ -507,6 +568,28 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         !SafeUnpackF64(payload, off, len, tp) ||
         !SafeUnpackStr(payload, off, len, comment)) {
         SendError(h);
+        return;
+    }
+
+    // Idempotency check: if client_order_id was passed, check cache to prevent duplicate fills
+    string cid = "";
+    if (StringLen(comment) > 0) {
+        cid = ExtractClientOrderId(comment);
+    }
+
+    uint cached_retcode = 0;
+    ulong cached_deal = 0, cached_order = 0, cached_pos = 0;
+    double cached_vol = 0.0, cached_price = 0.0;
+    if (StringLen(cid) > 0 && FindCachedOrderExecution(cid, cached_retcode, cached_deal, cached_order, cached_pos, cached_vol, cached_price)) {
+        Print("MT5Bridge: idempotent order replay for client_order_id=", cid, " (returning cached deal=", cached_deal, ", order=", cached_order, ")");
+        uchar cdata[];
+        PackU32(cdata, cached_retcode);
+        PackU64(cdata, cached_deal);
+        PackU64(cdata, cached_order);
+        PackU64(cdata, cached_pos);
+        PackF64(cdata, cached_vol);
+        PackF64(cdata, cached_price);
+        SendOkData(h, cdata, (uint)ArraySize(cdata));
         return;
     }
 
@@ -828,6 +911,9 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     if (ok && (res.retcode == TRADE_RETCODE_DONE ||
                res.retcode == TRADE_RETCODE_PLACED ||
                res.retcode == TRADE_RETCODE_DONE_PARTIAL)) {
+        if (StringLen(cid) > 0) {
+            CacheOrderExecution(cid, res.retcode, res.deal, res.order, pos_ticket, res.volume, exec_price);
+        }
         SendOkData(h, data, (uint)ArraySize(data));
     } else {
         Print("MT5Bridge: OrderSend failed retcode=", res.retcode);
@@ -841,11 +927,21 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     ulong ticket = 0;
     if (!SafeUnpackU64(payload, off, len, ticket)) { SendError(h); return; }
 
+    ulong req_magic = 0;
+    if ((uint)off + 8 <= len) {
+        SafeUnpackU64(payload, off, len, req_magic);
+    }
+
     // Find position by ticket, or pending order to remove
     if (!PositionSelectByTicket(ticket)) {
         if (OrderSelect(ticket)) {
             long ord_magic = OrderGetInteger(ORDER_MAGIC);
-            if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
+            if (req_magic > 0 && ord_magic != (long)req_magic) {
+                Print("MT5Bridge: rejected remove — pending order ticket ", ticket, " magic (", ord_magic,
+                      ") does not match requested magic (", req_magic, ")");
+                SendError(h);
+                return;
+            } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
                 Print("MT5Bridge: rejected remove — pending order ticket ", ticket, " magic (", ord_magic,
                       ") does not match EA magic (", InpMagicNumber, ")");
                 SendError(h);
@@ -888,7 +984,12 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     }
 
     long pos_magic = PositionGetInteger(POSITION_MAGIC);
-    if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
+    if (req_magic > 0 && pos_magic != (long)req_magic) {
+        Print("MT5Bridge: rejected close — position ticket ", ticket, " magic (", pos_magic,
+              ") does not match requested magic (", req_magic, ")");
+        SendError(h);
+        return;
+    } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
         Print("MT5Bridge: rejected close — position ticket ", ticket, " magic (", pos_magic,
               ") does not match EA magic (", InpMagicNumber, ")");
         SendError(h);
@@ -959,6 +1060,11 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         return;
     }
 
+    ulong req_magic = 0;
+    if ((uint)off + 8 <= len) {
+        SafeUnpackU64(payload, off, len, req_magic);
+    }
+
     MqlTradeRequest req = {};
     MqlTradeResult res = {};
     bool ok = false;
@@ -967,7 +1073,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
     if (PositionSelectByTicket(ticket)) {
         is_position = true;
         long pos_magic = PositionGetInteger(POSITION_MAGIC);
-        if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
+        if (req_magic > 0 && pos_magic != (long)req_magic) {
+            Print("MT5Bridge: rejected modify — position ticket ", ticket, " magic (", pos_magic,
+                  ") does not match requested magic (", req_magic, ")");
+            SendError(h);
+            return;
+        } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — position ticket ", ticket, " magic (", pos_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
@@ -1034,7 +1145,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         ok = OrderSend(req, res);
     } else if (OrderSelect(ticket)) {
         long ord_magic = OrderGetInteger(ORDER_MAGIC);
-        if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
+        if (req_magic > 0 && ord_magic != (long)req_magic) {
+            Print("MT5Bridge: rejected modify — pending order ticket ", ticket, " magic (", ord_magic,
+                  ") does not match requested magic (", req_magic, ")");
+            SendError(h);
+            return;
+        } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — pending order ticket ", ticket, " magic (", ord_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
             SendError(h);
@@ -1206,6 +1322,125 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     SendOkData(h, data, (uint)ArraySize(data));
 }
 
+void PackFixedString32(uchar &data[], const string s) {
+    uchar str_bytes[32];
+    ArrayInitialize(str_bytes, 0);
+    StringToCharArray(s, str_bytes, 0, 31);
+    int cur_len = ArraySize(data);
+    ArrayResize(data, cur_len + 32);
+    ArrayCopy(data, str_bytes, cur_len, 0, 32);
+}
+
+void HandlePositionsGet(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    ulong magic_filter = 0;
+    string symbol_filter = "";
+    int max_items = 0;
+
+    SafeUnpackU64(payload, off, len, magic_filter);
+    SafeUnpackStr(payload, off, len, symbol_filter);
+    SafeUnpackI32(payload, off, len, max_items);
+    if (max_items <= 0) max_items = 1000;
+
+    int total = PositionsTotal();
+    uchar data[];
+    int count = 0;
+
+    for (int i = 0; i < total && count < max_items; i++) {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+
+        ulong pos_magic = (ulong)PositionGetInteger(POSITION_MAGIC);
+        if (magic_filter > 0 && pos_magic != magic_filter) continue;
+
+        string sym = PositionGetString(POSITION_SYMBOL);
+        if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        long pos_time     = PositionGetInteger(POSITION_TIME);
+        int pos_type      = (int)PositionGetInteger(POSITION_TYPE);
+        double volume     = PositionGetDouble(POSITION_VOLUME);
+        double price_open = PositionGetDouble(POSITION_PRICE_OPEN);
+        double sl         = PositionGetDouble(POSITION_SL);
+        double tp         = PositionGetDouble(POSITION_TP);
+        double price_curr = PositionGetDouble(POSITION_PRICE_CURRENT);
+        double profit     = PositionGetDouble(POSITION_PROFIT);
+        double swap       = PositionGetDouble(POSITION_SWAP);
+        string comment    = PositionGetString(POSITION_COMMENT);
+
+        PackU64(data, ticket);
+        PackI64(data, pos_time);
+        PackI32(data, pos_type);
+        PackU64(data, pos_magic);
+        PackF64(data, volume);
+        PackF64(data, price_open);
+        PackF64(data, sl);
+        PackF64(data, tp);
+        PackF64(data, price_curr);
+        PackF64(data, profit);
+        PackF64(data, swap);
+        PackFixedString32(data, sym);
+        PackFixedString32(data, comment);
+
+        count++;
+    }
+
+    SendCount(h, count, data, (uint)ArraySize(data));
+}
+
+void HandleOrdersGet(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    ulong magic_filter = 0;
+    string symbol_filter = "";
+    int max_items = 0;
+
+    SafeUnpackU64(payload, off, len, magic_filter);
+    SafeUnpackStr(payload, off, len, symbol_filter);
+    SafeUnpackI32(payload, off, len, max_items);
+    if (max_items <= 0) max_items = 1000;
+
+    int total = OrdersTotal();
+    uchar data[];
+    int count = 0;
+
+    for (int i = 0; i < total && count < max_items; i++) {
+        ulong ticket = OrderGetTicket(i);
+        if (ticket == 0) continue;
+
+        ulong ord_magic = (ulong)OrderGetInteger(ORDER_MAGIC);
+        if (magic_filter > 0 && ord_magic != magic_filter) continue;
+
+        string sym = OrderGetString(ORDER_SYMBOL);
+        if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        long ord_time     = OrderGetInteger(ORDER_TIME_SETUP);
+        int ord_type      = (int)OrderGetInteger(ORDER_TYPE);
+        double vol_init   = OrderGetDouble(ORDER_VOLUME_INITIAL);
+        double vol_curr   = OrderGetDouble(ORDER_VOLUME_CURRENT);
+        double price_open = OrderGetDouble(ORDER_PRICE_OPEN);
+        double sl         = OrderGetDouble(ORDER_SL);
+        double tp         = OrderGetDouble(ORDER_TP);
+        double price_curr = OrderGetDouble(ORDER_PRICE_CURRENT);
+        string comment    = OrderGetString(ORDER_COMMENT);
+
+        PackU64(data, ticket);
+        PackI64(data, ord_time);
+        PackI32(data, ord_type);
+        PackU64(data, ord_magic);
+        PackF64(data, vol_init);
+        PackF64(data, vol_curr);
+        PackF64(data, price_open);
+        PackF64(data, sl);
+        PackF64(data, tp);
+        PackF64(data, price_curr);
+        PackFixedString32(data, sym);
+        PackFixedString32(data, comment);
+
+        count++;
+    }
+
+    SendCount(h, count, data, (uint)ArraySize(data));
+}
+
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
@@ -1234,15 +1469,17 @@ bool DispatchRequest(long h) {
     }
 
     switch (cmd) {
-        case CMD_INIT:        HandleInit(h, payload, pay_len);              break;
-        case CMD_SHUTDOWN:    HandleShutdown(h); return false;  /* disconnect */
-        case CMD_RATES:       HandleCopyRates(h, payload, pay_len);         break;
-        case CMD_ACCOUNT:     HandleAccount(h);                             break;
-        case CMD_ORDER_SEND:  HandleOrderSend(h, payload, pay_len);         break;
-        case CMD_ORDER_CLOSE: HandleOrderClose(h, payload, pay_len);        break;
-        case CMD_ORDER_MODIFY:HandleOrderModify(h, payload, pay_len);       break;
-        case CMD_SYM_TICK:    HandleSymbolInfoTick(h, payload, pay_len);    break;
-        case CMD_SYM_INFO:    HandleSymbolInfoFull(h, payload, pay_len);    break;
+        case CMD_INIT:         HandleInit(h, payload, pay_len);           break;
+        case CMD_SHUTDOWN:     HandleShutdown(h); return false;  /* disconnect */
+        case CMD_RATES:        HandleCopyRates(h, payload, pay_len);      break;
+        case CMD_ACCOUNT:      HandleAccount(h);                          break;
+        case CMD_ORDER_SEND:   HandleOrderSend(h, payload, pay_len);      break;
+        case CMD_ORDER_CLOSE:  HandleOrderClose(h, payload, pay_len);     break;
+        case CMD_ORDER_MODIFY: HandleOrderModify(h, payload, pay_len);    break;
+        case CMD_SYM_TICK:     HandleSymbolInfoTick(h, payload, pay_len); break;
+        case CMD_SYM_INFO:     HandleSymbolInfoFull(h, payload, pay_len); break;
+        case CMD_POSITIONS_GET:HandlePositionsGet(h, payload, pay_len);  break;
+        case CMD_ORDERS_GET:   HandleOrdersGet(h, payload, pay_len);     break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

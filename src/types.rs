@@ -1,5 +1,5 @@
 use crate::error::mt5_retcode_description;
-use crate::ffi::{Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TradeResult};
+use crate::ffi::{Mt5Order, Mt5Position, Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TradeResult};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -500,6 +500,11 @@ impl Bar {
         self.high - self.low
     }
 
+    /// Absolute candle body size: `|close - open|`.
+    pub fn body(&self) -> f64 {
+        (self.close - self.open).abs()
+    }
+
     /// True range compared to the previous bar's close.
     pub fn true_range(&self, prev_close: f64) -> f64 {
         let hl = self.high - self.low;
@@ -571,6 +576,7 @@ pub struct OrderRequest {
     pub deviation: Option<u32>,
     pub expiration: Option<i64>,
     pub magic: Option<u64>,
+    pub client_order_id: Option<String>,
 }
 
 impl OrderRequest {
@@ -587,6 +593,7 @@ impl OrderRequest {
             deviation: None,
             expiration: None,
             magic: None,
+            client_order_id: None,
         }
     }
 
@@ -603,6 +610,7 @@ impl OrderRequest {
             deviation: None,
             expiration: None,
             magic: None,
+            client_order_id: None,
         }
     }
 
@@ -624,6 +632,7 @@ impl OrderRequest {
             deviation: None,
             expiration: None,
             magic: None,
+            client_order_id: None,
         }
     }
 
@@ -660,6 +669,42 @@ impl OrderRequest {
     pub fn magic(mut self, magic: u64) -> Self {
         self.magic = Some(magic);
         self
+    }
+
+    pub fn client_order_id(mut self, id: impl Into<String>) -> Self {
+        self.client_order_id = Some(id.into());
+        self
+    }
+
+    /// Formats the effective MT5 wire comment embedding client_order_id if present:
+    /// e.g. "cid:<client_order_id>" or "cid:<client_order_id>:<comment>", truncated to 31 chars max.
+    pub fn effective_comment(&self) -> String {
+        match &self.client_order_id {
+            Some(cid) if !cid.is_empty() => {
+                if self.comment.is_empty() {
+                    let s = format!("cid:{cid}");
+                    if s.len() > 31 {
+                        s[..31].to_string()
+                    } else {
+                        s
+                    }
+                } else {
+                    let s = format!("cid:{cid}:{}", self.comment);
+                    if s.len() > 31 {
+                        s[..31].to_string()
+                    } else {
+                        s
+                    }
+                }
+            }
+            _ => {
+                if self.comment.len() > 31 {
+                    self.comment[..31].to_string()
+                } else {
+                    self.comment.clone()
+                }
+            }
+        }
     }
 
     /// Validates the order request parameters before submitting to the MT5 bridge.
@@ -857,6 +902,341 @@ impl TradeResult {
     pub fn description(&self) -> &'static str {
         mt5_retcode_description(self.retcode)
     }
+}
+
+/// Detailed information for an active open position in MetaTrader 5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    pub ticket: u64,
+    pub time: i64,
+    pub position_type: OrderType,
+    pub magic: u64,
+    pub volume: f64,
+    pub price_open: f64,
+    pub stop_loss: f64,
+    pub take_profit: f64,
+    pub price_current: f64,
+    pub profit: f64,
+    pub swap: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+
+impl Position {
+    pub fn from_raw(raw: Mt5Position) -> Self {
+        let sym_len = raw
+            .symbol
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(raw.symbol.len());
+        let sym = String::from_utf8_lossy(&raw.symbol[..sym_len])
+            .trim()
+            .to_string();
+
+        let cmt_len = raw
+            .comment
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(raw.comment.len());
+        let cmt = String::from_utf8_lossy(&raw.comment[..cmt_len])
+            .trim()
+            .to_string();
+
+        let ptype = if raw.position_type == 1 {
+            OrderType::Sell
+        } else {
+            OrderType::Buy
+        };
+
+        Self {
+            ticket: raw.ticket,
+            time: raw.time,
+            position_type: ptype,
+            magic: raw.magic,
+            volume: raw.volume,
+            price_open: raw.price_open,
+            stop_loss: raw.sl,
+            take_profit: raw.tp,
+            price_current: raw.price_current,
+            profit: raw.profit,
+            swap: raw.swap,
+            symbol: sym,
+            comment: cmt,
+        }
+    }
+
+    pub fn is_buy(&self) -> bool {
+        self.position_type.is_buy()
+    }
+
+    pub fn is_sell(&self) -> bool {
+        self.position_type.is_sell()
+    }
+
+    pub fn matches_magic(&self, magic: u64) -> bool {
+        self.magic == magic
+    }
+}
+
+/// Detailed information for an active working pending order in MetaTrader 5.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkingOrder {
+    pub ticket: u64,
+    pub time_setup: i64,
+    pub order_type: OrderType,
+    pub magic: u64,
+    pub volume_initial: f64,
+    pub volume_current: f64,
+    pub price_open: f64,
+    pub stop_loss: f64,
+    pub take_profit: f64,
+    pub price_current: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+
+impl WorkingOrder {
+    pub fn from_raw(raw: Mt5Order) -> Self {
+        let sym_len = raw
+            .symbol
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(raw.symbol.len());
+        let sym = String::from_utf8_lossy(&raw.symbol[..sym_len])
+            .trim()
+            .to_string();
+
+        let cmt_len = raw
+            .comment
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(raw.comment.len());
+        let cmt = String::from_utf8_lossy(&raw.comment[..cmt_len])
+            .trim()
+            .to_string();
+
+        let otype = match raw.order_type {
+            2 => OrderType::BuyLimit,
+            3 => OrderType::SellLimit,
+            4 => OrderType::BuyStop,
+            5 => OrderType::SellStop,
+            1 => OrderType::Sell,
+            _ => OrderType::Buy,
+        };
+
+        Self {
+            ticket: raw.ticket,
+            time_setup: raw.time_setup,
+            order_type: otype,
+            magic: raw.magic,
+            volume_initial: raw.volume_initial,
+            volume_current: raw.volume_current,
+            price_open: raw.price_open,
+            stop_loss: raw.sl,
+            take_profit: raw.tp,
+            price_current: raw.price_current,
+            symbol: sym,
+            comment: cmt,
+        }
+    }
+
+    pub fn matches_magic(&self, magic: u64) -> bool {
+        self.magic == magic
+    }
+}
+
+/// Complete lifecycle state of an order in the execution state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrderState {
+    /// Initial state before network transmission.
+    Created,
+    /// Actively transmitting or awaiting confirmation.
+    Submitting,
+    /// Pending order accepted and working in the MT5 order book.
+    Accepted,
+    /// Order partially executed; working remainder remains.
+    PartiallyFilled,
+    /// Order completely executed.
+    Filled,
+    /// Order was cancelled or expired.
+    Cancelled,
+    /// Order was rejected by the bridge or broker.
+    Rejected,
+    /// Ambiguous outcome (e.g. timeout / disconnect after submission).
+    /// Requires reconciliation against broker state before any retry!
+    Unknown,
+    /// Order confirmed and reconstructed via reconciliation.
+    Reconciled,
+}
+
+/// Order tracker maintaining full execution lifecycle, volume accounting, and reconciliation state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackedOrder {
+    pub client_order_id: String,
+    pub symbol: String,
+    pub order_type: OrderType,
+    pub requested_volume: f64,
+    pub filled_volume: f64,
+    pub remaining_volume: f64,
+    pub average_price: f64,
+    pub order_ticket: u64,
+    pub deal_ticket: u64,
+    pub position_ticket: u64,
+    pub state: OrderState,
+    pub magic: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub error_message: Option<String>,
+}
+
+impl TrackedOrder {
+    pub fn new(req: &OrderRequest, client_order_id: impl Into<String>) -> Self {
+        let now = chrono::Utc::now().timestamp();
+        Self {
+            client_order_id: client_order_id.into(),
+            symbol: req.symbol.clone(),
+            order_type: req.order_type,
+            requested_volume: req.volume,
+            filled_volume: 0.0,
+            remaining_volume: req.volume,
+            average_price: 0.0,
+            order_ticket: 0,
+            deal_ticket: 0,
+            position_ticket: 0,
+            state: OrderState::Created,
+            magic: req.magic.unwrap_or(0),
+            created_at: now,
+            updated_at: now,
+            error_message: None,
+        }
+    }
+
+    /// Mark the order as actively being submitted over the IPC bridge.
+    pub fn mark_submitting(&mut self) {
+        self.state = OrderState::Submitting;
+        self.updated_at = chrono::Utc::now().timestamp();
+    }
+
+    /// Update order state from a synchronous TradeResult response.
+    pub fn update_from_trade_result(&mut self, res: &TradeResult) {
+        self.updated_at = chrono::Utc::now().timestamp();
+        self.order_ticket = res.order;
+        self.deal_ticket = res.deal;
+        if res.position > 0 {
+            self.position_ticket = res.position;
+        }
+
+        match res.status() {
+            TradeStatus::Filled => {
+                self.filled_volume = res.volume;
+                self.remaining_volume = (self.requested_volume - res.volume).max(0.0);
+                self.average_price = res.price;
+                self.state = OrderState::Filled;
+            }
+            TradeStatus::Placed => {
+                self.state = OrderState::Accepted;
+            }
+            TradeStatus::PartiallyFilled => {
+                self.filled_volume = res.volume;
+                self.remaining_volume = (self.requested_volume - res.volume).max(0.0);
+                self.average_price = res.price;
+                self.state = OrderState::PartiallyFilled;
+            }
+            TradeStatus::Rejected => {
+                self.state = OrderState::Rejected;
+                self.error_message = Some(res.description().to_string());
+            }
+        }
+    }
+
+    /// Mark order status as Unknown when network transmission is ambiguous (e.g. pipe broken during response).
+    pub fn mark_unknown(&mut self, reason: impl Into<String>) {
+        self.state = OrderState::Unknown;
+        self.error_message = Some(reason.into());
+        self.updated_at = chrono::Utc::now().timestamp();
+    }
+
+    /// Update state when confirmed active or filled via position reconciliation.
+    pub fn reconcile_with_position(&mut self, pos: &Position) {
+        self.position_ticket = pos.ticket;
+        self.filled_volume = pos.volume;
+        self.remaining_volume = (self.requested_volume - pos.volume).max(0.0);
+        self.average_price = pos.price_open;
+        self.state = OrderState::Reconciled;
+        self.updated_at = chrono::Utc::now().timestamp();
+    }
+
+    /// Update state when confirmed active via working pending order reconciliation.
+    pub fn reconcile_with_working_order(&mut self, ord: &WorkingOrder) {
+        self.order_ticket = ord.ticket;
+        self.filled_volume = ord.volume_initial - ord.volume_current;
+        self.remaining_volume = ord.volume_current;
+        self.state = OrderState::Accepted;
+        self.updated_at = chrono::Utc::now().timestamp();
+    }
+
+    /// Returns `true` if this order has reached a final state (Filled, Cancelled, Rejected).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            OrderState::Filled | OrderState::Cancelled | OrderState::Rejected
+        )
+    }
+
+    /// Returns `true` if this order is still open or working (Created, Submitting, Accepted, PartiallyFilled, Unknown).
+    pub fn is_active(&self) -> bool {
+        !self.is_terminal()
+    }
+}
+
+/// Converts a floating-point price into an integer number of price ticks based on tick size.
+pub fn price_to_ticks(price: f64, tick_size: f64) -> i64 {
+    if tick_size <= 0.0 || !price.is_finite() {
+        0
+    } else {
+        ((price / tick_size) + 1e-9).round() as i64
+    }
+}
+
+/// Converts an integer tick count into a normalized floating-point price according to tick size and digits.
+pub fn ticks_to_price(ticks: i64, tick_size: f64, digits: u32) -> f64 {
+    let raw = (ticks as f64) * tick_size;
+    let factor = 10f64.powi(digits as i32);
+    (raw * factor).round() / factor
+}
+
+/// Calculate a Stop Loss price based on tick distance from an entry price, avoiding floating-point drift.
+pub fn calculate_sl_ticks(
+    entry: f64,
+    distance_ticks: i64,
+    is_buy: bool,
+    tick_size: f64,
+    digits: u32,
+) -> f64 {
+    let entry_ticks = price_to_ticks(entry, tick_size);
+    let sl_ticks = if is_buy {
+        entry_ticks - distance_ticks.abs()
+    } else {
+        entry_ticks + distance_ticks.abs()
+    };
+    ticks_to_price(sl_ticks, tick_size, digits)
+}
+
+/// Calculate a Take Profit price based on tick distance from an entry price, avoiding floating-point drift.
+pub fn calculate_tp_ticks(
+    entry: f64,
+    distance_ticks: i64,
+    is_buy: bool,
+    tick_size: f64,
+    digits: u32,
+) -> f64 {
+    let entry_ticks = price_to_ticks(entry, tick_size);
+    let tp_ticks = if is_buy {
+        entry_ticks + distance_ticks.abs()
+    } else {
+        entry_ticks - distance_ticks.abs()
+    };
+    ticks_to_price(tp_ticks, tick_size, digits)
 }
 
 /// Detailed historical data result with completeness tracking.

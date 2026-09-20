@@ -59,8 +59,90 @@ pub struct Mt5TradeResult {
     pub price: f64,
 }
 
+/// Wire format for open position (148 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5Position {
+    pub ticket: u64,
+    pub time: i64,
+    pub position_type: i32, // 0 = Buy, 1 = Sell
+    pub magic: u64,
+    pub volume: f64,
+    pub price_open: f64,
+    pub sl: f64,
+    pub tp: f64,
+    pub price_current: f64,
+    pub profit: f64,
+    pub swap: f64,
+    pub symbol: [u8; 32],
+    pub comment: [u8; 32],
+}
+
+impl Default for Mt5Position {
+    fn default() -> Self {
+        Self {
+            ticket: 0,
+            time: 0,
+            position_type: 0,
+            magic: 0,
+            volume: 0.0,
+            price_open: 0.0,
+            sl: 0.0,
+            tp: 0.0,
+            price_current: 0.0,
+            profit: 0.0,
+            swap: 0.0,
+            symbol: [0u8; 32],
+            comment: [0u8; 32],
+        }
+    }
+}
+
+/// Wire format for working pending order (140 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5Order {
+    pub ticket: u64,
+    pub time_setup: i64,
+    pub order_type: i32, // 2 = BuyLimit, 3 = SellLimit, 4 = BuyStop, 5 = SellStop
+    pub magic: u64,
+    pub volume_initial: f64,
+    pub volume_current: f64,
+    pub price_open: f64,
+    pub sl: f64,
+    pub tp: f64,
+    pub price_current: f64,
+    pub symbol: [u8; 32],
+    pub comment: [u8; 32],
+}
+
+impl Default for Mt5Order {
+    fn default() -> Self {
+        Self {
+            ticket: 0,
+            time_setup: 0,
+            order_type: 0,
+            magic: 0,
+            volume_initial: 0.0,
+            volume_current: 0.0,
+            price_open: 0.0,
+            sl: 0.0,
+            tp: 0.0,
+            price_current: 0.0,
+            symbol: [0u8; 32],
+            comment: [0u8; 32],
+        }
+    }
+}
+
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+pub const MT5_OK: i32 = 1;
+pub const MT5_ERR_GENERAL: i32 = 0;
+pub const MT5_ERR_SEND_FAILED: i32 = -1;
+pub const MT5_ERR_UNKNOWN_EXECUTION: i32 = -2;
+pub const MT5_ERR_PIPE_DISCONNECTED: i32 = -3;
 
 // Ensure struct memory layouts match C header at compile-time.
 const _: () = {
@@ -68,6 +150,8 @@ const _: () = {
     assert!(std::mem::size_of::<Mt5Rate>() == 60);
     assert!(std::mem::size_of::<Mt5Tick>() == 44);
     assert!(std::mem::size_of::<Mt5TradeResult>() == 44);
+    assert!(std::mem::size_of::<Mt5Position>() == 148);
+    assert!(std::mem::size_of::<Mt5Order>() == 140);
 };
 
 // Function pointer signatures for dynamic library loading.
@@ -90,9 +174,15 @@ pub type FnSend = unsafe extern "C" fn(
     *mut Mt5TradeResult,
 ) -> c_int;
 pub type FnClose = unsafe extern "C" fn(u64, *mut Mt5TradeResult) -> c_int;
+pub type FnCloseMagic = unsafe extern "C" fn(u64, u64, *mut Mt5TradeResult) -> c_int;
 pub type FnModify = unsafe extern "C" fn(u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
+pub type FnModifyMagic =
+    unsafe extern "C" fn(u64, u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnSymTick = unsafe extern "C" fn(*const c_char, *mut Mt5Tick) -> c_int;
 pub type FnSymInfo = unsafe extern "C" fn(*const c_char, *mut Mt5SymInfo) -> c_int;
+pub type FnPositions =
+    unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const c_char) -> c_int;
+pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_char) -> c_int;
 
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]
@@ -107,4 +197,6 @@ pub enum ProtocolCmd {
     OrderModify = 7,
     SymTick = 8,
     SymInfo = 9,
+    PositionsGet = 10,
+    OrdersGet = 11,
 }

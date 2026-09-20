@@ -16,24 +16,40 @@ const DUP_PRICE_THRESHOLD: f64 = 1e-9;
 /// Maximum consecutive poll errors allowed before a streaming task aborts and closes the channel.
 pub const MAX_CONSECUTIVE_STREAM_ERRORS: u32 = 10;
 
-/// Stream real-time ticks for a symbol using latest-quote polling.
-///
-/// **Streaming Semantics:**
-/// Spawns a background Tokio task that periodically polls the bridge for new quotes
-/// via `symbol_tick()` at the specified `poll_interval`. New quotes (changes in timestamp,
-/// bid, ask, last price, volume, or tick flags) are yielded through an `mpsc::Receiver`.
-/// The task terminates automatically when the receiver is dropped.
-///
-/// *Note on High Frequency:* This is **latest-quote polling**, not a lossless tick queue.
-/// Intermediate sub-millisecond price ticks occurring within a single polling interval are
-/// coalesced into the latest quote. For multi-symbol streaming, use balanced intervals (e.g. 20–100ms)
-/// to maintain efficient IPC pipe throughput.
-pub fn stream_ticks(
+/// Backpressure policy for stream buffer overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressurePolicy {
+    /// Drops intermediate quotes when the channel buffer is full to prevent lag accumulation (lossy latest-value).
+    DropLatest,
+    /// Blocks the polling task until space is freed in the channel.
+    Block,
+}
+
+/// Configuration options for market data streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamConfig {
+    pub buffer_size: usize,
+    pub poll_interval: Duration,
+    pub backpressure: BackpressurePolicy,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            buffer_size: DEFAULT_TICK_BUFFER,
+            poll_interval: Duration::from_millis(50),
+            backpressure: BackpressurePolicy::DropLatest,
+        }
+    }
+}
+
+/// Stream real-time ticks for a symbol using explicit configuration and backpressure policy.
+pub fn stream_ticks_with_config(
     client: Arc<Mt5Client>,
     symbol: &str,
-    poll_interval: Duration,
+    config: StreamConfig,
 ) -> mpsc::Receiver<Tick> {
-    let (tx, rx) = mpsc::channel(DEFAULT_TICK_BUFFER);
+    let (tx, rx) = mpsc::channel(config.buffer_size.max(16));
     let sym_owned = symbol.to_string();
 
     tokio::spawn(async move {
@@ -46,6 +62,7 @@ pub fn stream_ticks(
         let mut prev_volume: u64 = 0;
         let mut prev_flags: u32 = 0;
         let mut consecutive_errors: u32 = 0;
+        let mut dropped_ticks: u64 = 0;
 
         loop {
             let client_clone = Arc::clone(&client);
@@ -74,9 +91,30 @@ pub fn stream_ticks(
                             prev_volume = tick.volume;
                             prev_flags = tick.flags;
 
-                            if tx.send(tick).await.is_err() {
-                                debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
-                                break;
+                            match config.backpressure {
+                                BackpressurePolicy::DropLatest => match tx.try_send(tick) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        dropped_ticks += 1;
+                                        if dropped_ticks % 100 == 1 {
+                                            warn!(
+                                                symbol = %sym_owned,
+                                                dropped_ticks,
+                                                "Tick stream buffer full: dropped tick to preserve latest-value latency"
+                                            );
+                                        }
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
+                                        break;
+                                    }
+                                },
+                                BackpressurePolicy::Block => {
+                                    if tx.send(tick).await.is_err() {
+                                        debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -105,11 +143,25 @@ pub fn stream_ticks(
                 }
             }
 
-            sleep(poll_interval).await;
+            sleep(config.poll_interval).await;
         }
     });
 
     rx
+}
+
+/// Stream real-time ticks for a symbol using latest-quote polling and drop-latest backpressure.
+pub fn stream_ticks(
+    client: Arc<Mt5Client>,
+    symbol: &str,
+    poll_interval: Duration,
+) -> mpsc::Receiver<Tick> {
+    let config = StreamConfig {
+        buffer_size: DEFAULT_TICK_BUFFER,
+        poll_interval,
+        backpressure: BackpressurePolicy::DropLatest,
+    };
+    stream_ticks_with_config(client, symbol, config)
 }
 
 /// Stream completed (closed) OHLCV bars for a given symbol and timeframe.

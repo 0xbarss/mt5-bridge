@@ -37,6 +37,9 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
   - [8. Placing, Modifying & Closing Market Orders](#8-placing-modifying--closing-market-orders)
   - [9. Pending Orders with Expiration & Cancellation](#9-pending-orders-with-expiration--cancellation)
   - [10. Error Handling & Return Code Inspection](#10-error-handling--return-code-inspection)
+  - [11. Querying Live Positions & Working Orders](#11-querying-live-positions--working-orders)
+  - [12. Order Idempotency, Lifecycle & Reconciliation Engine](#12-order-idempotency-lifecycle--reconciliation-engine)
+  - [13. Integer Tick Pricing Utilities](#13-integer-tick-pricing-utilities)
 - [API Reference](#api-reference)
   - [Mt5Client](#mt5client)
   - [Streaming APIs](#streaming-apis)
@@ -654,6 +657,91 @@ fn place_trade(client: &Mt5Client, req: &OrderRequest) {
 
 ---
 
+### 11. Querying Live Positions & Working Orders
+
+Inspect currently active open positions and pending orders directly from MT5:
+
+```rust
+use mt5_bridge::Mt5Client;
+
+let client = Mt5Client::connect(0, "test", "")?;
+
+// Query all open positions (optionally filtered by magic number or symbol)
+let positions = client.positions_filtered(Some(998877), Some("EURUSD"))?;
+for pos in positions {
+    println!(
+        "Position #{} on {} | Volume: {:.2} | Open: {:.5} | Profit: ${:.2}",
+        pos.ticket, pos.symbol, pos.volume, pos.price_open, pos.profit
+    );
+}
+
+// Query all working pending orders
+let orders = client.pending_orders()?;
+for ord in orders {
+    println!(
+        "Working Order #{} | Type: {:?} | Volume: {:.2}/{:.2} | Price: {:.5}",
+        ord.ticket, ord.order_type, ord.volume_current, ord.volume_initial, ord.price_open
+    );
+}
+```
+
+---
+
+### 12. Order Idempotency, Lifecycle & Reconciliation Engine
+
+For mission-critical production trading, [`OrderManager`](src/reconciliation.rs) wraps `Mt5Client` with:
+- **Client Order ID Deduplication**: Replays of existing orders are returned from local memory without sending duplicate orders to the broker.
+- **Uncertain Execution Protection**: Disconnects after order submission are flagged as `OrderState::Unknown` rather than triggering dangerous blind retries.
+- **Broker State Reconciliation**: Automatically syncs local in-memory orders with live broker state after reconnects or startup.
+
+```rust
+use mt5_bridge::{LifecycleState, OrderManager, OrderRequest};
+
+let mut manager = OrderManager::new(998877); // Strategy Magic 998877
+
+// Reconcile against live MT5 state on startup
+let report = manager.reconcile(&client)?;
+println!(
+    "Reconciliation complete (clean: {}). Active positions: {}, working orders: {}",
+    report.is_clean(),
+    report.positions.len(),
+    report.pending_orders.len()
+);
+
+// Submit order with deterministic client order ID
+let req = OrderRequest::buy("EURUSD", 0.1)
+    .client_order_id("strategy-alpha-001")
+    .comment("breakout");
+
+let tracked = manager.submit_order(&client, req)?;
+println!("Order status: {:?}, filled: {:.2}", tracked.state, tracked.filled_volume);
+```
+
+---
+
+### 13. Integer Tick Pricing Utilities
+
+Eliminate floating-point rounding drift by performing arithmetic in integer price ticks:
+
+```rust
+use mt5_bridge::{calculate_sl_ticks, calculate_tp_ticks, price_to_ticks, ticks_to_price};
+
+let entry_price = 1.08500;
+let tick_size = 0.00001;
+let digits = 5;
+
+// Convert to integer ticks: 108500
+let entry_ticks = price_to_ticks(entry_price, tick_size);
+
+// Calculate exact Stop Loss 50 ticks below entry (1.08450)
+let sl_price = calculate_sl_ticks(entry_price, 50, true, tick_size, digits);
+
+// Calculate exact Take Profit 100 ticks above entry (1.08600)
+let tp_price = calculate_tp_ticks(entry_price, 100, true, tick_size, digits);
+```
+
+---
+
 ## API Reference
 
 Comprehensive reference for public structs, enums, methods, and functions in `mt5-bridge`.
@@ -688,13 +776,19 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | [`copy_rates_chunked`](src/client.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries. |
 | [`copy_rates_chunked_detailed`](src/client.rs) | `pub fn copy_rates_chunked_detailed(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<HistoryResult>` | Detailed downloader returning `HistoryResult` with completeness tracking. |
 
-#### Order Management
+#### Order & Position Management
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
 | [`order_send`](src/client.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
 | [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position or cancels a pending order by ticket ID. |
+| [`order_close_with_magic`](src/client.rs) | `pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
 | [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
+| [`order_modify_with_magic`](src/client.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
+| [`positions`](src/client.rs) | `pub fn positions(&self) -> Result<Vec<Position>>` | Queries all active open positions in the terminal. |
+| [`positions_filtered`](src/client.rs) | `pub fn positions_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Position>>` | Queries open positions matching optional magic number and/or symbol filters. |
+| [`pending_orders`](src/client.rs) | `pub fn pending_orders(&self) -> Result<Vec<WorkingOrder>>` | Queries all active working pending orders in the terminal. |
+| [`pending_orders_filtered`](src/client.rs) | `pub fn pending_orders_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<WorkingOrder>>` | Queries working pending orders matching optional magic number and/or symbol filters. |
 
 ---
 
@@ -704,8 +798,9 @@ Asynchronous real-time streaming built on Tokio channels (enabled via default `a
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for new quotes via `symbol_tick()`, deduplicates identical ticks (inspecting time, bid, ask, last, volume, and flags), and yields updated `Tick` values. Operates via latest-quote polling (not a lossless queue). Task terminates when receiver is dropped or upon exceeding 10 consecutive poll errors. |
-| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). Task terminates when receiver is dropped or upon exceeding 10 consecutive poll errors. |
+| [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for quotes via `symbol_tick()`, deduplicates identical ticks, and yields updated `Tick` values using default `DropLatest` backpressure. |
+| [`stream_ticks_with_config`](src/stream.rs) | `pub fn stream_ticks_with_config(client: Arc<Mt5Client>, symbol: &str, config: StreamConfig) -> mpsc::Receiver<Tick>` | Spawns a tick streaming task with explicit buffer size, polling interval, and backpressure policy (`DropLatest` or `Block`). |
+| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). |
 
 ---
 
@@ -879,6 +974,76 @@ pub struct TradeResult {
 - `has_position(&self) -> bool`: Returns `true` if a valid non-zero position ticket is assigned.
 - `description(&self) -> &'static str`: Returns human-readable explanation of `retcode`.
 
+#### `Position`
+[`Position`](src/types.rs) represents an active open position in MetaTrader 5:
+```rust
+pub struct Position {
+    pub ticket: u64,
+    pub time: i64,
+    pub position_type: OrderType,
+    pub magic: u64,
+    pub volume: f64,
+    pub price_open: f64,
+    pub stop_loss: f64,
+    pub take_profit: f64,
+    pub price_current: f64,
+    pub profit: f64,
+    pub swap: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+```
+- `is_buy(&self) -> bool`: Returns `true` if long position (`OrderType::Buy`).
+- `is_sell(&self) -> bool`: Returns `true` if short position (`OrderType::Sell`).
+- `matches_magic(&self, magic: u64) -> bool`: Verifies ownership against strategy magic number.
+
+#### `WorkingOrder`
+[`WorkingOrder`](src/types.rs) represents an active working pending order:
+```rust
+pub struct WorkingOrder {
+    pub ticket: u64,
+    pub time_setup: i64,
+    pub order_type: OrderType,
+    pub magic: u64,
+    pub volume_initial: f64,
+    pub volume_current: f64,
+    pub price_open: f64,
+    pub stop_loss: f64,
+    pub take_profit: f64,
+    pub price_current: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+```
+
+#### `OrderManager` & Reconciliation Engine
+[`OrderManager`](src/reconciliation.rs) wraps `Mt5Client` with production-grade safety guarantees:
+- **Order Idempotency**: Automatically tracks `client_order_id` and short-circuits duplicates.
+- **Uncertain Execution Handling**: Maps ambiguous disconnects to `OrderState::Unknown` and `LifecycleState::Degraded` instead of blindingly retrying.
+- **Broker Reconciliation**: Reconciles in-memory orders against live MT5 positions and working orders via `reconcile(&client)` or `reconcile_with_snapshot(...)`.
+- **Restart Recovery**: Export and restore tracked orders with `export_orders()` and `restore_orders()`.
+- **Strategy Ownership**: Strict magic number enforcement on all submissions, modifications, and closures.
+
+```rust
+use mt5_bridge::{OrderManager, OrderRequest, LifecycleState};
+
+let mut manager = OrderManager::new(998877); // Strategy Magic 998877
+
+// Reconcile on startup
+let report = manager.reconcile(&client)?;
+if !report.is_clean() {
+    println!("Reconciliation detected {} absent orders, {} foreign positions",
+        report.absent_orders.len(), report.foreign_positions.len());
+}
+
+// Submit with idempotency
+let req = OrderRequest::buy("EURUSD", 0.5)
+    .client_order_id("strategy-A-001");
+
+let tracked = manager.submit_order(&client, req)?;
+println!("Order state: {:?}, filled volume: {}", tracked.state, tracked.filled_volume);
+```
+
 ---
 
 ### Error Handling
@@ -900,6 +1065,12 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 | `OrderSendFailed { symbol, retcode, description }` | Order rejected by MT5 terminal / trade server. |
 | `OrderCloseFailed { ticket, retcode, description }` | Position closure or pending order cancellation rejected. |
 | `OrderModifyFailed { ticket, retcode, description }` | SL/TP modification rejected with MT5 retcode. |
+| `UnknownExecutionState { symbol, client_order_id, description }` | Communication lost after order was transmitted to MT5; reconciliation required. |
+| `TransmissionFailed { description }` | Order transmission to IPC pipe failed prior to broker submission (safe to retry). |
+| `OwnershipMismatch { ticket, expected_magic, actual_magic }` | Order or position magic number does not match strategy ownership. |
+| `PositionsFailed(status)` | Failed to query active open positions. |
+| `OrdersFailed(status)` | Failed to query working pending orders. |
+| `ReconciliationError(message)` | State mismatch or error during broker reconciliation pass. |
 | `UnsupportedFeature(name)` | DLL lacks optional export. |
 | `InvalidTimeRange { start, end }` | Query start timestamp is greater than end timestamp. |
 | `ChannelDisconnected` | Async stream receiver or sender disconnected. |
@@ -947,21 +1118,23 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 [int32 status (4 bytes)] [uint32 data_length (4 bytes)] [data bytes...]
 ```
 - `status >= 0`: Success (for `CopyRates`, `status` equals the number of bars returned; for others, `1`).
-- `status < 0`: Failure.
+- `status < 0`: Failure (`-1`: Transmission failed, `-2`: Unknown post-submission execution state, `-3`: Pipe disconnected).
 
 ### Command Table
 
 | Command ID | Name | Description |
 | :---: | :--- | :--- |
-| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 2`) |
+| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 3`) |
 | `2` | `CMD_SHUTDOWN` | Close named pipe and clean up |
 | `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) clamped by buffer capacity |
 | `4` | `CMD_ACCOUNT` | Query balance, equity, margin, free margin |
-| `5` | `CMD_ORDER_SEND` | Send Market or Pending order |
-| `6` | `CMD_ORDER_CLOSE` | Close position or cancel pending order by ticket |
-| `7` | `CMD_ORDER_MODIFY` | Modify SL / TP of an open ticket |
+| `5` | `CMD_ORDER_SEND` | Send Market or Pending order with idempotency cache |
+| `6` | `CMD_ORDER_CLOSE` | Close position or cancel pending order by ticket (optional magic verification) |
+| `7` | `CMD_ORDER_MODIFY` | Modify SL / TP of an open ticket (optional magic verification) |
 | `8` | `CMD_SYM_TICK` | Query latest tick quote |
 | `9` | `CMD_SYM_INFO` | Query symbol contract specifications |
+| `10` | `CMD_POSITIONS_GET` | Query all active open positions matching optional magic filter |
+| `11` | `CMD_ORDERS_GET` | Query all working pending orders matching optional magic filter |
 
 ### Packed Struct Layouts (`#pragma pack(push, 1)`)
 
@@ -973,16 +1146,22 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
   `int64 time`, `double bid`, `double ask`, `double last`, `uint64 volume`, `uint32 flags`.
 - **`Mt5TradeResult` (44 bytes)**:
   `uint32 retcode`, `uint64 deal`, `uint64 order`, `uint64 position`, `double volume`, `double price`.
+- **`Mt5Position` (148 bytes)**:
+  `uint64 ticket`, `int64 time`, `int32 position_type`, `uint64 magic`, `double volume`, `double price_open`, `double sl`, `double tp`, `double price_current`, `double profit`, `double swap`, `char symbol[32]`, `char comment[32]`.
+- **`Mt5Order` (140 bytes)**:
+  `uint64 ticket`, `int64 time_setup`, `int32 order_type`, `uint64 magic`, `double volume_initial`, `double volume_current`, `double price_open`, `double sl`, `double tp`, `double price_current`, `char symbol[32]`, `char comment[32]`.
 
 ### ABI Consistency & Wire Protocol Versioning
 
 The bridge enforces strict compile-time and runtime alignment across the C++ DLL, MQL5 EA, and Rust FFI:
-- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 2` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
+- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 3` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
 - **Compile-Time ABI Assertions**: Struct byte layouts are validated via C++11 `static_assert` and Rust compile-time layout assertions:
   - `Mt5SymInfo`: 60 bytes
   - `Mt5Rate`: 60 bytes
   - `Mt5Tick`: 44 bytes
   - `Mt5TradeResult`: 44 bytes
+  - `Mt5Position`: 148 bytes
+  - `Mt5Order`: 140 bytes
 - **Handshake Verification**: `CMD_INIT` passes the client's protocol version. If there is a version mismatch between the client DLL and the EA server, the connection is rejected immediately to prevent binary deserialization faults.
 
 ---

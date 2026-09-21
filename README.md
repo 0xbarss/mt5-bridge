@@ -1,5 +1,9 @@
 # mt5-bridge
 
+[![Crates.io](https://img.shields.io/crates/v/mt5-bridge.svg)](https://crates.io/crates/mt5-bridge)
+[![Docs.rs](https://docs.rs/mt5-bridge/badge.svg)](https://docs.rs/mt5-bridge)
+[![CI](https://github.com/0xbarss/mt5-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/0xbarss/mt5-bridge/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/0xbarss/mt5-bridge.svg)](https://github.com/0xbarss/mt5-bridge/releases)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Author](https://img.shields.io/badge/author-0xbarss-purple.svg)](https://github.com/0xbarss)
@@ -426,11 +430,17 @@ MetaTrader 5 runs smoothly under Wine on Linux:
 
 ### Step 4: Add Rust Crate to Project
 
-Add `mt5-bridge` to your project's `Cargo.toml`:
+Add `mt5-bridge` with Cargo:
+
+```bash
+cargo add mt5-bridge
+```
+
+Or add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mt5-bridge = { git = "https://github.com/0xbarss/mt5-bridge" }
+mt5-bridge = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 ```
 

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-check:
+    name: Rust (Format, Clippy, Test, Doc)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy linter
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run test suite
+        run: cargo test --all-features --verbose
+
+      - name: Check documentation
+        run: cargo doc --all-features --no-deps
+
+  cross-compile-dll:
+    name: MinGW DLL Cross-Compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      - name: Build mt5_bridge.dll via MinGW
+        run: |
+          chmod +x bridge_dll/build.sh
+          ./bridge_dll/build.sh
+
+      - name: Verify DLL output
+        run: |
+          test -s bridge_dll/build/mt5_bridge.dll
+          ls -lh bridge_dll/build/mt5_bridge.dll
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt5_bridge.dll
+          path: bridge_dll/build/mt5_bridge.dll
+          if-no-files-found: error
+
+  windows-build:
+    name: Windows Native (Test & MSVC DLL)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run test suite on Windows
+        run: cargo test --all-features
+
+      - name: Build DLL with MSVC CMake
+        run: |
+          cmake -B bridge_dll/build -S bridge_dll
+          cmake --build bridge_dll/build --config Release
+
+      - name: Verify Windows DLL output
+        run: |
+          Get-Item bridge_dll/build/Release/mt5_bridge.dll

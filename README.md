@@ -291,13 +291,13 @@ In high-volatility market conditions (e.g. major news releases), quote or transa
 ```text
 mt5-bridge/
 ├── Cargo.toml               # Rust package manifest
+├── CHANGELOG.md             # Project release history & version notes
 ├── LICENSE                  # MIT License
 ├── README.md                # Documentation (this file)
 │
 ├── mql5/
 │   └── Experts/
-│       ├── mt5_bridge.mq5   # Expert Advisor source code (deploy to MT5)
-│       └── mt5_bridge.ex5   # Compiled Expert Advisor binary
+│       └── mt5_bridge.mq5   # Expert Advisor source code (compiled to .ex5 in MetaEditor)
 │
 ├── bridge_dll/              # C++ Named Pipe client DLL source & build scripts
 │   ├── mt5_bridge.h         # C header and packed struct definitions
@@ -353,7 +353,7 @@ mt5-bridge/
 1. Open MetaTrader 5.
 2. Click **File** → **Open Data Folder**.
 3. Navigate to `MQL5/Experts/` inside the opened explorer window.
-4. Copy [`mql5/Experts/mt5_bridge.mq5`](mql5/Experts/mt5_bridge.mq5) (and optionally [`mt5_bridge.ex5`](mql5/Experts/mt5_bridge.ex5)) into that folder.
+4. Copy [`mql5/Experts/mt5_bridge.mq5`](mql5/Experts/mt5_bridge.mq5) into that folder.
 5. In MT5, press **F4** to open **MetaEditor** (or double-click `mt5_bridge.mq5`).
 6. Press **F7** (or click the **Compile** button). Ensure the compilation finishes with `0 errors, 0 warnings`. This produces `mt5_bridge.ex5`.
 7. In the main MT5 terminal, configure settings:

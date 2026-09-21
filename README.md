@@ -465,34 +465,37 @@ if !history.is_complete() {
 
 ---
 
-### 6. Real-Time Tick Streaming
+### 6. Real-Time Tick Streaming (Push Model & Fallback Polling)
 
-Streams real-time price changes via non-blocking Tokio channels:
+`mt5-bridge` (protocol v5+) provides event-driven push tick streaming directly from MT5 `OnTick()`, with dual stream modes:
 
 ```rust
-use mt5_bridge::stream_ticks;
-use std::sync::Arc;
-use std::time::Duration;
+use mt5_bridge::{Mt5Client, StreamMode};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Arc::new(Mt5Client::connect(12345678, "password", "Broker-Demo")?);
+    let client = Mt5Client::connect(12345678, "password", "Broker-Demo")?;
 
-    // Poll every 10 ms for new price ticks
-    let mut rx = stream_ticks(client, "EURUSD", Duration::from_millis(10));
+    // Option A: Real-time event push subscription directly from MT5 OnTick()
+    // StreamMode::Latest (default): Execution stream, drops stale quotes if consumer lags
+    // StreamMode::Lossless: Recorder stream, surfaces RecvError::Lagged if consumer falls behind
+    let mut sub = client.subscribe_ticks_with_mode("EURUSD", StreamMode::Latest)?;
 
     let mut count = 0;
-    while let Some(tick) = rx.recv().await {
+    while let Some(tick) = sub.recv().await {
         println!(
-            "Tick -> Time: {} | Bid: {:.5} | Ask: {:.5} | Spread: {:.5} | Last: {:.5}",
-            tick.time, tick.bid, tick.ask, tick.spread(), tick.last
+            "Push Tick -> Time: {} | Bid: {:.5} | Ask: {:.5} | Spread: {:.5} (dropped: {})",
+            tick.time, tick.bid, tick.ask, tick.spread(), sub.dropped_ticks()
         );
         count += 1;
         if count >= 10 {
-            // Dropping receiver automatically terminates the background polling task
+            client.unsubscribe_ticks("EURUSD")?;
             break;
         }
     }
+
+    // Option B: Legacy polling stream with configurable interval
+    // let mut rx = mt5_bridge::stream_ticks(Arc::new(client), "EURUSD", Duration::from_millis(10));
 
     Ok(())
 }
@@ -800,15 +803,22 @@ Measured on an AMD/Intel Linux x86_64 system under release profile (`cargo bench
 
 | Benchmark Component | Average Latency | Throughput | Notes |
 | :--- | :---: | :---: | :--- |
-| `price_to_ticks` | **9.0 ns** | ~110,000,000 ops/sec | Fast integer rounding with float-division bias |
-| `ticks_to_price` | **9.1 ns** | ~109,000,000 ops/sec | Monotonic decimal scaling |
-| `wire_id` (Crockford base32) | **59.8 ns** | ~16,700,000 ops/sec | 64-bit non-cryptographic wire token hashing |
-| `OrderRequest::validate` | **27.0 ns** | ~37,000,000 ops/sec | Preflight bounds and character set validation |
-| `deal_from_raw` (152B decoding) | **95.7 ns** | ~10,400,000 ops/sec | Zero-copy ABI deserialization |
-| `position_from_raw` (148B) | **95.8 ns** | ~10,400,000 ops/sec | Zero-copy ABI deserialization |
-| `submit_order` (single-owner) | **81.8 µs** | ~12,200 orders/sec | In-memory tracking, validation & dispatch |
-| `reconcile_snapshot` (50 orders) | **18.1 µs** | ~55,100 passes/sec | Multi-attribute snapshot & deal matching |
-| `SharedOrderManager` (4 threads) | **70.6 µs** | ~14,150 orders/sec | Multi-threaded lock & journal throughput |
+| `price_to_ticks` | **5.1 ns** | ~194,300,000 ops/sec | Fast integer rounding with float-division bias |
+| `ticks_to_price` | **5.0 ns** | ~200,600,000 ops/sec | Monotonic decimal scaling |
+| `wire_id` (Crockford base32) | **43.5 ns** | ~23,000,000 ops/sec | 64-bit non-cryptographic wire token hashing |
+| `OrderRequest::validate` | **24.5 ns** | ~40,800,000 ops/sec | Preflight bounds and character set validation |
+| `deal_from_raw` (152B decoding) | **71.6 ns** | ~13,900,000 ops/sec | Zero-copy ABI deserialization |
+| `position_from_raw` (148B) | **50.2 ns** | ~19,900,000 ops/sec | Zero-copy ABI deserialization |
+| `tick_from_event` (76B push tick) | **30.0 ns** | ~33,300,000 ops/sec | Protocol v5 push tick event decoding |
+| `trade_event_from_raw` (136B) | **59.4 ns** | ~16,800,000 ops/sec | Protocol v5 trade transaction decoding |
+| `book_event_from_raw` (64B) | **22.8 ns** | ~43,900,000 ops/sec | Protocol v5 DOM depth event decoding |
+| `event_bus_dispatch_tick` | **114.0 ns** | ~8,770,000 ops/sec | Tokio broadcast fanout to symbol subscribers |
+| `event_bus_dispatch_trade` | **97.7 ns** | ~10,230,000 ops/sec | Tokio broadcast trade event distribution |
+| `tick_sub.try_recv` (`Latest`) | **113.6 ns** | ~8,800,000 ops/sec | Low-latency execution stream retrieval |
+| `tick_sub.try_recv` (`Lossless`) | **104.5 ns** | ~9,570,000 ops/sec | Lossless recording stream retrieval |
+| `submit_order` (single-owner) | **53.3 µs** | ~18,750 orders/sec | In-memory tracking, validation & dispatch |
+| `reconcile_snapshot` (50 orders) | **19.3 µs** | ~51,800 passes/sec | Multi-attribute snapshot & deal matching |
+| `SharedOrderManager` (4 threads) | **47.3 µs** | ~21,100 orders/sec | Multi-threaded lock & journal throughput |
 
 ---
 
@@ -1217,22 +1227,19 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 ### Packet Framing
 
 #### Request Packet
+#### 12-Byte Wire Header Framing (`PacketHdr`)
 ```text
-[uint32 cmd (4 bytes)] [uint32 payload_length (4 bytes)] [payload bytes...]
+[uint32 length (4 bytes)] [uint8 kind (1 byte)] [uint8 _pad (1 byte)] [uint16 id (2 bytes)] [int32 status (4 bytes)] [payload...]
 ```
-
-#### Response Packet
-```text
-[int32 status (4 bytes)] [uint32 data_length (4 bytes)] [data bytes...]
-```
-- `status >= 0`: Success (for `CopyRates`, `status` equals the number of bars returned; for others, `1`).
-- `status < 0`: Failure (`-1`: Transmission failed, `-2`: Unknown post-submission execution state, `-3`: Pipe disconnected).
+- `kind`: `PKT_REQUEST` (`0`), `PKT_RESPONSE` (`1`), `PKT_EVENT` (`2`).
+- `id`: Command ID (for requests/responses) or Event Type (`EVENT_TICK = 1`, `EVENT_TRADE = 2`, `EVENT_BOOK = 3`).
+- `status`: Execution status code (`>= 0`: Success; `< 0`: Failure).
 
 ### Command Table
 
 | Command ID | Name | Description |
 | :---: | :--- | :--- |
-| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 4`) |
+| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 5`) |
 | `2` | `CMD_SHUTDOWN` | Close named pipe and clean up |
 | `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) clamped by buffer capacity |
 | `4` | `CMD_ACCOUNT` | Query balance, equity, margin, free margin |
@@ -1244,9 +1251,23 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 | `10` | `CMD_POSITIONS_GET` | Query all active open positions matching optional magic filter |
 | `11` | `CMD_ORDERS_GET` | Query all working pending orders matching optional magic filter |
 | `12` | `CMD_DEALS_GET` | Query completed trade deal history within time window matching magic and symbol filters |
+| `13` | `CMD_SUBSCRIBE_TICKS` | Subscribe to real-time pushed market ticks for symbol |
+| `14` | `CMD_UNSUBSCRIBE_TICKS`| Unsubscribe from real-time pushed market ticks for symbol |
+| `15` | `CMD_SUBSCRIBE_TRADE` | Subscribe to real-time pushed trade transaction events |
+| `16` | `CMD_UNSUBSCRIBE_TRADE`| Unsubscribe from real-time pushed trade transaction events |
+| `17` | `CMD_SUBSCRIBE_BOOK` | Subscribe to real-time pushed DOM order book depth events for symbol |
+| `18` | `CMD_UNSUBSCRIBE_BOOK` | Unsubscribe from real-time pushed DOM order book depth events for symbol |
 
 ### Packed Struct Layouts (`#pragma pack(push, 1)`)
 
+- **`PacketHdr` (12 bytes)**:
+  `uint32 length`, `uint8 kind`, `uint8 _pad`, `uint16 id`, `int32 status`.
+- **`Mt5TickEvent` (76 bytes)**:
+  `char symbol[32]`, `int64 time_msc`, `double bid`, `double ask`, `double last`, `uint64 volume`, `uint32 flags`.
+- **`Mt5TradeEvent` (136 bytes)**:
+  `uint64 deal`, `uint64 order`, `uint64 position`, `int64 time`, `int32 trans_type`, `int32 order_type`, `double price`, `double volume`, `double sl`, `double tp`, `char symbol[32]`, `char comment[32]`.
+- **`Mt5BookEvent` (64 bytes)**:
+  `char symbol[32]`, `int64 time_msc`, `int32 book_type`, `int32 _pad`, `double price`, `double volume`.
 - **`Mt5SymInfo` (60 bytes)**:
   `double point`, `double tick_value`, `double tick_size`, `double lot_step`, `double min_lot`, `double max_lot`, `double spread`, `int32 digits`.
 - **`Mt5Rate` (60 bytes)**:
@@ -1265,8 +1286,12 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 ### ABI Consistency & Wire Protocol Versioning
 
 The bridge enforces strict compile-time and runtime alignment across the C++ DLL, MQL5 EA, and Rust FFI:
-- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 4` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
+- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 5` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
 - **Compile-Time ABI Assertions**: Struct byte layouts are validated via C++11 `static_assert` and Rust compile-time layout assertions:
+  - `PacketHdr`: 12 bytes
+  - `Mt5TickEvent`: 76 bytes
+  - `Mt5TradeEvent`: 136 bytes
+  - `Mt5BookEvent`: 64 bytes
   - `Mt5SymInfo`: 60 bytes
   - `Mt5Rate`: 60 bytes
   - `Mt5Tick`: 44 bytes

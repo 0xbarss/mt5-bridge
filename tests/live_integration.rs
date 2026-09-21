@@ -326,3 +326,63 @@ fn test_live_order_manager_reconciliation_with_deals() {
         "Fresh manager should have 0 unresolved orders"
     );
 }
+
+#[tokio::test]
+async fn test_live_push_tick_stream_lossless() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let mut sub = client
+        .subscribe_ticks_with_mode("EURUSD", mt5_bridge::StreamMode::Lossless)
+        .expect("subscribe_ticks_with_mode Lossless failed");
+    assert_eq!(sub.mode(), mt5_bridge::StreamMode::Lossless);
+    assert_eq!(sub.symbol(), "EURUSD");
+    assert_eq!(sub.dropped_ticks(), 0);
+
+    // Receive real-time ticks in Lossless mode using recv_checked()
+    match tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv_checked()).await {
+        Ok(Ok(tick)) => {
+            assert_eq!(tick.symbol, "EURUSD");
+            assert!(tick.bid > 0.0);
+            assert!(tick.ask >= tick.bid);
+            assert_eq!(sub.dropped_ticks(), 0, "No ticks should be dropped in normal flow");
+        }
+        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+            panic!("Lossless mode lagged unexpectedly: skipped {skipped}");
+        }
+        Ok(Err(e)) => panic!("recv_checked error: {e:?}"),
+        Err(_) => {
+            println!("Market was idle during 5s timeout");
+        }
+    }
+
+    let _ = client.unsubscribe_ticks("EURUSD");
+}
+
+#[tokio::test]
+async fn test_live_push_tick_stream_latest() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let mut sub = client
+        .subscribe_ticks_with_mode("EURUSD", mt5_bridge::StreamMode::Latest)
+        .expect("subscribe_ticks_with_mode Latest failed");
+    assert_eq!(sub.mode(), mt5_bridge::StreamMode::Latest);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv()).await {
+        Ok(Some(tick)) => {
+            assert_eq!(tick.symbol, "EURUSD");
+            assert!(tick.bid > 0.0);
+        }
+        Ok(None) => panic!("Stream ended unexpectedly"),
+        Err(_) => {
+            println!("Market was idle during 5s timeout");
+        }
+    }
+
+    let _ = client.unsubscribe_ticks("EURUSD");
+}

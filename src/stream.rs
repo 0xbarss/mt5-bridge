@@ -57,12 +57,205 @@
 //! not "no more data", and re-establish it.
 
 use crate::client::Mt5Client;
-use crate::types::{Bar, Tick, Timeframe};
-use std::sync::Arc;
+use crate::types::{Bar, BookEvent, StreamMode, Tick, Timeframe, TradeEvent};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tracing::{debug, error, warn};
+
+/// Central market data and event dispatcher bus (protocol v5+ push model).
+///
+/// Dispatches incoming ticks to per-symbol Tokio broadcast channels,
+/// and trade/book events to dedicated event broadcast channels.
+pub struct EventBus {
+    ticks: Mutex<HashMap<String, broadcast::Sender<Tick>>>,
+    trades: broadcast::Sender<TradeEvent>,
+    books: Mutex<HashMap<String, broadcast::Sender<BookEvent>>>,
+    buffer_capacity: usize,
+}
+
+impl EventBus {
+    pub fn new(buffer_capacity: usize) -> Self {
+        let (trades, _) = broadcast::channel(buffer_capacity.max(64));
+        Self {
+            ticks: Mutex::new(HashMap::new()),
+            trades,
+            books: Mutex::new(HashMap::new()),
+            buffer_capacity: buffer_capacity.max(64),
+        }
+    }
+
+    /// Subscribe to real-time pushed ticks for a symbol.
+    pub fn subscribe_ticks(&self, symbol: &str) -> broadcast::Receiver<Tick> {
+        let mut map = self.ticks.lock().unwrap();
+        let sender = map.entry(symbol.to_string()).or_insert_with(|| {
+            let (tx, _) = broadcast::channel(self.buffer_capacity);
+            tx
+        });
+        sender.subscribe()
+    }
+
+    /// Subscribe to real-time pushed trade events.
+    pub fn subscribe_trade(&self) -> broadcast::Receiver<TradeEvent> {
+        self.trades.subscribe()
+    }
+
+    /// Subscribe to real-time pushed depth-of-market book events for a symbol.
+    pub fn subscribe_book(&self, symbol: &str) -> broadcast::Receiver<BookEvent> {
+        let mut map = self.books.lock().unwrap();
+        let sender = map.entry(symbol.to_string()).or_insert_with(|| {
+            let (tx, _) = broadcast::channel(self.buffer_capacity);
+            tx
+        });
+        sender.subscribe()
+    }
+
+    /// Dispatch an incoming tick to all subscribers of that symbol.
+    pub fn dispatch_tick(&self, tick: Tick) {
+        let map = self.ticks.lock().unwrap();
+        if let Some(tx) = map.get(&tick.symbol) {
+            let _ = tx.send(tick);
+        }
+    }
+
+    /// Dispatch an incoming trade transaction event to all trade subscribers.
+    pub fn dispatch_trade(&self, trade: TradeEvent) {
+        let _ = self.trades.send(trade);
+    }
+
+    /// Dispatch an incoming book depth event to all subscribers of that symbol.
+    pub fn dispatch_book(&self, book: BookEvent) {
+        let map = self.books.lock().unwrap();
+        if let Some(tx) = map.get(&book.symbol) {
+            let _ = tx.send(book);
+        }
+    }
+
+    /// Returns the symbols currently tracked in the tick subscription table.
+    pub fn active_tick_symbols(&self) -> Vec<String> {
+        self.ticks.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new(DEFAULT_TICK_BUFFER)
+    }
+}
+
+/// Active subscription to real-time market data ticks for a symbol (protocol v5+).
+pub struct TickSubscription {
+    symbol: String,
+    mode: StreamMode,
+    rx: broadcast::Receiver<Tick>,
+    dropped_ticks: u64,
+}
+
+impl TickSubscription {
+    pub fn new(symbol: impl Into<String>, mode: StreamMode, rx: broadcast::Receiver<Tick>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            mode,
+            rx,
+            dropped_ticks: 0,
+        }
+    }
+
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    pub fn mode(&self) -> StreamMode {
+        self.mode
+    }
+
+    pub fn dropped_ticks(&self) -> u64 {
+        self.dropped_ticks
+    }
+
+    /// Asynchronously await and receive the next tick from the push feed.
+    ///
+    /// Under `StreamMode::Latest`, if the consumer lags and intermediate quotes are dropped,
+    /// this method updates the drop counter, logs a warning, and yields the freshest quote
+    /// rather than returning an error.
+    ///
+    /// Returns `None` if the sender was closed.
+    pub async fn recv(&mut self) -> Option<Tick> {
+        loop {
+            match self.rx.recv().await {
+                Ok(tick) => return Some(tick),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.dropped_ticks += skipped;
+                    if self.mode == StreamMode::Latest {
+                        if self.dropped_ticks % 100 <= skipped {
+                            warn!(
+                                symbol = %self.symbol,
+                                dropped_ticks = self.dropped_ticks,
+                                skipped,
+                                "Tick subscription lagged: dropped stale quotes to maintain low latency"
+                            );
+                        }
+                    } else {
+                        warn!(
+                            symbol = %self.symbol,
+                            dropped_ticks = self.dropped_ticks,
+                            skipped,
+                            "Tick subscription (Lossless) lagged: consumer fell behind broadcast buffer"
+                        );
+                    }
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Asynchronously receive the next tick, returning `Err(RecvError::Lagged)` if consumer lag occurred.
+    ///
+    /// This allows recorder / auditing consumers to explicitly detect quote gaps.
+    pub async fn recv_checked(&mut self) -> Result<Tick, broadcast::error::RecvError> {
+        match self.rx.recv().await {
+            Ok(tick) => Ok(tick),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                self.dropped_ticks += skipped;
+                Err(broadcast::error::RecvError::Lagged(skipped))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Attempt to receive a tick without waiting.
+    ///
+    /// In [`StreamMode::Latest`], if lag occurred, it automatically discards the stale ticks
+    /// and attempts to fetch the newest quote.
+    /// In [`StreamMode::Lossless`], it returns [`broadcast::error::TryRecvError::Lagged`].
+    pub fn try_recv(&mut self) -> Result<Tick, broadcast::error::TryRecvError> {
+        match self.rx.try_recv() {
+            Ok(tick) => Ok(tick),
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                self.dropped_ticks += skipped;
+                if self.mode == StreamMode::Lossless {
+                    Err(broadcast::error::TryRecvError::Lagged(skipped))
+                } else {
+                    self.rx.try_recv()
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create a new independent receiver subscribed to the same symbol's broadcast feed.
+    pub fn resubscribe(&self) -> Self {
+        Self {
+            symbol: self.symbol.clone(),
+            mode: self.mode,
+            rx: self.rx.resubscribe(),
+            dropped_ticks: 0,
+        }
+    }
+}
 
 const DEFAULT_TICK_BUFFER: usize = 1024;
 const DEFAULT_BAR_BUFFER: usize = 256;
@@ -124,6 +317,10 @@ fn offer_drop_newest(tx: &mpsc::Sender<Tick>, tick: Tick) -> Offer {
 }
 
 /// Stream real-time ticks for a symbol using explicit configuration and backpressure policy.
+///
+/// On protocol v5+ bridges, this automatically uses event-driven push subscriptions from MT5
+/// with zero polling interval. On older bridges or backends without push support, it falls back
+/// to periodic polling.
 pub fn stream_ticks_with_config(
     client: Arc<Mt5Client>,
     symbol: &str,
@@ -132,8 +329,47 @@ pub fn stream_ticks_with_config(
     let (tx, rx) = mpsc::channel(config.buffer_size.max(16));
     let sym_owned = symbol.to_string();
 
+    let stream_mode = match config.backpressure {
+        BackpressurePolicy::DropLatest => StreamMode::Latest,
+        BackpressurePolicy::Block => StreamMode::Lossless,
+    };
+
+    // If client supports push subscription, use event-driven push delivery
+    if let Ok(mut sub) = client.subscribe_ticks_with_mode(symbol, stream_mode) {
+        let tx_push = tx.clone();
+        let sym_push = sym_owned.clone();
+        tokio::spawn(async move {
+            debug!(symbol = %sym_push, "Push-based tick stream started");
+            let mut dropped_ticks: u64 = 0;
+            while let Some(tick) = sub.recv().await {
+                match config.backpressure {
+                    BackpressurePolicy::DropLatest => match offer_drop_newest(&tx_push, tick) {
+                        Offer::Delivered => {}
+                        Offer::DroppedNewest => {
+                            dropped_ticks += 1;
+                            if dropped_ticks % 100 == 1 {
+                                warn!(
+                                    symbol = %sym_push,
+                                    dropped_ticks,
+                                    "Tick stream buffer full: discarded newest tick"
+                                );
+                            }
+                        }
+                        Offer::ReceiverClosed => break,
+                    },
+                    BackpressurePolicy::Block => {
+                        if tx_push.send(tick).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        return rx;
+    }
+
     tokio::spawn(async move {
-        debug!(symbol = %sym_owned, "Tick stream started");
+        debug!(symbol = %sym_owned, "Polling fallback tick stream started");
 
         let mut prev_time_msc: i64 = 0;
         let mut prev_bid: f64 = 0.0;

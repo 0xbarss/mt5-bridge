@@ -1,6 +1,7 @@
 use crate::error::mt5_retcode_description;
 use crate::ffi::{
-    Mt5Deal, Mt5Order, Mt5Position, Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TradeResult,
+    Mt5BookEvent, Mt5Deal, Mt5Order, Mt5Position, Mt5Rate, Mt5SymInfo, Mt5Tick, Mt5TickEvent,
+    Mt5TradeEvent, Mt5TradeResult,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -425,6 +426,21 @@ impl Tick {
         }
     }
 
+    pub fn from_event(raw: Mt5TickEvent) -> Self {
+        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
+        Self {
+            symbol,
+            time_msc: raw.time_msc,
+            time: raw.time_msc / 1000,
+            bid: raw.bid,
+            ask: raw.ask,
+            last: raw.last,
+            volume: raw.volume,
+            flags: raw.flags,
+        }
+    }
+
     /// Spread in quote currency (`ask - bid`).
     pub fn spread(&self) -> f64 {
         self.ask - self.bid
@@ -433,6 +449,89 @@ impl Tick {
     /// Mid-price (`(ask + bid) / 2.0`).
     pub fn mid(&self) -> f64 {
         (self.ask + self.bid) / 2.0
+    }
+}
+
+/// Mode for market data tick and event streaming (protocol v5+).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamMode {
+    /// Execution stream: low-latency bounded queue that drops stale quotes when the consumer lags.
+    #[default]
+    Latest,
+    /// Recorder stream: lossless delivery that preserves every event, causing backpressure if consumer is slow.
+    Lossless,
+}
+
+/// Asynchronous trade transaction event from MT5 (protocol v5+).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeEvent {
+    pub deal: u64,
+    pub order: u64,
+    pub position: u64,
+    pub time: i64,
+    pub trans_type: i32,
+    pub order_type: OrderType,
+    pub price: f64,
+    pub volume: f64,
+    pub sl: f64,
+    pub tp: f64,
+    pub symbol: String,
+    pub comment: String,
+}
+
+impl TradeEvent {
+    pub fn from_raw(raw: Mt5TradeEvent) -> Self {
+        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
+        let cmt_len = raw.comment.iter().position(|&b| b == 0).unwrap_or(raw.comment.len());
+        let comment = String::from_utf8_lossy(&raw.comment[..cmt_len]).trim().to_string();
+        let order_type = match raw.order_type {
+            0 => OrderType::Buy,
+            1 => OrderType::Sell,
+            2 => OrderType::BuyLimit,
+            3 => OrderType::SellLimit,
+            4 => OrderType::BuyStop,
+            5 => OrderType::SellStop,
+            _ => OrderType::Buy,
+        };
+        Self {
+            deal: raw.deal,
+            order: raw.order,
+            position: raw.position,
+            time: raw.time,
+            trans_type: raw.trans_type,
+            order_type,
+            price: raw.price,
+            volume: raw.volume,
+            sl: raw.sl,
+            tp: raw.tp,
+            symbol,
+            comment,
+        }
+    }
+}
+
+/// Asynchronous depth-of-market book event from MT5 (protocol v5+).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BookEvent {
+    pub symbol: String,
+    pub time_msc: i64,
+    pub is_buy: bool,
+    pub price: f64,
+    pub volume: f64,
+}
+
+impl BookEvent {
+    pub fn from_raw(raw: Mt5BookEvent) -> Self {
+        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
+        Self {
+            symbol,
+            time_msc: raw.time_msc,
+            is_buy: raw.book_type == 1,
+            price: raw.price,
+            volume: raw.volume,
+        }
     }
 }
 

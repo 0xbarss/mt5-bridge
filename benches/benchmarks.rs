@@ -124,10 +124,10 @@ fn main() {
         .take_profit(1.09000)
         .client_order_id("cid-bench-1");
     bench("order_request_validate", 200_000, || {
-        black_box(req.validate().unwrap());
+        let _ = black_box(req.validate());
     });
 
-    // 4. Wire struct decoding
+    // 4. Wire struct decoding (Protocol v4 request/response)
     let raw_deal = Mt5Deal {
         ticket: 10101,
         order: 20202,
@@ -175,7 +175,81 @@ fn main() {
         black_box(Position::from_raw(black_box(raw_pos)));
     });
 
-    // 5. OrderManager idempotency lookup & submission (in-memory backend)
+    // 5. Asynchronous push event wire decoding (Protocol v5+)
+    let raw_tick = Mt5TickEvent {
+        symbol: raw_deal.symbol,
+        time_msc: 1700000000123,
+        bid: 1.08512,
+        ask: 1.08514,
+        last: 1.08513,
+        volume: 25,
+        flags: 6,
+    };
+    bench("tick_from_event (76-byte push tick decoding)", 500_000, || {
+        black_box(Tick::from_event(black_box(raw_tick)));
+    });
+
+    let raw_trade = Mt5TradeEvent {
+        deal: 10101,
+        order: 20202,
+        position: 30303,
+        time: 1700000000,
+        trans_type: 1,
+        order_type: 0,
+        price: 1.08512,
+        volume: 0.5,
+        sl: 1.08000,
+        tp: 1.09000,
+        symbol: raw_deal.symbol,
+        comment: raw_deal.comment,
+    };
+    bench("trade_event_from_raw (136-byte push trade decoding)", 500_000, || {
+        black_box(TradeEvent::from_raw(black_box(raw_trade)));
+    });
+
+    let raw_book = Mt5BookEvent {
+        symbol: raw_deal.symbol,
+        time_msc: 1700000000123,
+        book_type: 1,
+        _pad: 0,
+        price: 1.08515,
+        volume: 100.0,
+    };
+    bench("book_event_from_raw (64-byte push DOM decoding)", 500_000, || {
+        black_box(BookEvent::from_raw(black_box(raw_book)));
+    });
+
+    // 6. Push EventBus dispatch & fanout (Tokio broadcast)
+    let bus = EventBus::new(1024);
+    let mut rx_tick = bus.subscribe_ticks("EURUSD");
+    let push_tick = Tick::from_event(raw_tick);
+    bench("event_bus_dispatch_tick (broadcast fanout)", 200_000, || {
+        bus.dispatch_tick(push_tick.clone());
+        let _ = black_box(rx_tick.try_recv());
+    });
+
+    let mut rx_trade = bus.subscribe_trade();
+    let push_trade = TradeEvent::from_raw(raw_trade);
+    bench("event_bus_dispatch_trade (broadcast fanout)", 200_000, || {
+        bus.dispatch_trade(push_trade.clone());
+        let _ = black_box(rx_trade.try_recv());
+    });
+
+    let rx_sub = bus.subscribe_ticks("EURUSD");
+    let mut tick_sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx_sub);
+    bench("tick_subscription_try_recv (StreamMode::Latest)", 200_000, || {
+        bus.dispatch_tick(push_tick.clone());
+        let _ = black_box(tick_sub.try_recv());
+    });
+
+    let rx_sub_lossless = bus.subscribe_ticks("EURUSD");
+    let mut tick_sub_lossless = TickSubscription::new("EURUSD", StreamMode::Lossless, rx_sub_lossless);
+    bench("tick_subscription_try_recv (StreamMode::Lossless)", 200_000, || {
+        bus.dispatch_tick(push_tick.clone());
+        let _ = black_box(tick_sub_lossless.try_recv());
+    });
+
+    // 7. OrderManager idempotency lookup & submission (in-memory backend)
     let backend = DummyBackend::default();
     let mut mgr = OrderManager::new(998877);
     let mut order_idx = 0u64;

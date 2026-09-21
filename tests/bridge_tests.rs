@@ -502,8 +502,8 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    // v4: DealsGet command + hashed client-order-id wire comments.
-    assert_eq!(PROTOCOL_VERSION, 4);
+    // v5: push model, EVENT framing, and subscriptions.
+    assert_eq!(PROTOCOL_VERSION, 5);
 }
 
 #[test]
@@ -1246,5 +1246,194 @@ fn test_order_manager_pending_order_reconciliation() {
     assert_eq!(rec_ord.state, OrderState::Accepted);
     assert_eq!(rec_ord.remaining_volume, 0.6);
     assert!((rec_ord.filled_volume - 0.4).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_event_bus_tick_fanout_and_isolation() {
+    let bus = EventBus::new(64);
+    let mut eurusd_sub1 = bus.subscribe_ticks("EURUSD");
+    let mut eurusd_sub2 = bus.subscribe_ticks("EURUSD");
+    let mut gbpusd_sub = bus.subscribe_ticks("GBPUSD");
+
+    let tick_eur = Tick {
+        symbol: "EURUSD".to_string(),
+        time: 1710000000,
+        bid: 1.08500,
+        ask: 1.08510,
+        last: 1.08505,
+        volume: 10,
+        time_msc: 1710000000123,
+        flags: 6,
+    };
+
+    bus.dispatch_tick(tick_eur.clone());
+
+    let rec1 = eurusd_sub1.recv().await.unwrap();
+    let rec2 = eurusd_sub2.recv().await.unwrap();
+    assert_eq!(rec1.symbol, "EURUSD");
+    assert_eq!(rec1.bid, 1.08500);
+    assert_eq!(rec2.symbol, "EURUSD");
+    assert_eq!(rec2.bid, 1.08500);
+
+    // GBPUSD must not receive EURUSD tick
+    assert!(gbpusd_sub.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_tick_subscription_latest_mode_auto_drop_lag() {
+    let bus = EventBus::new(16);
+    let rx = bus.subscribe_ticks("EURUSD");
+    let mut sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx);
+
+    // Buffer capacity minimum is 64; send 100 ticks to overflow the channel
+    for i in 1..=100 {
+        let tick = Tick {
+            symbol: "EURUSD".to_string(),
+            time: 1710000000 + i,
+            bid: 1.08000 + (i as f64 * 0.0001),
+            ask: 1.08010 + (i as f64 * 0.0001),
+            last: 1.08005 + (i as f64 * 0.0001),
+            volume: i as u64,
+            time_msc: (1710000000 + i) * 1000,
+            flags: 6,
+        };
+        bus.dispatch_tick(tick);
+    }
+
+    // In Latest mode, recv() handles Lagged, updates dropped_ticks, and returns the freshest quote
+    let next_tick = sub.recv().await.unwrap();
+    assert!(sub.dropped_ticks() > 0);
+    assert!(next_tick.bid > 1.08100);
+}
+
+#[tokio::test]
+async fn test_tick_subscription_lossless_mode_checked_lag() {
+    let bus = EventBus::new(16);
+    let rx = bus.subscribe_ticks("EURUSD");
+    let mut sub = TickSubscription::new("EURUSD", StreamMode::Lossless, rx);
+
+    for i in 1..=100 {
+        let tick = Tick {
+            symbol: "EURUSD".to_string(),
+            time: 1710000000 + i,
+            bid: 1.08000 + (i as f64 * 0.0001),
+            ask: 1.08010 + (i as f64 * 0.0001),
+            last: 1.08005 + (i as f64 * 0.0001),
+            volume: i as u64,
+            time_msc: (1710000000 + i) * 1000,
+            flags: 6,
+        };
+        bus.dispatch_tick(tick);
+    }
+
+    // recv_checked() detects the lag in Lossless mode
+    let res = sub.recv_checked().await;
+    assert!(res.is_err());
+    match res.unwrap_err() {
+        tokio::sync::broadcast::error::RecvError::Lagged(skipped) => {
+            assert!(skipped > 0);
+        }
+        tokio::sync::broadcast::error::RecvError::Closed => panic!("Unexpected closed"),
+    }
+}
+
+#[tokio::test]
+async fn test_event_bus_trade_and_book_dispatch() {
+    let bus = EventBus::new(64);
+    let mut trade_sub = bus.subscribe_trade();
+    let mut book_sub = bus.subscribe_book("USDJPY");
+
+    let trade = TradeEvent {
+        deal: 9901,
+        order: 8801,
+        position: 7701,
+        time: 1710005000,
+        trans_type: 1,
+        order_type: OrderType::Buy,
+        price: 1.0850,
+        volume: 0.5,
+        sl: 1.0800,
+        tp: 1.0900,
+        symbol: "EURUSD".to_string(),
+        comment: "test deal".to_string(),
+    };
+    bus.dispatch_trade(trade.clone());
+
+    let rec_trade = trade_sub.recv().await.unwrap();
+    assert_eq!(rec_trade.deal, 9901);
+    assert_eq!(rec_trade.symbol, "EURUSD");
+
+    let book = BookEvent {
+        symbol: "USDJPY".to_string(),
+        time_msc: 1710005000123,
+        is_buy: true,
+        price: 155.250,
+        volume: 25.0,
+    };
+    bus.dispatch_book(book.clone());
+
+    let rec_book = book_sub.recv().await.unwrap();
+    assert_eq!(rec_book.symbol, "USDJPY");
+    assert_eq!(rec_book.price, 155.250);
+}
+
+#[test]
+fn test_raw_event_wire_conversions() {
+    use mt5_bridge::ffi::{Mt5BookEvent, Mt5TickEvent, Mt5TradeEvent};
+
+    let mut sym = [0u8; 32];
+    sym[..6].copy_from_slice(b"EURUSD");
+
+    let raw_tick = Mt5TickEvent {
+        symbol: sym,
+        time_msc: 1710000000456,
+        bid: 1.08500,
+        ask: 1.08520,
+        last: 1.08510,
+        volume: 50,
+        flags: 6,
+    };
+    let tick = Tick::from_event(raw_tick);
+    assert_eq!(tick.symbol, "EURUSD");
+    assert_eq!(tick.bid, 1.08500);
+    assert_eq!(tick.ask, 1.08520);
+    assert_eq!(tick.time_msc, 1710000000456);
+    assert_eq!(tick.time, 1710000000);
+
+    let mut cmt = [0u8; 32];
+    cmt[..9].copy_from_slice(b"tp filled");
+    let raw_trade = Mt5TradeEvent {
+        deal: 12345,
+        order: 67890,
+        position: 11223,
+        time: 1710000100,
+        trans_type: 2,
+        order_type: 1, // Sell
+        price: 1.08520,
+        volume: 1.5,
+        sl: 1.08000,
+        tp: 1.09000,
+        symbol: sym,
+        comment: cmt,
+    };
+    let trade = TradeEvent::from_raw(raw_trade);
+    assert_eq!(trade.deal, 12345);
+    assert_eq!(trade.order_type, OrderType::Sell);
+    assert_eq!(trade.symbol, "EURUSD");
+    assert_eq!(trade.comment, "tp filled");
+
+    let raw_book = Mt5BookEvent {
+        symbol: sym,
+        time_msc: 1710000200789,
+        book_type: 1, // Buy
+        _pad: 0,
+        price: 1.08530,
+        volume: 100.0,
+    };
+    let book = BookEvent::from_raw(raw_book);
+    assert_eq!(book.symbol, "EURUSD");
+    assert!(book.is_buy);
+    assert_eq!(book.price, 1.08530);
+    assert_eq!(book.volume, 100.0);
 }
 

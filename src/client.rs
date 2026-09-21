@@ -37,8 +37,20 @@ pub struct Mt5Client {
     fn_positions: Option<FnPositions>,
     fn_orders: Option<FnOrders>,
     fn_deals: Option<FnDeals>,
+    fn_subscribe_ticks: Option<FnSubscribeTicks>,
+    fn_unsubscribe_ticks: Option<FnUnsubscribeTicks>,
+    fn_subscribe_trade: Option<FnSubscribeTrade>,
+    fn_unsubscribe_trade: Option<FnUnsubscribeTrade>,
+    fn_subscribe_book: Option<FnSubscribeBook>,
+    fn_unsubscribe_book: Option<FnUnsubscribeBook>,
+    #[allow(dead_code)]
+    fn_poll_event: Option<FnPollEvent>,
     symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     symbol_cache_ttl: Duration,
+    #[cfg(feature = "async")]
+    event_bus: Arc<crate::stream::EventBus>,
+    #[cfg(feature = "async")]
+    event_loop_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // Safety: Mt5Client is safe to send and share across threads.
@@ -136,6 +148,13 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
+            fn_subscribe_ticks,
+            fn_unsubscribe_ticks,
+            fn_subscribe_trade,
+            fn_unsubscribe_trade,
+            fn_subscribe_book,
+            fn_unsubscribe_book,
+            fn_poll_event,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -232,6 +251,41 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_subscribe_ticks: Option<FnSubscribeTicks> = lib
+                .get::<FnSubscribeTicks>(b"SubscribeTicks\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_unsubscribe_ticks: Option<FnUnsubscribeTicks> = lib
+                .get::<FnUnsubscribeTicks>(b"UnsubscribeTicks\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_subscribe_trade: Option<FnSubscribeTrade> = lib
+                .get::<FnSubscribeTrade>(b"SubscribeTrade\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_unsubscribe_trade: Option<FnUnsubscribeTrade> = lib
+                .get::<FnUnsubscribeTrade>(b"UnsubscribeTrade\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_subscribe_book: Option<FnSubscribeBook> = lib
+                .get::<FnSubscribeBook>(b"SubscribeBook\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_unsubscribe_book: Option<FnUnsubscribeBook> = lib
+                .get::<FnUnsubscribeBook>(b"UnsubscribeBook\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_poll_event: Option<FnPollEvent> = lib
+                .get::<FnPollEvent>(b"PollEvent\0")
+                .map(|s| *s)
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -247,8 +301,62 @@ impl Mt5Client {
                 fn_positions,
                 fn_orders,
                 fn_deals,
+                fn_subscribe_ticks,
+                fn_unsubscribe_ticks,
+                fn_subscribe_trade,
+                fn_unsubscribe_trade,
+                fn_subscribe_book,
+                fn_unsubscribe_book,
+                fn_poll_event,
             )
         };
+
+        #[cfg(feature = "async")]
+        let event_bus = Arc::new(crate::stream::EventBus::new(2048));
+        #[cfg(feature = "async")]
+        let event_loop_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        #[cfg(feature = "async")]
+        if let Some(poll_fn) = fn_poll_event {
+            let running = Arc::clone(&event_loop_running);
+            let bus = Arc::clone(&event_bus);
+            std::thread::Builder::new()
+                .name("mt5-event-pump".to_string())
+                .spawn(move || {
+                    let mut event_type: u16 = 0;
+                    let mut buf = [0u8; 1024];
+                    let mut out_len: u32 = 0;
+                    while running.load(std::sync::atomic::Ordering::Relaxed) {
+                        let res = unsafe {
+                            poll_fn(
+                                &mut event_type,
+                                buf.as_mut_ptr(),
+                                buf.len() as u32,
+                                &mut out_len,
+                                100,
+                            )
+                        };
+                        if res == 1 && out_len > 0 {
+                            match event_type {
+                                1 if out_len >= std::mem::size_of::<Mt5TickEvent>() as u32 => {
+                                    let raw: Mt5TickEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    bus.dispatch_tick(Tick::from_event(raw));
+                                }
+                                2 if out_len >= std::mem::size_of::<Mt5TradeEvent>() as u32 => {
+                                    let raw: Mt5TradeEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    bus.dispatch_trade(TradeEvent::from_raw(raw));
+                                }
+                                3 if out_len >= std::mem::size_of::<Mt5BookEvent>() as u32 => {
+                                    let raw: Mt5BookEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    bus.dispatch_book(BookEvent::from_raw(raw));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                })
+                .ok();
+        }
 
         let client = Mt5Client {
             _lib: lib,
@@ -266,8 +374,19 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
+            fn_subscribe_ticks,
+            fn_unsubscribe_ticks,
+            fn_subscribe_trade,
+            fn_unsubscribe_trade,
+            fn_subscribe_book,
+            fn_unsubscribe_book,
+            fn_poll_event,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: DEFAULT_SYMBOL_CACHE_TTL,
+            #[cfg(feature = "async")]
+            event_bus,
+            #[cfg(feature = "async")]
+            event_loop_running,
         };
 
         let pwd_c = CString::new(password)?;
@@ -970,8 +1089,129 @@ impl Mt5Client {
         Ok(buf[..n].iter().copied().map(Deal::from_raw).collect())
     }
 
+    /// Subscribe to real-time pushed market data ticks for a symbol (protocol v5+ push model).
+    ///
+    /// By default uses [`StreamMode::Latest`] which drops stale quotes on consumer lag to prioritize lowest latency.
+    #[cfg(feature = "async")]
+    pub fn subscribe_ticks(&self, symbol: &str) -> Result<crate::stream::TickSubscription> {
+        self.subscribe_ticks_with_mode(symbol, StreamMode::Latest)
+    }
+
+    /// Subscribe to real-time pushed market data ticks for a symbol with an explicit [`StreamMode`] (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn subscribe_ticks_with_mode(
+        &self,
+        symbol: &str,
+        mode: StreamMode,
+    ) -> Result<crate::stream::TickSubscription> {
+        let fn_sub = self
+            .fn_subscribe_ticks
+            .ok_or(Mt5Error::UnsupportedFeature("SubscribeTicks"))?;
+        let sym_c = CString::new(symbol.trim())?;
+        let ret = unsafe { fn_sub(sym_c.as_ptr()) };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "SubscribeTicks failed for {} (status={})",
+                symbol, ret
+            )));
+        }
+        let rx = self.event_bus.subscribe_ticks(symbol.trim());
+        Ok(crate::stream::TickSubscription::new(symbol.trim(), mode, rx))
+    }
+
+    /// Unsubscribe from real-time pushed ticks for a symbol (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn unsubscribe_ticks(&self, symbol: &str) -> Result<()> {
+        let fn_unsub = self
+            .fn_unsubscribe_ticks
+            .ok_or(Mt5Error::UnsupportedFeature("UnsubscribeTicks"))?;
+        let sym_c = CString::new(symbol.trim())?;
+        let ret = unsafe { fn_unsub(sym_c.as_ptr()) };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "UnsubscribeTicks failed for {} (status={})",
+                symbol, ret
+            )));
+        }
+        Ok(())
+    }
+
+    /// Subscribe to asynchronous broker trade transaction events (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn subscribe_trade(&self) -> Result<tokio::sync::broadcast::Receiver<TradeEvent>> {
+        let fn_sub = self
+            .fn_subscribe_trade
+            .ok_or(Mt5Error::UnsupportedFeature("SubscribeTrade"))?;
+        let ret = unsafe { fn_sub() };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "SubscribeTrade failed (status={})",
+                ret
+            )));
+        }
+        Ok(self.event_bus.subscribe_trade())
+    }
+
+    /// Unsubscribe from asynchronous broker trade transaction events (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn unsubscribe_trade(&self) -> Result<()> {
+        let fn_unsub = self
+            .fn_unsubscribe_trade
+            .ok_or(Mt5Error::UnsupportedFeature("UnsubscribeTrade"))?;
+        let ret = unsafe { fn_unsub() };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "UnsubscribeTrade failed (status={})",
+                ret
+            )));
+        }
+        Ok(())
+    }
+
+    /// Subscribe to depth-of-market book events for a symbol (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn subscribe_book(&self, symbol: &str) -> Result<tokio::sync::broadcast::Receiver<BookEvent>> {
+        let fn_sub = self
+            .fn_subscribe_book
+            .ok_or(Mt5Error::UnsupportedFeature("SubscribeBook"))?;
+        let sym_c = CString::new(symbol.trim())?;
+        let ret = unsafe { fn_sub(sym_c.as_ptr()) };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "SubscribeBook failed for {} (status={})",
+                symbol, ret
+            )));
+        }
+        Ok(self.event_bus.subscribe_book(symbol.trim()))
+    }
+
+    /// Unsubscribe from depth-of-market book events for a symbol (protocol v5+).
+    #[cfg(feature = "async")]
+    pub fn unsubscribe_book(&self, symbol: &str) -> Result<()> {
+        let fn_unsub = self
+            .fn_unsubscribe_book
+            .ok_or(Mt5Error::UnsupportedFeature("UnsubscribeBook"))?;
+        let sym_c = CString::new(symbol.trim())?;
+        let ret = unsafe { fn_unsub(sym_c.as_ptr()) };
+        if ret != 1 {
+            return Err(Mt5Error::Other(format!(
+                "UnsubscribeBook failed for {} (status={})",
+                symbol, ret
+            )));
+        }
+        Ok(())
+    }
+
+    /// Access the underlying [`EventBus`](crate::stream::EventBus) directly.
+    #[cfg(feature = "async")]
+    pub fn event_bus(&self) -> Arc<crate::stream::EventBus> {
+        Arc::clone(&self.event_bus)
+    }
+
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.
     pub fn shutdown(&self) -> Result<()> {
+        #[cfg(feature = "async")]
+        self.event_loop_running.store(false, std::sync::atomic::Ordering::SeqCst);
         let ret = unsafe { (self.fn_shut)() };
         if ret != 1 {
             return Err(Mt5Error::Other(format!(
@@ -985,6 +1225,8 @@ impl Mt5Client {
 
 impl Drop for Mt5Client {
     fn drop(&mut self) {
+        #[cfg(feature = "async")]
+        self.event_loop_running.store(false, std::sync::atomic::Ordering::SeqCst);
         // Shutdown is intentionally idempotent in the DLL (returns 1 if already disconnected).
         unsafe {
             let _ = (self.fn_shut)();

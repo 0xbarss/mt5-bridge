@@ -65,14 +65,24 @@ fn command_ids_agree_across_rust_dll_and_ea() {
         ("CMD_POSITIONS_GET", ProtocolCmd::PositionsGet),
         ("CMD_ORDERS_GET", ProtocolCmd::OrdersGet),
         ("CMD_DEALS_GET", ProtocolCmd::DealsGet),
+        ("CMD_SUBSCRIBE_TICKS", ProtocolCmd::SubscribeTicks),
+        ("CMD_UNSUBSCRIBE_TICKS", ProtocolCmd::UnsubscribeTicks),
+        ("CMD_SUBSCRIBE_TRADE", ProtocolCmd::SubscribeTrade),
+        ("CMD_UNSUBSCRIBE_TRADE", ProtocolCmd::UnsubscribeTrade),
+        ("CMD_SUBSCRIBE_BOOK", ProtocolCmd::SubscribeBook),
+        ("CMD_UNSUBSCRIBE_BOOK", ProtocolCmd::UnsubscribeBook),
     ];
     for (name, cmd) in table {
         assert_eq!(cpp_enum(&cpp, name), cmd as u64, "DLL {name}");
         assert_eq!(define(&ea, name), cmd as u64, "EA {name}");
     }
-    // …and the EA actually dispatches the new command.
+    // …and the EA actually dispatches the commands.
     assert!(ea.contains("case CMD_DEALS_GET:") && ea.contains("void HandleDealsGet("));
+    assert!(ea.contains("case CMD_SUBSCRIBE_TICKS:") && ea.contains("void HandleSubscribeTicks("));
+    assert!(ea.contains("case CMD_SUBSCRIBE_TRADE:") && ea.contains("void HandleSubscribeTrade("));
     assert!(cpp.contains("int DealsGet(Mt5Deal* buf"));
+    assert!(cpp.contains("int SubscribeTicks(const char* symbol)"));
+    assert!(cpp.contains("int SubscribeTrade(void)"));
 }
 
 #[test]
@@ -86,6 +96,10 @@ fn packed_struct_sizes_agree_between_rust_and_dll_static_asserts() {
         ("Mt5Position", std::mem::size_of::<Mt5Position>()),
         ("Mt5Order", std::mem::size_of::<Mt5Order>()),
         ("Mt5Deal", std::mem::size_of::<Mt5Deal>()),
+        ("PacketHdr", std::mem::size_of::<PacketHdr>()),
+        ("Mt5TickEvent", std::mem::size_of::<Mt5TickEvent>()),
+        ("Mt5TradeEvent", std::mem::size_of::<Mt5TradeEvent>()),
+        ("Mt5BookEvent", std::mem::size_of::<Mt5BookEvent>()),
     ];
     for (name, rust_size) in expect {
         let needle = format!("static_assert(sizeof({name}) == ");

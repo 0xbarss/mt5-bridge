@@ -176,12 +176,130 @@ impl Default for Mt5Deal {
     }
 }
 
+/// Wire format for packet header (12 bytes, protocol v5+).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketHdr {
+    pub length: u32,
+    pub kind: u8,
+    pub _pad: u8,
+    pub id: u16,
+    pub status: i32,
+}
+
+/// Asynchronous market data tick event pushed by the EA (76 bytes, protocol v5+).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5TickEvent {
+    pub symbol: [u8; 32],
+    pub time_msc: i64,
+    pub bid: f64,
+    pub ask: f64,
+    pub last: f64,
+    pub volume: u64,
+    pub flags: u32,
+}
+
+impl Default for Mt5TickEvent {
+    fn default() -> Self {
+        Self {
+            symbol: [0u8; 32],
+            time_msc: 0,
+            bid: 0.0,
+            ask: 0.0,
+            last: 0.0,
+            volume: 0,
+            flags: 0,
+        }
+    }
+}
+
+/// Asynchronous trade transaction event pushed by the EA (136 bytes, protocol v5+).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5TradeEvent {
+    pub deal: u64,
+    pub order: u64,
+    pub position: u64,
+    pub time: i64,
+    pub trans_type: i32,
+    pub order_type: i32,
+    pub price: f64,
+    pub volume: f64,
+    pub sl: f64,
+    pub tp: f64,
+    pub symbol: [u8; 32],
+    pub comment: [u8; 32],
+}
+
+impl Default for Mt5TradeEvent {
+    fn default() -> Self {
+        Self {
+            deal: 0,
+            order: 0,
+            position: 0,
+            time: 0,
+            trans_type: 0,
+            order_type: 0,
+            price: 0.0,
+            volume: 0.0,
+            sl: 0.0,
+            tp: 0.0,
+            symbol: [0u8; 32],
+            comment: [0u8; 32],
+        }
+    }
+}
+
+/// Asynchronous depth-of-market book event pushed by the EA (64 bytes, protocol v5+).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5BookEvent {
+    pub symbol: [u8; 32],
+    pub time_msc: i64,
+    pub book_type: i32,
+    pub _pad: i32,
+    pub price: f64,
+    pub volume: f64,
+}
+
+impl Default for Mt5BookEvent {
+    fn default() -> Self {
+        Self {
+            symbol: [0u8; 32],
+            time_msc: 0,
+            book_type: 0,
+            _pad: 0,
+            price: 0.0,
+            volume: 0.0,
+        }
+    }
+}
+
+/// Packet kind on the wire (protocol v5+).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketKind {
+    Request = 0,
+    Response = 1,
+    Event = 2,
+}
+
+/// Event kind on the wire (protocol v5+).
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    Tick = 1,
+    Trade = 2,
+    Book = 3,
+    Bar = 4,
+}
+
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
 //
-// v4: adds `CMD_DEALS_GET` / `Mt5Deal` (trade-history query) and changes the order comment
-//     wire format from `cid:<truncated raw id>` to `cid:<13-char hash token>`. A v3 EA would
-//     mis-handle both, so the handshake refuses to pair mismatched halves.
-pub const PROTOCOL_VERSION: u32 = 4;
+// v5: push model, asynchronous EVENT packets (TICK, TRADE, BOOK), subscriptions,
+//     and full-duplex named pipe streaming.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub const MT5_OK: i32 = 1;
 pub const MT5_ERR_GENERAL: i32 = 0;
@@ -198,6 +316,10 @@ const _: () = {
     assert!(std::mem::size_of::<Mt5Position>() == 148);
     assert!(std::mem::size_of::<Mt5Order>() == 140);
     assert!(std::mem::size_of::<Mt5Deal>() == 152);
+    assert!(std::mem::size_of::<PacketHdr>() == 12);
+    assert!(std::mem::size_of::<Mt5TickEvent>() == 76);
+    assert!(std::mem::size_of::<Mt5TradeEvent>() == 136);
+    assert!(std::mem::size_of::<Mt5BookEvent>() == 64);
 };
 
 // Function pointer signatures for dynamic library loading.
@@ -232,6 +354,17 @@ pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_cha
 pub type FnDeals =
     unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
 
+// Protocol v5 subscription and event function signatures.
+pub type FnSubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
+pub type FnUnsubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
+pub type FnSubscribeTrade = unsafe extern "C" fn() -> c_int;
+pub type FnUnsubscribeTrade = unsafe extern "C" fn() -> c_int;
+pub type FnSubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
+pub type FnUnsubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
+pub type Mt5EventCallback = unsafe extern "C" fn(u16, *const u8, u32);
+pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_int;
+pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
+
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,4 +381,10 @@ pub enum ProtocolCmd {
     PositionsGet = 10,
     OrdersGet = 11,
     DealsGet = 12,
+    SubscribeTicks = 13,
+    UnsubscribeTicks = 14,
+    SubscribeTrade = 15,
+    UnsubscribeTrade = 16,
+    SubscribeBook = 17,
+    UnsubscribeBook = 18,
 }

@@ -77,25 +77,41 @@ long  LocalFree(long hMem);
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-// Wire protocol handshake version. v4: adds CMD_DEALS_GET and changes the order comment wire
-// format from "cid:<truncated raw id>" to "cid:<13-char hash token>". Must equal PROTOCOL_VERSION in
-// src/ffi.rs and MT5_BRIDGE_PROTOCOL_VERSION in bridge_dll/mt5_bridge.h.
-#define PROTOCOL_VERSION        4
+// Wire protocol handshake version. v5: push model, asynchronous EVENT packets, and subscriptions.
+// Must equal PROTOCOL_VERSION in src/ffi.rs and MT5_BRIDGE_PROTOCOL_VERSION in bridge_dll/mt5_bridge.h.
+#define PROTOCOL_VERSION        5
 #define WIRE_ID_LEN             13       // length of the hashed client-order-id token in comments
 
+//---- Packet kinds (protocol v5+)
+#define PKT_REQUEST       0
+#define PKT_RESPONSE      1
+#define PKT_EVENT         2
+
+//---- Event kinds (protocol v5+)
+#define EVENT_TICK        1
+#define EVENT_TRADE       2
+#define EVENT_BOOK        3
+#define EVENT_BAR         4
+
 //---- Protocol commands
-#define CMD_INIT          1
-#define CMD_SHUTDOWN      2
-#define CMD_RATES         3
-#define CMD_ACCOUNT       4
-#define CMD_ORDER_SEND    5
-#define CMD_ORDER_CLOSE   6
-#define CMD_ORDER_MODIFY  7
-#define CMD_SYM_TICK      8
-#define CMD_SYM_INFO      9
-#define CMD_POSITIONS_GET 10
-#define CMD_ORDERS_GET    11
-#define CMD_DEALS_GET     12
+#define CMD_INIT              1
+#define CMD_SHUTDOWN          2
+#define CMD_RATES             3
+#define CMD_ACCOUNT           4
+#define CMD_ORDER_SEND        5
+#define CMD_ORDER_CLOSE       6
+#define CMD_ORDER_MODIFY      7
+#define CMD_SYM_TICK          8
+#define CMD_SYM_INFO          9
+#define CMD_POSITIONS_GET     10
+#define CMD_ORDERS_GET        11
+#define CMD_DEALS_GET         12
+#define CMD_SUBSCRIBE_TICKS   13
+#define CMD_UNSUBSCRIBE_TICKS 14
+#define CMD_SUBSCRIBE_TRADE   15
+#define CMD_UNSUBSCRIBE_TRADE 16
+#define CMD_SUBSCRIBE_BOOK    17
+#define CMD_UNSUBSCRIBE_BOOK  18
 
 //---- EA input
 input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
@@ -288,21 +304,57 @@ void PackF64(uchar &b[], double v) {
     ArrayCopy(b, tmp, n, 0, 8);
 }
 
-// ── Response senders ─────────────────────────────────────────────────────────
+// ── Response senders (protocol v5+) ─────────────────────────────────────────
+
+uint g_current_cmd = 0;
 
 bool SendResponse(long h, int status, const uchar &data[], uint data_len) {
-    uchar hdr[8];
+    uchar hdr[12];
+    // length (4 bytes)
+    hdr[0] = (uchar)(data_len & 0xFF);
+    hdr[1] = (uchar)((data_len >> 8)  & 0xFF);
+    hdr[2] = (uchar)((data_len >> 16) & 0xFF);
+    hdr[3] = (uchar)((data_len >> 24) & 0xFF);
+    // kind (1 byte) = PKT_RESPONSE (1)
+    hdr[4] = (uchar)PKT_RESPONSE;
+    // _pad (1 byte) = 0
+    hdr[5] = 0;
+    // id (2 bytes) = g_current_cmd
+    hdr[6] = (uchar)(g_current_cmd & 0xFF);
+    hdr[7] = (uchar)((g_current_cmd >> 8) & 0xFF);
     // status (4 bytes)
-    hdr[0] = (uchar)(status & 0xFF);
-    hdr[1] = (uchar)((status >> 8)  & 0xFF);
-    hdr[2] = (uchar)((status >> 16) & 0xFF);
-    hdr[3] = (uchar)((status >> 24) & 0xFF);
-    // data_len (4 bytes)
-    hdr[4] = (uchar)(data_len & 0xFF);
-    hdr[5] = (uchar)((data_len >> 8)  & 0xFF);
-    hdr[6] = (uchar)((data_len >> 16) & 0xFF);
-    hdr[7] = (uchar)((data_len >> 24) & 0xFF);
-    if (!PipeWriteExact(h, hdr, 8)) return false;
+    hdr[8]  = (uchar)(status & 0xFF);
+    hdr[9]  = (uchar)((status >> 8)  & 0xFF);
+    hdr[10] = (uchar)((status >> 16) & 0xFF);
+    hdr[11] = (uchar)((status >> 24) & 0xFF);
+
+    if (!PipeWriteExact(h, hdr, 12)) return false;
+    if (data_len > 0 && !PipeWriteExact(h, data, data_len)) return false;
+    FlushFileBuffers(h);
+    return true;
+}
+
+bool SendEvent(long h, uint event_type, const uchar &data[], uint data_len) {
+    uchar hdr[12];
+    // length (4 bytes)
+    hdr[0] = (uchar)(data_len & 0xFF);
+    hdr[1] = (uchar)((data_len >> 8)  & 0xFF);
+    hdr[2] = (uchar)((data_len >> 16) & 0xFF);
+    hdr[3] = (uchar)((data_len >> 24) & 0xFF);
+    // kind (1 byte) = PKT_EVENT (2)
+    hdr[4] = (uchar)PKT_EVENT;
+    // _pad (1 byte) = 0
+    hdr[5] = 0;
+    // id (2 bytes) = event_type
+    hdr[6] = (uchar)(event_type & 0xFF);
+    hdr[7] = (uchar)((event_type >> 8) & 0xFF);
+    // status (4 bytes) = 0
+    hdr[8]  = 0;
+    hdr[9]  = 0;
+    hdr[10] = 0;
+    hdr[11] = 0;
+
+    if (!PipeWriteExact(h, hdr, 12)) return false;
     if (data_len > 0 && !PipeWriteExact(h, data, data_len)) return false;
     FlushFileBuffers(h);
     return true;
@@ -1555,15 +1607,308 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
     SendCount(h, count, data, (uint)ArraySize(data));
 }
 
+// ── Subscription management (protocol v5+) ──────────────────────────────────
+
+struct TickSubscription {
+    string symbol;
+    bool   enabled;
+    long   last_time_msc;
+    double last_bid;
+    double last_ask;
+    double last_price;
+    ulong  last_volume;
+    uint   last_flags;
+};
+
+TickSubscription g_tick_subscriptions[];
+bool             g_trade_subscription = false;
+string           g_book_subscriptions[];
+
+void HandleSubscribeTicks(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    if (!EnsureSymbolAvailable(sym)) {
+        SendError(h);
+        return;
+    }
+
+    int total = ArraySize(g_tick_subscriptions);
+    int idx = -1;
+    for (int i = 0; i < total; i++) {
+        if (g_tick_subscriptions[i].symbol == sym) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        ArrayResize(g_tick_subscriptions, total + 1);
+        idx = total;
+        g_tick_subscriptions[idx].symbol        = sym;
+        g_tick_subscriptions[idx].last_time_msc = 0;
+        g_tick_subscriptions[idx].last_bid      = 0.0;
+        g_tick_subscriptions[idx].last_ask      = 0.0;
+        g_tick_subscriptions[idx].last_price    = 0.0;
+        g_tick_subscriptions[idx].last_volume   = 0;
+        g_tick_subscriptions[idx].last_flags    = 0;
+    }
+    g_tick_subscriptions[idx].enabled = true;
+    SendOk(h);
+    Print("MT5Bridge: subscribed to ticks for '", sym, "'");
+}
+
+void HandleUnsubscribeTicks(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    int total = ArraySize(g_tick_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (g_tick_subscriptions[i].symbol == sym) {
+            g_tick_subscriptions[i].enabled = false;
+            break;
+        }
+    }
+    SendOk(h);
+    Print("MT5Bridge: unsubscribed from ticks for '", sym, "'");
+}
+
+void HandleSubscribeTrade(long h) {
+    g_trade_subscription = true;
+    SendOk(h);
+    Print("MT5Bridge: subscribed to trade events");
+}
+
+void HandleUnsubscribeTrade(long h) {
+    g_trade_subscription = false;
+    SendOk(h);
+    Print("MT5Bridge: unsubscribed from trade events");
+}
+
+void HandleSubscribeBook(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    EnsureSymbolAvailable(sym);
+    MarketBookAdd(sym);
+    int total = ArraySize(g_book_subscriptions);
+    bool found = false;
+    for (int i = 0; i < total; i++) {
+        if (g_book_subscriptions[i] == sym) { found = true; break; }
+    }
+    if (!found) {
+        ArrayResize(g_book_subscriptions, total + 1);
+        g_book_subscriptions[total] = sym;
+    }
+    SendOk(h);
+}
+
+void HandleUnsubscribeBook(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    MarketBookRelease(sym);
+    int total = ArraySize(g_book_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (g_book_subscriptions[i] == sym) {
+            g_book_subscriptions[i] = "";
+            break;
+        }
+    }
+    SendOk(h);
+}
+
+// ── Event queues (bounded ring-buffers) ──────────────────────────────────────
+
+struct QueuedTickEvent {
+    string   symbol;
+    long     time_msc;
+    double   bid;
+    double   ask;
+    double   last;
+    ulong    volume;
+    uint     flags;
+};
+
+#define TICK_QUEUE_CAPACITY 2048
+QueuedTickEvent g_tick_queue[TICK_QUEUE_CAPACITY];
+int g_tick_queue_head  = 0;
+int g_tick_queue_tail  = 0;
+int g_tick_queue_count = 0;
+
+void EnqueueTick(const string sym, const MqlTick &tick) {
+    if (g_tick_queue_count >= TICK_QUEUE_CAPACITY) {
+        g_tick_queue_tail = (g_tick_queue_tail + 1) % TICK_QUEUE_CAPACITY;
+        g_tick_queue_count--;
+    }
+    g_tick_queue[g_tick_queue_head].symbol   = sym;
+    g_tick_queue[g_tick_queue_head].time_msc = tick.time_msc;
+    g_tick_queue[g_tick_queue_head].bid      = tick.bid;
+    g_tick_queue[g_tick_queue_head].ask      = tick.ask;
+    g_tick_queue[g_tick_queue_head].last     = tick.last;
+    g_tick_queue[g_tick_queue_head].volume   = tick.volume;
+    g_tick_queue[g_tick_queue_head].flags    = tick.flags;
+    g_tick_queue_head = (g_tick_queue_head + 1) % TICK_QUEUE_CAPACITY;
+    g_tick_queue_count++;
+}
+
+bool CheckAndUpdateTick(int sub_idx, const MqlTick &tick) {
+    if (tick.bid <= 0.0 && tick.ask <= 0.0) return false;
+    bool time_dup  = (tick.time_msc == g_tick_subscriptions[sub_idx].last_time_msc);
+    bool bid_dup   = (MathAbs(tick.bid - g_tick_subscriptions[sub_idx].last_bid) < 1e-9);
+    bool ask_dup   = (MathAbs(tick.ask - g_tick_subscriptions[sub_idx].last_ask) < 1e-9);
+    bool last_dup  = (MathAbs(tick.last - g_tick_subscriptions[sub_idx].last_price) < 1e-9);
+    bool vol_dup   = (tick.volume == g_tick_subscriptions[sub_idx].last_volume);
+    bool flags_dup = (tick.flags == g_tick_subscriptions[sub_idx].last_flags);
+
+    if (time_dup && bid_dup && ask_dup && last_dup && vol_dup && flags_dup)
+        return false;
+
+    g_tick_subscriptions[sub_idx].last_time_msc = tick.time_msc;
+    g_tick_subscriptions[sub_idx].last_bid      = tick.bid;
+    g_tick_subscriptions[sub_idx].last_ask      = tick.ask;
+    g_tick_subscriptions[sub_idx].last_price    = tick.last;
+    g_tick_subscriptions[sub_idx].last_volume   = tick.volume;
+    g_tick_subscriptions[sub_idx].last_flags    = tick.flags;
+    return true;
+}
+
+void FlushTickQueue() {
+    if (g_client == INVALID_HANDLE || !g_authenticated || g_tick_queue_count == 0)
+        return;
+
+    while (g_tick_queue_count > 0) {
+        QueuedTickEvent qe = g_tick_queue[g_tick_queue_tail];
+        g_tick_queue_tail = (g_tick_queue_tail + 1) % TICK_QUEUE_CAPACITY;
+        g_tick_queue_count--;
+
+        uchar payload[];
+        PackFixedString32(payload, qe.symbol);
+        PackI64(payload, qe.time_msc);
+        PackF64(payload, qe.bid);
+        PackF64(payload, qe.ask);
+        PackF64(payload, qe.last);
+        PackU64(payload, qe.volume);
+        PackU32(payload, qe.flags);
+
+        if (!SendEvent(g_client, EVENT_TICK, payload, 76)) {
+            ResetPipeServer("failed to write tick event to pipe");
+            return;
+        }
+    }
+}
+
+void CheckSubscribedSymbols() {
+    int total = ArraySize(g_tick_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (!g_tick_subscriptions[i].enabled) continue;
+        string sym = g_tick_subscriptions[i].symbol;
+        MqlTick tick;
+        if (SymbolInfoTick(sym, tick)) {
+            if (CheckAndUpdateTick(i, tick)) {
+                EnqueueTick(sym, tick);
+            }
+        }
+    }
+}
+
+struct QueuedTradeEvent {
+    ulong  deal;
+    ulong  order;
+    ulong  position;
+    long   time;
+    int    trans_type;
+    int    order_type;
+    double price;
+    double volume;
+    double sl;
+    double tp;
+    string symbol;
+    string comment;
+};
+
+#define TRADE_QUEUE_CAPACITY 512
+QueuedTradeEvent g_trade_queue[TRADE_QUEUE_CAPACITY];
+int g_trade_queue_head  = 0;
+int g_trade_queue_tail  = 0;
+int g_trade_queue_count = 0;
+
+void EnqueueTrade(ulong deal, ulong order, ulong pos, long time, int trans_type,
+                  int otype, double price, double vol, double sl, double tp,
+                  const string sym, const string cmt) {
+    if (g_trade_queue_count >= TRADE_QUEUE_CAPACITY) {
+        g_trade_queue_tail = (g_trade_queue_tail + 1) % TRADE_QUEUE_CAPACITY;
+        g_trade_queue_count--;
+    }
+    g_trade_queue[g_trade_queue_head].deal       = deal;
+    g_trade_queue[g_trade_queue_head].order      = order;
+    g_trade_queue[g_trade_queue_head].position   = pos;
+    g_trade_queue[g_trade_queue_head].time       = time;
+    g_trade_queue[g_trade_queue_head].trans_type = trans_type;
+    g_trade_queue[g_trade_queue_head].order_type = otype;
+    g_trade_queue[g_trade_queue_head].price      = price;
+    g_trade_queue[g_trade_queue_head].volume     = vol;
+    g_trade_queue[g_trade_queue_head].sl         = sl;
+    g_trade_queue[g_trade_queue_head].tp         = tp;
+    g_trade_queue[g_trade_queue_head].symbol     = sym;
+    g_trade_queue[g_trade_queue_head].comment    = cmt;
+    g_trade_queue_head = (g_trade_queue_head + 1) % TRADE_QUEUE_CAPACITY;
+    g_trade_queue_count++;
+}
+
+void FlushTradeQueue() {
+    if (g_client == INVALID_HANDLE || !g_authenticated || g_trade_queue_count == 0)
+        return;
+
+    while (g_trade_queue_count > 0) {
+        QueuedTradeEvent qe = g_trade_queue[g_trade_queue_tail];
+        g_trade_queue_tail = (g_trade_queue_tail + 1) % TRADE_QUEUE_CAPACITY;
+        g_trade_queue_count--;
+
+        uchar payload[];
+        PackU64(payload, qe.deal);
+        PackU64(payload, qe.order);
+        PackU64(payload, qe.position);
+        PackI64(payload, qe.time);
+        PackI32(payload, qe.trans_type);
+        PackI32(payload, qe.order_type);
+        PackF64(payload, qe.price);
+        PackF64(payload, qe.volume);
+        PackF64(payload, qe.sl);
+        PackF64(payload, qe.tp);
+        PackFixedString32(payload, qe.symbol);
+        PackFixedString32(payload, qe.comment);
+
+        if (!SendEvent(g_client, EVENT_TRADE, payload, 136)) {
+            ResetPipeServer("failed to write trade event to pipe");
+            return;
+        }
+    }
+}
+
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
-    // Read 8-byte request header: [uint32 cmd][uint32 payload_len]
+    // Read 12-byte request header: [uint32 length][uint8 kind][uint8 _pad][uint16 id][int32 status]
     uchar hdr[];
-    if (!PipeReadExact(h, hdr, 8)) return false;
+    if (!PipeReadExact(h, hdr, 12)) return false;
 
-    uint cmd     = UnpackU32(hdr, 0);
-    uint pay_len = UnpackU32(hdr, 4);
+    uint pay_len = UnpackU32(hdr, 0);
+    uchar kind   = hdr[4];
+    uint cmd     = (uint)hdr[6] | ((uint)hdr[7] << 8);
+
+    g_current_cmd = cmd;
 
     if (pay_len > MAX_PAYLOAD_SIZE) {
         Print("MT5Bridge: request payload length ", pay_len, " exceeds limit (", MAX_PAYLOAD_SIZE, ")");
@@ -1583,18 +1928,24 @@ bool DispatchRequest(long h) {
     }
 
     switch (cmd) {
-        case CMD_INIT:         HandleInit(h, payload, pay_len);           break;
-        case CMD_SHUTDOWN:     HandleShutdown(h); return false;  /* disconnect */
-        case CMD_RATES:        HandleCopyRates(h, payload, pay_len);      break;
-        case CMD_ACCOUNT:      HandleAccount(h);                          break;
-        case CMD_ORDER_SEND:   HandleOrderSend(h, payload, pay_len);      break;
-        case CMD_ORDER_CLOSE:  HandleOrderClose(h, payload, pay_len);     break;
-        case CMD_ORDER_MODIFY: HandleOrderModify(h, payload, pay_len);    break;
-        case CMD_SYM_TICK:     HandleSymbolInfoTick(h, payload, pay_len); break;
-        case CMD_SYM_INFO:     HandleSymbolInfoFull(h, payload, pay_len); break;
-        case CMD_POSITIONS_GET:HandlePositionsGet(h, payload, pay_len);  break;
-        case CMD_ORDERS_GET:   HandleOrdersGet(h, payload, pay_len);     break;
-        case CMD_DEALS_GET:    HandleDealsGet(h, payload, pay_len);      break;
+        case CMD_INIT:              HandleInit(h, payload, pay_len);              break;
+        case CMD_SHUTDOWN:          HandleShutdown(h); return false;  /* disconnect */
+        case CMD_RATES:             HandleCopyRates(h, payload, pay_len);         break;
+        case CMD_ACCOUNT:           HandleAccount(h);                             break;
+        case CMD_ORDER_SEND:        HandleOrderSend(h, payload, pay_len);         break;
+        case CMD_ORDER_CLOSE:       HandleOrderClose(h, payload, pay_len);        break;
+        case CMD_ORDER_MODIFY:      HandleOrderModify(h, payload, pay_len);       break;
+        case CMD_SYM_TICK:          HandleSymbolInfoTick(h, payload, pay_len);    break;
+        case CMD_SYM_INFO:          HandleSymbolInfoFull(h, payload, pay_len);    break;
+        case CMD_POSITIONS_GET:     HandlePositionsGet(h, payload, pay_len);     break;
+        case CMD_ORDERS_GET:        HandleOrdersGet(h, payload, pay_len);        break;
+        case CMD_DEALS_GET:         HandleDealsGet(h, payload, pay_len);         break;
+        case CMD_SUBSCRIBE_TICKS:   HandleSubscribeTicks(h, payload, pay_len);   break;
+        case CMD_UNSUBSCRIBE_TICKS: HandleUnsubscribeTicks(h, payload, pay_len); break;
+        case CMD_SUBSCRIBE_TRADE:   HandleSubscribeTrade(h);                     break;
+        case CMD_UNSUBSCRIBE_TRADE: HandleUnsubscribeTrade(h);                   break;
+        case CMD_SUBSCRIBE_BOOK:    HandleSubscribeBook(h, payload, pay_len);    break;
+        case CMD_UNSUBSCRIBE_BOOK:  HandleUnsubscribeBook(h, payload, pay_len);  break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);
@@ -1683,6 +2034,17 @@ void OnDeinit(const int reason) {
     EventKillTimer();
     g_running = false;
     g_authenticated = false;
+
+    // Release any book subscriptions
+    int book_total = ArraySize(g_book_subscriptions);
+    for (int i = 0; i < book_total; i++) {
+        if (StringLen(g_book_subscriptions[i]) > 0) {
+            MarketBookRelease(g_book_subscriptions[i]);
+        }
+    }
+    ArrayResize(g_book_subscriptions, 0);
+    ArrayResize(g_tick_subscriptions, 0);
+
     if (g_client != INVALID_HANDLE) {
         DisconnectNamedPipe(g_client);
         // Do not close g_client: g_client aliases g_server (g_client = g_server).
@@ -1740,9 +2102,9 @@ void OnTimer() {
             break; // Time budget elapsed; yield to MT5 event loop until next timer tick
         }
 
-        uchar peek_hdr[8];
+        uchar peek_hdr[12];
         uint  peek_read = 0, peek_avail = 0, peek_left = 0;
-        bool has_data = PeekNamedPipe(g_client, peek_hdr, 8,
+        bool has_data = PeekNamedPipe(g_client, peek_hdr, 12,
                                       peek_read, peek_avail, peek_left);
         if (!has_data) {
             // Pipe broke or client disconnected abruptly without shutdown
@@ -1750,9 +2112,9 @@ void OnTimer() {
             return;
         }
 
-        if (peek_avail < 8) return;  // need at least complete 8-byte header
+        if (peek_avail < 12) break;  // need at least complete 12-byte header
 
-        uint expected_pay_len = UnpackU32(peek_hdr, 4);
+        uint expected_pay_len = UnpackU32(peek_hdr, 0);
         if (expected_pay_len > MAX_PAYLOAD_SIZE) {
             Print("MT5Bridge: payload length ", expected_pay_len, " exceeds MAX_PAYLOAD_SIZE; dropping client");
             ResetPipeServer("exceeded MAX_PAYLOAD_SIZE");
@@ -1760,7 +2122,7 @@ void OnTimer() {
         }
 
         // If full payload has not arrived yet, wait for next timer tick without blocking
-        if (peek_avail < 8 + expected_pay_len) return;
+        if (peek_avail < 12 + expected_pay_len) break;
 
         bool ok = DispatchRequest(g_client);
         if (!ok) {
@@ -1769,7 +2131,75 @@ void OnTimer() {
         }
         processed++;
     }
+
+    // 2. Poll and enqueue ticks for subscribed non-chart symbols
+    CheckSubscribedSymbols();
+
+    // 3. Flush queued tick events to pipe
+    FlushTickQueue();
+
+    // 4. Flush queued trade events to pipe
+    FlushTradeQueue();
 }
 
-// Required by MT5 even when not used.
-void OnTick() {}
+// Low-latency event-driven tick handler (protocol v5+ push model)
+void OnTick() {
+    if (!g_running || g_client == INVALID_HANDLE || !g_authenticated) return;
+
+    string sym = _Symbol;
+    int total = ArraySize(g_tick_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (g_tick_subscriptions[i].enabled && g_tick_subscriptions[i].symbol == sym) {
+            MqlTick tick;
+            if (SymbolInfoTick(sym, tick)) {
+                if (CheckAndUpdateTick(i, tick)) {
+                    EnqueueTick(sym, tick);
+                }
+            }
+            break;
+        }
+    }
+}
+
+// Low-latency event-driven trade handler (protocol v5+ push model)
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result) {
+    if (!g_running || g_client == INVALID_HANDLE || !g_authenticated || !g_trade_subscription)
+        return;
+
+    EnqueueTrade(trans.deal, trans.order, trans.position, (long)TimeCurrent(),
+                 (int)trans.type, (int)trans.order_type, trans.price,
+                 trans.volume, trans.price_sl, trans.price_tp,
+                 trans.symbol, "");
+}
+
+// Low-latency event-driven depth-of-market handler (protocol v5+ push model)
+void OnBookEvent(const string &symbol) {
+    if (!g_running || g_client == INVALID_HANDLE || !g_authenticated)
+        return;
+
+    // Check if symbol is in book subscriptions
+    int total = ArraySize(g_book_subscriptions);
+    bool subscribed = false;
+    for (int i = 0; i < total; i++) {
+        if (g_book_subscriptions[i] == symbol) { subscribed = true; break; }
+    }
+    if (!subscribed) return;
+
+    MqlBookInfo book[];
+    if (MarketBookGet(symbol, book)) {
+        int book_count = ArraySize(book);
+        long now_msc = (long)GetMicrosecondCount() / 1000;
+        for (int i = 0; i < book_count; i++) {
+            uchar payload[];
+            PackFixedString32(payload, symbol);
+            PackI64(payload, now_msc);
+            PackI32(payload, (book[i].type == BOOK_TYPE_BUY) ? 1 : 2);
+            PackI32(payload, 0); // padding
+            PackF64(payload, book[i].price);
+            PackF64(payload, (double)book[i].volume);
+            SendEvent(g_client, EVENT_BOOK, payload, 64);
+        }
+    }
+}

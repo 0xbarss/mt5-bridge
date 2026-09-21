@@ -13,6 +13,7 @@ use std::fs;
 fn read(rel: &str) -> String {
     fs::read_to_string(format!("{}/{rel}", env!("CARGO_MANIFEST_DIR")))
         .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        .replace("\r\n", "\n")
 }
 
 /// Value of `#define NAME <int>` (first token after the name; trailing comments ignored).

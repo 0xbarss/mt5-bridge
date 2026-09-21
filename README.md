@@ -16,6 +16,9 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
 - [Architecture & Design](#architecture--design)
   - [IPC Architecture](#ipc-architecture)
   - [Security Model & Threat Assumptions](#security-model--threat-assumptions)
+  - [Trade Execution State Machine](#trade-execution-state-machine)
+  - [Event Processing Model](#event-processing-model)
+  - [Queue Overflow & Observability](#queue-overflow--observability)
   - [Trade Ownership & Magic Number Scope](#trade-ownership--magic-number-scope)
   - [Concurrency, Latency & Serialization](#concurrency-latency--serialization)
   - [Timezone & Historical Timestamps Contract](#timezone--historical-timestamps-contract)
@@ -32,7 +35,7 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
   - [3. Querying Symbol Specifications & Risk Helpers](#3-querying-symbol-specifications--risk-helpers)
   - [4. Fetching Historical OHLCV Bars & Technical Metrics](#4-fetching-historical-ohlcv-bars--technical-metrics)
   - [5. Downloading Deep Chunked History with Completeness](#5-downloading-deep-chunked-history-with-completeness)
-  - [6. Real-Time Tick Streaming](#6-real-time-tick-streaming)
+  - [6. Real-Time Tick Streaming (Push Model & Fallback Polling)](#6-real-time-tick-streaming-push-model--fallback-polling)
   - [7. Real-Time Closed Bar Streaming](#7-real-time-closed-bar-streaming)
   - [8. Placing, Modifying & Closing Market Orders](#8-placing-modifying--closing-market-orders)
   - [9. Pending Orders with Expiration & Cancellation](#9-pending-orders-with-expiration--cancellation)
@@ -52,6 +55,9 @@ A fast, lightweight, and unofficial native API bridge and client for **MetaTrade
   - [Packed Struct Layouts](#packed-struct-layouts)
 - [Building the C++ DLL from Source](#building-the-c-dll-from-source)
 - [Testing & Quality Assurance](#testing--quality-assurance)
+  - [1. Offline Unit & Property Tests](#1-offline-unit--property-tests)
+  - [2. Live Integration Suite (Active MT5 Terminal)](#2-live-integration-suite-active-mt5-terminal)
+  - [3. Failure Injection Matrix](#3-failure-injection-matrix)
 - [Troubleshooting & FAQ](#troubleshooting--faq)
 - [Author & Contributions](#author--contributions)
 - [License & Disclaimer](#license--disclaimer)
@@ -83,26 +89,26 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 │                (mt5-bridge client crate)                │
 └────────────────────────────┬────────────────────────────┘
                              │
-                  Dynamic Linking (libloading)
+               Dynamic Linking (libloading)
                              │
 ┌────────────────────────────▼────────────────────────────┐
-│                    mt5_bridge.dll                       │
-│             (C++ Named Pipe Client DLL)                 │
+│                     mt5_bridge.dll                      │
+│              (C++ Named Pipe Client DLL)                │
 └────────────────────────────┬────────────────────────────┘
                              │
-           Windows Named Pipe (\\.\pipe\mt5bridge)
+          Windows Named Pipe (\\.\pipe\mt5bridge)
                     Binary IPC Protocol
                              │
 ┌────────────────────────────▼────────────────────────────┐
-│                   mt5_bridge.mq5                        │
+│                    mt5_bridge.mq5                       │
 │          (MQL5 Expert Advisor Pipe Server)              │
 └────────────────────────────┬────────────────────────────┘
                              │
-                    Internal Terminal API
+                  Internal Terminal API
                              │
 ┌────────────────────────────▼────────────────────────────┐
 │               MetaTrader 5 Client Terminal              │
-│                (Broker Trade Server)                    │
+│                  (Broker Trade Server)                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -116,7 +122,7 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 
 1. **Local IPC Boundary**: The bridge uses Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
 2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected with an error unless preceded by a valid, authenticated `CMD_INIT` handshake.
-3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 4`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
+3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 5`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
 4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. `InpRequireSecret` is enabled by default (`true`), preventing the EA from starting without a secret configured (set `InpRequireSecret = false` to opt out). Provide the secret from Rust via [`Mt5Client::connect_with_secret`](#) or the `MT5_PIPE_SECRET` environment variable.
 5. **Explicit Pipe Security Descriptor (ACL)**: The named pipe is created with an explicit Win32 Security Descriptor (`InpPipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"`), restricting pipe access strictly to the owner user account, Local System, and Administrators, preventing unauthorized local users or cross-session processes from connecting.
 6. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
@@ -125,6 +131,117 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 9. **Deterministic Position Resolution (Hedging Safe)**: In hedging accounts with multiple positions per symbol, the bridge strictly resolves position IDs via deal history (`DEAL_POSITION_ID`) or ticket selection (`PositionSelectByTicket`). It deliberately avoids ambiguous symbol-only lookups (`PositionSelect(sym)`); if position tracking cannot be verified, `position = 0` is safely returned instead of guessing an arbitrary position ticket.
 10. **Market Watch Control**: `InpAutoSelectSymbols` (default `true`) allows configuring whether queries automatically select symbols into Market Watch or strictly require them to already exist.
 11. **Non-Blocking Pipe Peeking**: The EA inspects available pipe buffer lengths before calling read operations, ensuring a stalled or crashed client cannot freeze the MetaTrader 5 UI or chart timer thread.
+
+### Trade Execution State Machine
+
+A primary vulnerability in automated trading bridges is treating a transport failure (e.g., named pipe disconnection, socket timeout, or process restart) as an order rejection. If a client blindly retries an order that was actually executed by the broker, catastrophic duplicate exposure occurs.
+
+To prevent this, `mt5-bridge` formally models execution via a deterministic state machine:
+
+```text
+                     ┌───────────────┐
+                     │    Created    │
+                     └───────┬───────┘
+                             │
+                             ▼
+                     ┌───────────────┐
+                     │  Submitting   │
+                     └───────┬───────┘
+                             │
+           ┌─────────────────┼─────────────────┐
+           │                 │                 │
+           ▼                 ▼                 ▼
+    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+    │  Accepted   │   │   Unknown   │   │  Rejected   │
+    └──────┬──────┘   └──────┬──────┘   └─────────────┘
+           │                 │
+           │                 ▼
+           │          ┌─────────────┐
+           │          │  Reconcile  │
+           │          └──────┬──────┘
+           │                 │
+           │       ┌─────────┴─────────┐
+           │       │                   │
+           │       ▼                   ▼
+           │ ┌───────────┐     ┌───────────────┐
+           │ │ Confirmed │     │ Still Unknown │
+           │ └─────┬─────┘     └───────┬───────┘
+           │       │                   │ (grace expired)
+           │       │                   ▼
+           │       │           ┌───────────────┐
+           │       │           │   Rejected    │
+           │       │           └───────────────┘
+           │       │
+           ▼       ▼
+      ┌───────────────────┐
+      │ Partially Filled  │
+      └─────────┬─────────┘
+                │
+                ▼
+      ┌───────────────────┐
+      │      Filled       │
+      └─────────┬─────────┘
+                │
+                ▼
+      ┌───────────────────┐
+      │      Closed       │
+      └───────────────────┘
+```
+
+> [!IMPORTANT]
+> **Core Invariant: `Transport failure ≠ order rejection`**
+> An order whose confirmation was lost over the wire is never assumed dead. It enters `OrderState::Unknown`, blocks further submissions under `UnknownBlockScope::Strategy`, and initiates multi-pass verification against MT5 live positions and deal history via `manager.reconcile(&client)`. Only when definitive absence is confirmed across consecutive observations spanning the grace period (default: 3 passes and 30 seconds) is the order marked `Rejected`.
+
+### Event Processing Model
+
+A production-grade algorithmic trading architecture strictly separates **transport**, **events**, **in-memory state**, and **broker reconciliation**:
+
+```text
+                 ┌───────────────────┐
+                 │ Initial Snapshot  │
+                 └─────────┬─────────┘
+                           │
+                           ▼
+                 ┌───────────────────┐
+                 │    Local State    │
+                 └─────────▲─────────┘
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+              ▼                         ▼
+    ┌───────────────────┐     ┌───────────────────┐
+    │ Trade/Book Events │     │ Periodic Snapshot │
+    └─────────┬─────────┘     └─────────┬─────────┘
+              │                         │
+              ▼                         ▼
+    ┌───────────────────┐     ┌───────────────────┐
+    │    Apply Event    │     │     Reconcile     │
+    └─────────┬─────────┘     └─────────┬─────────┘
+              │                         │
+              └────────────┬────────────┘
+                           │
+                           ▼
+                 ┌───────────────────┐
+                 │ Consistent State  │
+                 └───────────────────┘
+```
+
+#### Event-Snapshot Lifecycle
+1. **Initial Snapshot**: Upon startup or reconnect, [`OrderManager::reconcile(&client)`](src/reconciliation.rs) queries active positions (`CMD_POSITIONS_GET`), pending orders (`CMD_ORDERS_GET`), and historical deals (`CMD_DEALS_GET`), establishing an exact baseline of current broker exposure.
+2. **Incremental Push Stream**: The MQL5 EA monitors [`OnTradeTransaction()`](mql5/Experts/mt5_bridge.mq5) and pushes structured [`Mt5TradeEvent`](src/ffi.rs) payloads into the named pipe. The EA automatically propagates trade comments (from order requests, deal history, or order history), enabling [`OrderManager::apply_trade_event(&event)`](src/reconciliation.rs) to instantly attribute fills, partial executions, and closes to tracked client order IDs without polling overhead.
+3. **Periodic Reconcile Pass**: A lightweight background snapshot reconciles all tracked open positions against MT5 state, detecting any discrepancies (e.g. manual broker intervention, slippage, off-bridge closes) and resolving any in-flight orders.
+4. **Consistent State Guarantee**: If event delivery lags or drops under severe load, the periodic reconciliation engine corrects any drift, guaranteeing eventual consistency without risking out-of-order corruption.
+
+### Queue Overflow & Observability
+
+In high-volatility market conditions (e.g. major news releases), quote or transaction generation can outpace consumer processing. `mt5-bridge` ensures pipeline backpressure and event loss are strictly observable:
+
+- **C++ Ring Buffer with Overwrite Protection**: The C++ DLL maintains an internal circular ring buffer (default 65,536 slots). When downstream consumers fail to drain events before the buffer cycles, older unread events are overwritten safely without memory leaks, and an atomic counter `g_events_dropped_total` is incremented.
+- **Client Drop Counter Inspection**: Call [`Mt5Client::events_dropped_total(&self) -> u64`](src/client.rs) at any time to monitor dropped events across all active subscriptions.
+- **MQL5 EA Drops Alerting**: The EA maintains independent queue counters (`g_ticks_dropped_total`, `g_trades_dropped_total`) and emits periodic warning alerts to the MT5 Experts log whenever queue capacity thresholds are exceeded.
+- **Dual Stream Modes**:
+  - `StreamMode::Lossless`: Backpressure detection via `recv_checked()` which returns `Err(RecvError::Lagged(skipped))` whenever a consumer falls behind, guaranteeing that recording and auditing engines detect data gaps.
+  - `StreamMode::Latest`: Broadcast channel that drops lagged quotes in favor of the newest tick, ensuring execution algorithms never execute on a stale backlog.
 
 ### Trade Ownership & Magic Number Scope
 
@@ -193,14 +310,22 @@ mt5-bridge/
 ├── src/                     # Rust library crate
 │   ├── lib.rs               # Library entry point & re-exports
 │   ├── client.rs            # Safe Mt5Client implementation
+│   ├── backend.rs           # TradingBackend trait, LiveMt5Backend & generic extensions
 │   ├── types.rs             # Typed data structures (Timeframe, Bar, Tick, etc.)
 │   ├── error.rs             # Typed error definitions & MT5 retcode translator
 │   ├── ffi.rs               # C FFI declarations and packed struct layouts
-│   └── stream.rs            # Async Tokio tick & bar stream implementations
+│   ├── journal.rs           # Durable write-ahead order journaling (OrderStore, JsonFileStore)
+│   ├── reconciliation.rs    # OrderManager, SharedOrderManager & multi-pass reconciliation engine
+│   └── stream.rs            # Async Tokio tick, bar, trade & book depth streams
 │
-├── tests/                   # Test suites
+├── tests/                   # Comprehensive automated test suites (150+ tests)
+│   ├── common/              # Shared test harness, mock backend & failure injectors
 │   ├── bridge_tests.rs      # Unit & data model tests (offline, CI-ready)
-│   └── live_integration.rs  # End-to-end integration tests (requires running MT5)
+│   ├── failure_injection.rs # Crash, disconnect, partial fill & idempotency matrix (55 tests)
+│   ├── live_integration.rs  # End-to-end live integration suite (requires running MT5)
+│   ├── protocol_consistency.rs # ABI wire layout & packed struct validation across Rust, C++, EA
+│   ├── protocol_fuzzing.rs  # Fuzz testing for binary deserialization & string inputs
+│   └── tick_arithmetic.rs   # Fixed-point tick arithmetic & decimal price rounding
 │
 └── examples/                # Runnable demonstration scripts
     ├── 01_account_info.rs   # Account balance, equity, margin, and margin level
@@ -575,12 +700,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mod_res = client.order_modify(target_ticket, new_sl, tp)?;
     println!("Stop loss modified! Retcode: {} ({})", mod_res.retcode, mod_res.description());
 
-    // 3. Close the position by position ticket ID
-    let close_result = client.order_close(target_ticket)?;
+    // 3. Close the position by position ticket ID using ergonomic close_position API:
+    let close_result = client.close_position(target_ticket)?;
     println!(
         "Position closed at {:.5} (Deal: {}, Retcode: {})",
         close_result.price, close_result.deal, close_result.retcode
     );
+
+    // Or close verifying strategy magic number ownership:
+    // let close_result = client.close_position_with_magic(target_ticket, 20240101)?;
 
     Ok(())
 }
@@ -772,6 +900,23 @@ When a live position or working order matches on ticket or wire identity token, 
   ```
   This structurally guarantees that checking idempotency, journaling write-ahead, transmitting over the pipe, and recording the outcome happen atomically across concurrent threads.
 
+#### Incremental Event Processing (`apply_trade_event`)
+Rather than relying solely on periodic snapshot polling (which introduces latency and pipe overhead), [`OrderManager`](src/reconciliation.rs) and [`SharedOrderManager`](src/reconciliation.rs) directly consume live push trade notifications via [`apply_trade_event`](src/reconciliation.rs):
+
+```rust
+// Subscribe to real-time broker trade events (Protocol v5+)
+let mut trade_sub = client.subscribe_trades()?;
+
+// Background event processing loop
+tokio::spawn(async move {
+    while let Ok(event) = trade_sub.recv().await {
+        // Incrementally updates local tracked orders with fills, deal tickets, and closes
+        manager.apply_trade_event(&event);
+    }
+});
+```
+This enables sub-millisecond local state transitions for fills and closes while reserving full snapshot reconciliation ([`manager.reconcile(&client)`](src/reconciliation.rs)) for startup, reconnects, or periodic drift verification.
+
 ---
 
 ### 13. Integer Tick Pricing Utilities
@@ -862,7 +1007,9 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | :--- | :--- | :--- |
 | [`order_send`](src/client.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
 | [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position or cancels a pending order by ticket ID. |
+| [`close_position`](src/client.rs) | `pub fn close_position(&self, ticket: u64) -> Result<TradeResult>` | Semantic alias for closing an open market position by ticket ID. |
 | [`order_close_with_magic`](src/client.rs) | `pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
+| [`close_position_with_magic`](src/client.rs) | `pub fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
 | [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
 | [`order_modify_with_magic`](src/client.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
 | [`positions`](src/client.rs) | `pub fn positions(&self) -> Result<Vec<Position>>` | Queries all active open positions in the terminal. |
@@ -871,12 +1018,29 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | [`pending_orders_filtered`](src/client.rs) | `pub fn pending_orders_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<WorkingOrder>>` | Queries working pending orders matching optional magic number and/or symbol filters. |
 | [`deals`](src/client.rs) | `pub fn deals(&self, from: i64, to: i64) -> Result<Vec<Deal>>` | Queries completed trade execution history within a UTC timestamp range `[from, to]`. |
 | [`deals_filtered`](src/client.rs) | `pub fn deals_filtered(&self, from: i64, to: i64, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Deal>>` | Queries completed trade execution history with optional magic number and/or symbol filters. |
+| [`events_dropped_total`](src/client.rs) | `pub fn events_dropped_total(&self) -> u64` | Queries the total count of dropped push streaming events in the C++ ring buffer. |
 
 ---
 
 ### Streaming APIs
 
-Asynchronous real-time streaming built on Tokio channels (enabled via default `async` feature).
+Real-time streaming built on Tokio async broadcast & mpsc channels (enabled via default `async` feature).
+
+#### Real-Time Push Streaming (Protocol v5+)
+
+Event-driven streaming directly fed from MT5's `OnTick()`, `OnBookEvent()`, and `OnTradeTransaction()`:
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| [`subscribe_ticks`](src/client.rs) | `pub fn subscribe_ticks(&self, symbol: &str) -> Result<TickSubscription>` | Subscribes to push tick events for `symbol` using default [`StreamMode::Latest`](src/stream.rs). |
+| [`subscribe_ticks_with_mode`](src/client.rs) | `pub fn subscribe_ticks_with_mode(&self, symbol: &str, mode: StreamMode) -> Result<TickSubscription>` | Subscribes to push ticks with explicit mode: `StreamMode::Lossless` (guaranteed delivery with lag detection) or `StreamMode::Latest` (lowest-latency). |
+| [`unsubscribe_ticks`](src/client.rs) | `pub fn unsubscribe_ticks(&self, symbol: &str) -> Result<()>` | Unsubscribes from push tick quotes for `symbol`. |
+| [`subscribe_depth`](src/client.rs) | `pub fn subscribe_depth(&self, symbol: &str) -> Result<BookSubscription>` | Subscribes to real-time Level II Market Depth (order book) updates for `symbol`. |
+| [`unsubscribe_depth`](src/client.rs) | `pub fn unsubscribe_depth(&self, symbol: &str) -> Result<()>` | Unsubscribes from Level II depth stream for `symbol`. |
+| [`subscribe_trades`](src/client.rs) | `pub fn subscribe_trades(&self) -> Result<TradeSubscription>` | Subscribes to real-time broker trade transactions (`OnTradeTransaction`) with order comment attribution. |
+| [`unsubscribe_trades`](src/client.rs) | `pub fn unsubscribe_trades(&self) -> Result<()>` | Unsubscribes from broker trade transactions stream. |
+
+#### Polling-Based Streams (Fallback & Candle Aggregation)
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
@@ -1329,7 +1493,7 @@ cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_b
 
 ## Testing & Quality Assurance
 
-The codebase includes two dedicated test suites under [`tests/`](tests):
+The codebase includes an extensive automated test battery with over 150 tests across 6 dedicated test suites under [`tests/`](tests):
 
 ### 1. Offline Unit & Property Tests
 Comprehensive unit tests covering timeframe math, calendar intervals, lot rounding edge cases, valid lot checks with `NaN`/`Infinity` guards, price rounding, point value scaling, order builders, and trade status classifications:
@@ -1337,15 +1501,50 @@ Comprehensive unit tests covering timeframe math, calendar intervals, lot roundi
 cargo test --test bridge_tests
 ```
 
-### 2. Live Integration Suite
+### 2. Protocol Fuzzing, Consistency & Tick Arithmetic
+- **Protocol Consistency ([`tests/protocol_consistency.rs`](tests/protocol_consistency.rs))**: Validates wire protocol versions, command IDs, and static struct byte layouts across Rust, C++, and MQL5.
+- **Protocol Fuzzing ([`tests/protocol_fuzzing.rs`](tests/protocol_fuzzing.rs))**: Fuzz tests binary deserialization of arbitrary payloads, corrupted JSON journals, and UTF-8 comment boundaries.
+- **Tick Arithmetic ([`tests/tick_arithmetic.rs`](tests/tick_arithmetic.rs))**: Tests round-trip price-to-tick and tick-to-price conversions across multi-million price points against an exact decimal oracle.
+```bash
+cargo test --test protocol_consistency --test protocol_fuzzing --test tick_arithmetic
+```
+
+### 3. Failure Injection Matrix ([`tests/failure_injection.rs`](tests/failure_injection.rs))
+55 exhaustive failure scenarios verifying idempotency, write-ahead durability, crash safety, and reconciliation invariants:
+
+| Scenario / Fault Injected | Expected Invariant / System Response | Status |
+| :--- | :--- | :---: |
+| **Pipe disconnect before transmission** | Request fails immediately with `TransmissionFailed`; state unchanged; safe to retry. | Verified |
+| **Pipe disconnect mid-transmission** | Enters `OrderState::Unknown`; submission blocked under `UnknownBlockScope::Strategy`. | Verified |
+| **Pipe disconnect after broker execution** | Response lost; reconciles via live MT5 positions without duplicate order submission. | Verified |
+| **Application crash between write-ahead & outcome** | Re-loaded from disk journal on restart as `Unknown`; verified against broker before retry. | Verified |
+| **Corrupted or foreign journal file** | Returns strict deserialization error; never defaults to a misleading empty order book. | Verified |
+| **Partial fill execution** | Preserves partial execution state; tracks executed volume and residual unfilled lot. | Verified |
+| **Multiple asynchronous fills** | Aggregates execution volume and weighted price accurately from deal history. | Verified |
+| **Immediate close after fill** | Reconstructs lifecycle from deal history (`DEAL_ENTRY_IN` + `DEAL_ENTRY_OUT`). | Verified |
+| **Hedging account (multiple positions on same symbol)** | Deterministically selects the correct ticket via `PositionSelectByTicket` / `DEAL_POSITION_ID`. | Verified |
+| **Netting account execution** | Attributes volume from deal history rather than guessing from mutated cumulative position. | Verified |
+| **Reusing Client Order ID for different request** | Rejects with explicit collision error; never silently replays or mutates original order. | Verified |
+| **Delayed broker visibility** | Multi-pass grace period prevents prematurely declaring an in-flight order rejected. | Verified |
+| **Absence without deal history support** | Unconfirmed orders remain safely in `Unknown` under default policy; never assumed unplaced. | Verified |
+| **Attribute mismatch (Direction, Volume, SL/TP)** | Flagged as `OrderState::Mismatched` with specific category; requires operator ACK. | Verified |
+| **Concurrent multi-threaded submission (same ID)** | Exactly 1 execution transmitted to the broker; remaining threads receive idempotent cached result. | Verified |
+| **Concurrent multi-threaded submission (distinct IDs)** | All distinct orders executed concurrently with independent write-ahead locks. | Verified |
+
+Run the failure injection suite:
+```bash
+cargo test --test failure_injection
+```
+
+### 4. Live Integration Suite (Active MT5 Terminal)
 Tests executed directly against an active MetaTrader 5 terminal:
 ```bash
 # On Windows or via Wine:
 export MT5_PIPE_SECRET="your_pipe_secret"
 export MT5_DEMO_ACCOUNT=1   # Safety guard: required to allow order placement tests to run
-cargo test --target x86_64-pc-windows-gnu --test live_integration
+cargo test --target x86_64-pc-windows-gnu --test live_integration -- --test-threads=1
 ```
-*Note: The live test suite enforces a demo account check (`MT5_DEMO_ACCOUNT=1`), utilizes a thread-safe mutex, and uses an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending and market orders are automatically cancelled or closed in `Drop`. The suite also incorporates market-closure safety (handling retcode `10018`) and streaming timeouts to allow safe execution during weekends or market closures.*
+*Note: The live test suite enforces a demo account check (`MT5_DEMO_ACCOUNT=1`), utilizes an RAII `OrderGuard` pattern to ensure that even in the case of test panics, all placed pending and market orders are automatically cancelled or closed in `Drop`. The suite also incorporates market-closure safety (handling retcode `10018`), streaming timeouts, event drop counter verification, and positions/deals queries.*
 
 ---
 

@@ -1,60 +1,40 @@
-//! Asynchronous real-time tick and bar streaming via Tokio channels.
+//! Asynchronous real-time market data streaming and event dispatch.
 //!
-//! # Delivery semantics — read before relying on a stream
+//! # Streaming Architecture (Protocol v5+ Push Model)
 //!
-//! These streams are **best-effort, latest-quote polling feeds for monitoring, UI and signal
-//! generation. They are not a lossless tick recorder** and must not be used to reconstruct a
-//! complete tick history. (The bridge exposes only the latest quote via
-//! [`Mt5Client::symbol_tick`](crate::Mt5Client::symbol_tick) and bar history via
-//! [`Mt5Client::copy_rates`](crate::Mt5Client::copy_rates); it has no tick-history API, so use
-//! MetaTrader's own tick export if you need every tick.)
-//! Data can be lost at three independent layers:
+//! On protocol v5+ bridges, market data ticks, trade transaction updates, and depth-of-market (DOM)
+//! book events are pushed natively from MetaTrader 5 over a full-duplex named pipe into the
+//! client's [`EventBus`].
 //!
-//! 1. **Polling gaps (both policies, always).** The task polls the *latest* quote every
-//!    [`StreamConfig::poll_interval`] (default 50 ms). Every tick the terminal received
-//!    *between* two polls is never seen at all. Lowering the interval narrows the gap but never
-//!    closes it.
-//! 2. **Duplicate suppression.** A poll that returns a quote identical to the previous one
-//!    (same time, bid, ask, last, volume and flags) is not emitted.
-//! 3. **Backpressure** (only when the consumer is slower than the feed; see below).
+//! ## Push Streams ([`TickSubscription`])
 //!
-//! ## [`BackpressurePolicy::DropLatest`] (default)
+//! Subscribers obtain active push feeds via [`Mt5Client::subscribe_ticks`](crate::Mt5Client::subscribe_ticks)
+//! or [`Mt5Client::subscribe_ticks_with_mode`](crate::Mt5Client::subscribe_ticks_with_mode), choosing between two
+//! distinct delivery semantics:
 //!
-//! When the channel buffer is full the **newly polled tick is discarded** (the *newest* one),
-//! while everything already buffered is kept and delivered in order. Despite the name this is
-//! *not* "keep only the latest value": a lagging consumer keeps receiving the **oldest,
-//! stale** ticks first, then observes a gap, then resumes with fresh ticks once it catches up.
-//! Consequences:
+//! 1. **[`StreamMode::Latest`] (default for trading)**:
+//!    Optimized for low-latency strategy execution. If a consumer falls behind the broadcast buffer,
+//!    intermediate quotes are skipped so the consumer always receives the freshest available price.
+//!    Total skipped quotes are tracked via [`TickSubscription::dropped_ticks`].
+//! 2. **[`StreamMode::Lossless`] (auditing & recording)**:
+//!    Designed for tick capture and auditing. Consumers should use [`TickSubscription::recv_checked`]
+//!    which returns [`broadcast::error::RecvError::Lagged`] whenever buffer overrun occurs, allowing
+//!    the recorder to flag quote gaps explicitly. Calling [`TickSubscription::recv`] on a lossless
+//!    stream will log a warning and resume with the next available quote.
 //!
-//! * A slow consumer can act on prices that are up to `buffer_size × poll_interval` old
-//!   (about 51 s with the defaults of 1024 × 50 ms) even though newer quotes were fetched.
-//! * Dropped ticks are counted in a `warn!` log (first, then every 100th) but are **not**
-//!   reported to the consumer; a gap in `time_msc` is the only in-band signal.
-//! * A dropped tick still updates the duplicate-suppression state, so it is not re-offered.
+//! ## Legacy Polling Streams
 //!
-//! Choose it when **loss is preferable to blocking the poller**. If you need the freshest
-//! quote, drain the receiver (`while let Ok(t) = rx.try_recv() { latest = t }`) before acting.
+//! For environments or fallback configurations where native push is not enabled, the bridge provides
+//! polling-based feeds ([`stream_ticks`], [`stream_bars`]) backed by periodic queries.
 //!
-//! ## [`BackpressurePolicy::Block`]
-//!
-//! The polling task awaits free buffer space, so no *already polled* tick is discarded and
-//! delivery stays in order — but polling pauses while blocked, so ticks that arrive during the
-//! stall are **skipped** (layer 1 grows to the length of the stall). It trades data currency
-//! for completeness of what was polled; it does not make the feed lossless.
-//!
-//! ## Bar streams
-//!
-//! [`stream_bars`] always blocks on a full channel (no drop policy). It emits each **closed**
-//! bar once, does not emit the bar that was already closed when the stream started, and only
-//! ever looks at the most recently closed bar per poll — if two bars close within one poll
-//! interval (or while a send is blocked) the earlier one is skipped. Keep `poll_interval`
-//! well below the timeframe and consume promptly.
+//! * [`stream_bars`] emits newly closed bars per polling interval.
+//! * Polling ticks use [`StreamConfig::poll_interval`] (default 50 ms) with configurable
+//!   [`BackpressurePolicy`].
 //!
 //! ## Termination
 //!
-//! A stream ends (the receiver returns `None`) when the receiver is dropped, or after
-//! [`MAX_CONSECUTIVE_STREAM_ERRORS`] consecutive poll failures. Treat `None` as "feed lost",
-//! not "no more data", and re-establish it.
+//! Push streams terminate (`recv()` returns `None`) when the client disconnects or is dropped. Treat
+//! `None` as feed termination and reconnect.
 
 use crate::client::Mt5Client;
 use crate::types::{Bar, BookEvent, StreamMode, Tick, Timeframe, TradeEvent};
@@ -408,23 +388,25 @@ pub fn stream_ticks_with_config(
                             prev_flags = tick.flags;
 
                             match config.backpressure {
-                                BackpressurePolicy::DropLatest => match offer_drop_newest(&tx, tick) {
-                                    Offer::Delivered => {}
-                                    Offer::DroppedNewest => {
-                                        dropped_ticks += 1;
-                                        if dropped_ticks % 100 == 1 {
-                                            warn!(
-                                                symbol = %sym_owned,
-                                                dropped_ticks,
-                                                "Tick stream buffer full: discarded the newest tick (buffered backlog kept); consumer is lagging"
-                                            );
+                                BackpressurePolicy::DropLatest => {
+                                    match offer_drop_newest(&tx, tick) {
+                                        Offer::Delivered => {}
+                                        Offer::DroppedNewest => {
+                                            dropped_ticks += 1;
+                                            if dropped_ticks % 100 == 1 {
+                                                warn!(
+                                                    symbol = %sym_owned,
+                                                    dropped_ticks,
+                                                    "Tick stream buffer full: discarded the newest tick (buffered backlog kept); consumer is lagging"
+                                                );
+                                            }
+                                        }
+                                        Offer::ReceiverClosed => {
+                                            debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
+                                            break;
                                         }
                                     }
-                                    Offer::ReceiverClosed => {
-                                        debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
-                                        break;
-                                    }
-                                },
+                                }
                                 BackpressurePolicy::Block => {
                                     if tx.send(tick).await.is_err() {
                                         debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
@@ -606,8 +588,14 @@ mod tests {
         assert_eq!(offer_drop_newest(&tx, tick(5)), Offer::DroppedNewest);
         assert_eq!(offer_drop_newest(&tx, tick(6)), Offer::DroppedNewest);
 
-        let received: Vec<i64> = std::iter::from_fn(|| rx.try_recv().ok()).map(|t| t.time_msc).collect();
-        assert_eq!(received, vec![1, 2, 3, 4], "consumer sees the stale prefix, never 5 or 6");
+        let received: Vec<i64> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|t| t.time_msc)
+            .collect();
+        assert_eq!(
+            received,
+            vec![1, 2, 3, 4],
+            "consumer sees the stale prefix, never 5 or 6"
+        );
 
         // once drained the feed resumes, leaving a gap (5, 6) as the only in-band signal
         assert_eq!(offer_drop_newest(&tx, tick(7)), Offer::Delivered);

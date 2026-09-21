@@ -356,7 +356,8 @@ bool SendEvent(long h, uint event_type, const uchar &data[], uint data_len) {
 
     if (!PipeWriteExact(h, hdr, 12)) return false;
     if (data_len > 0 && !PipeWriteExact(h, data, data_len)) return false;
-    FlushFileBuffers(h);
+    // Note: FlushFileBuffers removed from per-event path to avoid blocking MT5 event loop.
+    // Flushes are performed once per batch in FlushTickQueue/FlushTradeQueue/OnBookEvent.
     return true;
 }
 
@@ -1743,14 +1744,20 @@ struct QueuedTickEvent {
 
 #define TICK_QUEUE_CAPACITY 2048
 QueuedTickEvent g_tick_queue[TICK_QUEUE_CAPACITY];
-int g_tick_queue_head  = 0;
-int g_tick_queue_tail  = 0;
-int g_tick_queue_count = 0;
+int g_tick_queue_head       = 0;
+int g_tick_queue_tail       = 0;
+int g_tick_queue_count      = 0;
+ulong g_ticks_dropped_total = 0;
 
 void EnqueueTick(const string sym, const MqlTick &tick) {
     if (g_tick_queue_count >= TICK_QUEUE_CAPACITY) {
         g_tick_queue_tail = (g_tick_queue_tail + 1) % TICK_QUEUE_CAPACITY;
         g_tick_queue_count--;
+        g_ticks_dropped_total++;
+        if (g_ticks_dropped_total % 100 == 1) {
+            Print("MT5Bridge: warning — tick queue full (capacity=", TICK_QUEUE_CAPACITY,
+                  "), dropped oldest tick (total dropped=", g_ticks_dropped_total, ")");
+        }
     }
     g_tick_queue[g_tick_queue_head].symbol   = sym;
     g_tick_queue[g_tick_queue_head].time_msc = tick.time_msc;
@@ -1788,6 +1795,7 @@ void FlushTickQueue() {
     if (g_client == INVALID_HANDLE || !g_authenticated || g_tick_queue_count == 0)
         return;
 
+    int flushed = 0;
     while (g_tick_queue_count > 0) {
         QueuedTickEvent qe = g_tick_queue[g_tick_queue_tail];
         g_tick_queue_tail = (g_tick_queue_tail + 1) % TICK_QUEUE_CAPACITY;
@@ -1806,6 +1814,10 @@ void FlushTickQueue() {
             ResetPipeServer("failed to write tick event to pipe");
             return;
         }
+        flushed++;
+    }
+    if (flushed > 0) {
+        FlushFileBuffers(g_client);
     }
 }
 
@@ -1840,9 +1852,10 @@ struct QueuedTradeEvent {
 
 #define TRADE_QUEUE_CAPACITY 512
 QueuedTradeEvent g_trade_queue[TRADE_QUEUE_CAPACITY];
-int g_trade_queue_head  = 0;
-int g_trade_queue_tail  = 0;
-int g_trade_queue_count = 0;
+int g_trade_queue_head       = 0;
+int g_trade_queue_tail       = 0;
+int g_trade_queue_count      = 0;
+ulong g_trades_dropped_total = 0;
 
 void EnqueueTrade(ulong deal, ulong order, ulong pos, long time, int trans_type,
                   int otype, double price, double vol, double sl, double tp,
@@ -1850,6 +1863,9 @@ void EnqueueTrade(ulong deal, ulong order, ulong pos, long time, int trans_type,
     if (g_trade_queue_count >= TRADE_QUEUE_CAPACITY) {
         g_trade_queue_tail = (g_trade_queue_tail + 1) % TRADE_QUEUE_CAPACITY;
         g_trade_queue_count--;
+        g_trades_dropped_total++;
+        Print("MT5Bridge: CRITICAL — trade event queue full (capacity=", TRADE_QUEUE_CAPACITY,
+              "), dropped oldest trade event (total dropped=", g_trades_dropped_total, ")");
     }
     g_trade_queue[g_trade_queue_head].deal       = deal;
     g_trade_queue[g_trade_queue_head].order      = order;
@@ -1871,6 +1887,7 @@ void FlushTradeQueue() {
     if (g_client == INVALID_HANDLE || !g_authenticated || g_trade_queue_count == 0)
         return;
 
+    int flushed = 0;
     while (g_trade_queue_count > 0) {
         QueuedTradeEvent qe = g_trade_queue[g_trade_queue_tail];
         g_trade_queue_tail = (g_trade_queue_tail + 1) % TRADE_QUEUE_CAPACITY;
@@ -1894,6 +1911,10 @@ void FlushTradeQueue() {
             ResetPipeServer("failed to write trade event to pipe");
             return;
         }
+        flushed++;
+    }
+    if (flushed > 0) {
+        FlushFileBuffers(g_client);
     }
 }
 
@@ -2168,10 +2189,18 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
     if (!g_running || g_client == INVALID_HANDLE || !g_authenticated || !g_trade_subscription)
         return;
 
+    string cmt = request.comment;
+    if (StringLen(cmt) == 0 && trans.deal > 0 && HistoryDealSelect(trans.deal)) {
+        cmt = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+    }
+    if (StringLen(cmt) == 0 && trans.order > 0 && HistoryOrderSelect(trans.order)) {
+        cmt = HistoryOrderGetString(trans.order, ORDER_COMMENT);
+    }
+
     EnqueueTrade(trans.deal, trans.order, trans.position, (long)TimeCurrent(),
                  (int)trans.type, (int)trans.order_type, trans.price,
                  trans.volume, trans.price_sl, trans.price_tp,
-                 trans.symbol, "");
+                 trans.symbol, cmt);
 }
 
 // Low-latency event-driven depth-of-market handler (protocol v5+ push model)
@@ -2200,6 +2229,9 @@ void OnBookEvent(const string &symbol) {
             PackF64(payload, book[i].price);
             PackF64(payload, (double)book[i].volume);
             SendEvent(g_client, EVENT_BOOK, payload, 64);
+        }
+        if (book_count > 0) {
+            FlushFileBuffers(g_client);
         }
     }
 }

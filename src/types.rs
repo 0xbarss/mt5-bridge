@@ -427,8 +427,14 @@ impl Tick {
     }
 
     pub fn from_event(raw: Mt5TickEvent) -> Self {
-        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
-        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
+        let sym_len = raw
+            .symbol
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len])
+            .trim()
+            .to_string();
         Self {
             symbol,
             time_msc: raw.time_msc,
@@ -481,10 +487,22 @@ pub struct TradeEvent {
 
 impl TradeEvent {
     pub fn from_raw(raw: Mt5TradeEvent) -> Self {
-        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
-        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
-        let cmt_len = raw.comment.iter().position(|&b| b == 0).unwrap_or(raw.comment.len());
-        let comment = String::from_utf8_lossy(&raw.comment[..cmt_len]).trim().to_string();
+        let sym_len = raw
+            .symbol
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len])
+            .trim()
+            .to_string();
+        let cmt_len = raw
+            .comment
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw.comment.len());
+        let comment = String::from_utf8_lossy(&raw.comment[..cmt_len])
+            .trim()
+            .to_string();
         let order_type = match raw.order_type {
             0 => OrderType::Buy,
             1 => OrderType::Sell,
@@ -523,8 +541,14 @@ pub struct BookEvent {
 
 impl BookEvent {
     pub fn from_raw(raw: Mt5BookEvent) -> Self {
-        let sym_len = raw.symbol.iter().position(|&b| b == 0).unwrap_or(raw.symbol.len());
-        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len]).trim().to_string();
+        let sym_len = raw
+            .symbol
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw.symbol.len());
+        let symbol = String::from_utf8_lossy(&raw.symbol[..sym_len])
+            .trim()
+            .to_string();
         Self {
             symbol,
             time_msc: raw.time_msc,
@@ -1536,6 +1560,44 @@ impl TrackedOrder {
                 self.state = OrderState::Rejected;
                 self.error_message = Some(res.description().to_string());
             }
+        }
+    }
+
+    /// Update order state from an asynchronous broker `TradeEvent` (protocol v5+ push model).
+    pub fn update_from_trade_event(&mut self, ev: &TradeEvent) {
+        self.updated_at = chrono::Utc::now().timestamp();
+        if ev.order > 0 && self.order_ticket == 0 {
+            self.order_ticket = ev.order;
+        }
+        if ev.position > 0 && self.position_ticket == 0 {
+            self.position_ticket = ev.position;
+        }
+        if ev.deal > 0 && !self.deal_tickets.contains(&ev.deal) {
+            self.deal_tickets.push(ev.deal);
+            self.deal_ticket = ev.deal;
+        }
+
+        // trans_type: 2 = TRADE_TRANSACTION_DEAL_ADD
+        if ev.deal > 0 || ev.trans_type == 2 {
+            let new_fill = (self.filled_volume + ev.volume).min(self.requested_volume);
+            if self.filled_volume > 0.0 && ev.price > 0.0 {
+                let total_cost = (self.filled_volume * self.average_price) + (ev.volume * ev.price);
+                self.average_price = total_cost / (self.filled_volume + ev.volume);
+            } else if ev.price > 0.0 {
+                self.average_price = ev.price;
+            }
+            self.filled_volume = new_fill;
+            self.remaining_volume = (self.requested_volume - self.filled_volume).max(0.0);
+
+            if self.remaining_volume < 1e-6 {
+                self.state = OrderState::Filled;
+            } else {
+                self.state = OrderState::PartiallyFilled;
+            }
+            self.reset_absence();
+        } else if self.state == OrderState::Submitting || self.state == OrderState::Created {
+            self.state = OrderState::Accepted;
+            self.reset_absence();
         }
     }
 

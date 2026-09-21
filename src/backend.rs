@@ -24,6 +24,13 @@ pub trait TradingBackend {
     /// Close a position, verifying ownership by magic number.
     fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>;
 
+    /// Close an open market position by ticket, verifying strategy magic number ownership.
+    ///
+    /// This is an ergonomic alias for [`order_close_with_magic`](Self::order_close_with_magic).
+    fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
+        self.order_close_with_magic(ticket, magic)
+    }
+
     /// Modify SL/TP of a position or pending order, verifying ownership by magic number.
     fn order_modify_with_magic(
         &self,

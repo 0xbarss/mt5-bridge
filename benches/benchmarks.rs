@@ -19,7 +19,10 @@ struct DummyBackend {
 
 impl TradingBackend for DummyBackend {
     fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
-        let t = self.next_ticket.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let t = self
+            .next_ticket
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         Ok(TradeResult {
             retcode: 10009,
             deal: t,
@@ -99,7 +102,10 @@ fn bench<F: FnMut()>(name: &str, iterations: u64, mut f: F) -> (Duration, f64) {
 
 fn main() {
     println!("\n=== MT5 Bridge Latency & Throughput Benchmark Suite ===\n");
-    println!("{:<45} | {:>13} | {:>15}", "Benchmark", "Avg Latency", "Throughput");
+    println!(
+        "{:<45} | {:>13} | {:>15}",
+        "Benchmark", "Avg Latency", "Throughput"
+    );
     println!("{:-<45}-+-{:-<13}-+-{:-<15}", "", "", "");
 
     // 1. Tick arithmetic
@@ -108,7 +114,11 @@ fn main() {
     });
 
     bench("tick_arithmetic (ticks_to_price)", 500_000, || {
-        black_box(ticks_to_price(black_box(108543), black_box(0.00001), black_box(5)));
+        black_box(ticks_to_price(
+            black_box(108543),
+            black_box(0.00001),
+            black_box(5),
+        ));
     });
 
     // 2. Wire token calculation (Crockford base32 hash)
@@ -171,9 +181,13 @@ fn main() {
         symbol: raw_deal.symbol,
         comment: raw_deal.comment,
     };
-    bench("position_from_raw (148-byte wire decoding)", 500_000, || {
-        black_box(Position::from_raw(black_box(raw_pos)));
-    });
+    bench(
+        "position_from_raw (148-byte wire decoding)",
+        500_000,
+        || {
+            black_box(Position::from_raw(black_box(raw_pos)));
+        },
+    );
 
     // 5. Asynchronous push event wire decoding (Protocol v5+)
     let raw_tick = Mt5TickEvent {
@@ -185,9 +199,13 @@ fn main() {
         volume: 25,
         flags: 6,
     };
-    bench("tick_from_event (76-byte push tick decoding)", 500_000, || {
-        black_box(Tick::from_event(black_box(raw_tick)));
-    });
+    bench(
+        "tick_from_event (76-byte push tick decoding)",
+        500_000,
+        || {
+            black_box(Tick::from_event(black_box(raw_tick)));
+        },
+    );
 
     let raw_trade = Mt5TradeEvent {
         deal: 10101,
@@ -203,9 +221,13 @@ fn main() {
         symbol: raw_deal.symbol,
         comment: raw_deal.comment,
     };
-    bench("trade_event_from_raw (136-byte push trade decoding)", 500_000, || {
-        black_box(TradeEvent::from_raw(black_box(raw_trade)));
-    });
+    bench(
+        "trade_event_from_raw (136-byte push trade decoding)",
+        500_000,
+        || {
+            black_box(TradeEvent::from_raw(black_box(raw_trade)));
+        },
+    );
 
     let raw_book = Mt5BookEvent {
         symbol: raw_deal.symbol,
@@ -215,39 +237,60 @@ fn main() {
         price: 1.08515,
         volume: 100.0,
     };
-    bench("book_event_from_raw (64-byte push DOM decoding)", 500_000, || {
-        black_box(BookEvent::from_raw(black_box(raw_book)));
-    });
+    bench(
+        "book_event_from_raw (64-byte push DOM decoding)",
+        500_000,
+        || {
+            black_box(BookEvent::from_raw(black_box(raw_book)));
+        },
+    );
 
     // 6. Push EventBus dispatch & fanout (Tokio broadcast)
     let bus = EventBus::new(1024);
     let mut rx_tick = bus.subscribe_ticks("EURUSD");
     let push_tick = Tick::from_event(raw_tick);
-    bench("event_bus_dispatch_tick (broadcast fanout)", 200_000, || {
-        bus.dispatch_tick(push_tick.clone());
-        let _ = black_box(rx_tick.try_recv());
-    });
+    bench(
+        "event_bus_dispatch_tick (broadcast fanout)",
+        200_000,
+        || {
+            bus.dispatch_tick(push_tick.clone());
+            let _ = black_box(rx_tick.try_recv());
+        },
+    );
 
     let mut rx_trade = bus.subscribe_trade();
     let push_trade = TradeEvent::from_raw(raw_trade);
-    bench("event_bus_dispatch_trade (broadcast fanout)", 200_000, || {
-        bus.dispatch_trade(push_trade.clone());
-        let _ = black_box(rx_trade.try_recv());
-    });
+    bench(
+        "event_bus_dispatch_trade (broadcast fanout)",
+        200_000,
+        || {
+            bus.dispatch_trade(push_trade.clone());
+            let _ = black_box(rx_trade.try_recv());
+        },
+    );
 
     let rx_sub = bus.subscribe_ticks("EURUSD");
     let mut tick_sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx_sub);
-    bench("tick_subscription_try_recv (StreamMode::Latest)", 200_000, || {
-        bus.dispatch_tick(push_tick.clone());
-        let _ = black_box(tick_sub.try_recv());
-    });
+    bench(
+        "tick_subscription_try_recv (StreamMode::Latest)",
+        200_000,
+        || {
+            bus.dispatch_tick(push_tick.clone());
+            let _ = black_box(tick_sub.try_recv());
+        },
+    );
 
     let rx_sub_lossless = bus.subscribe_ticks("EURUSD");
-    let mut tick_sub_lossless = TickSubscription::new("EURUSD", StreamMode::Lossless, rx_sub_lossless);
-    bench("tick_subscription_try_recv (StreamMode::Lossless)", 200_000, || {
-        bus.dispatch_tick(push_tick.clone());
-        let _ = black_box(tick_sub_lossless.try_recv());
-    });
+    let mut tick_sub_lossless =
+        TickSubscription::new("EURUSD", StreamMode::Lossless, rx_sub_lossless);
+    bench(
+        "tick_subscription_try_recv (StreamMode::Lossless)",
+        200_000,
+        || {
+            bus.dispatch_tick(push_tick.clone());
+            let _ = black_box(tick_sub_lossless.try_recv());
+        },
+    );
 
     // 7. OrderManager idempotency lookup & submission (in-memory backend)
     let backend = DummyBackend::default();

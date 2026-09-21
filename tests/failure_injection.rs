@@ -27,7 +27,9 @@ fn is_unknown(e: &Mt5Error) -> bool {
 fn normal_market_order_is_filled_and_journaled_in_memory() {
     let broker = MockBroker::new();
     let mut mgr = manager();
-    let t = mgr.submit_order(&broker, buy("EURUSD", 0.5, "n-1")).unwrap();
+    let t = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "n-1"))
+        .unwrap();
     assert_eq!(t.state, OrderState::Filled);
     assert_eq!(t.filled_volume, 0.5);
     assert!(t.position_ticket > 0 && t.deal_ticket > 0);
@@ -40,8 +42,13 @@ fn broker_rejection_is_recorded_rejected() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::Reject(10019)); // no money
     let mut mgr = manager();
-    let err = mgr.submit_order(&broker, buy("EURUSD", 0.5, "rej-1")).unwrap_err();
-    assert!(matches!(err, Mt5Error::OrderSendFailed { retcode: 10019, .. }));
+    let err = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "rej-1"))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Mt5Error::OrderSendFailed { retcode: 10019, .. }
+    ));
     assert_eq!(mgr.get_order("rej-1").unwrap().state, OrderState::Rejected);
     assert_eq!(broker.executions(), 0);
 }
@@ -51,10 +58,15 @@ fn transmission_failure_is_rejected_because_it_provably_never_left() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::TransmissionFailure);
     let mut mgr = manager();
-    let err = mgr.submit_order(&broker, buy("EURUSD", 0.5, "tx-1")).unwrap_err();
+    let err = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "tx-1"))
+        .unwrap_err();
     assert!(matches!(err, Mt5Error::TransmissionFailed(_)));
     assert_eq!(mgr.get_order("tx-1").unwrap().state, OrderState::Rejected);
-    assert!(mgr.unresolved_orders().is_empty(), "provable non-send must not block trading");
+    assert!(
+        mgr.unresolved_orders().is_empty(),
+        "provable non-send must not block trading"
+    );
 }
 
 #[test]
@@ -62,7 +74,9 @@ fn partial_fill_result_is_partially_filled() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::PartialFill(0.4));
     let mut mgr = manager();
-    let t = mgr.submit_order(&broker, buy("EURUSD", 1.0, "pf-1")).unwrap();
+    let t = mgr
+        .submit_order(&broker, buy("EURUSD", 1.0, "pf-1"))
+        .unwrap();
     assert_eq!(t.state, OrderState::PartiallyFilled);
     assert!((t.filled_volume - 0.4).abs() < 1e-12);
     assert!((t.remaining_volume - 0.6).abs() < 1e-12);
@@ -80,11 +94,16 @@ fn invalid_requests_never_touch_state_or_the_broker() {
         OrderRequest::buy("EURUSD", 0.1).client_order_id("has\nnewline"),
         OrderRequest::buy("EURUSD", 0.1).client_order_id("x".repeat(129)),
         OrderRequest::buy("EURUSD", 0.1).comment("cid:spoofed"),
-        OrderRequest::buy("EURUSD", 0.1).client_order_id("ok").comment("nul\0inside"),
+        OrderRequest::buy("EURUSD", 0.1)
+            .client_order_id("ok")
+            .comment("nul\0inside"),
     ] {
         assert!(mgr.submit_order(&broker, bad).is_err());
     }
-    assert!(mgr.tracked_orders().is_empty(), "validation failures must not create tracked orders");
+    assert!(
+        mgr.tracked_orders().is_empty(),
+        "validation failures must not create tracked orders"
+    );
     assert_eq!(broker.send_calls(), 0);
 }
 
@@ -100,8 +119,12 @@ fn ids_sharing_a_long_prefix_get_distinct_wire_identities_and_both_execute() {
     let b = "strategy-alpha-20260920-123456789-B";
     assert_eq!(&a[..27], &b[..27]);
     assert_ne!(
-        OrderRequest::buy("EURUSD", 0.1).client_order_id(a).effective_comment(),
-        OrderRequest::buy("EURUSD", 0.1).client_order_id(b).effective_comment()
+        OrderRequest::buy("EURUSD", 0.1)
+            .client_order_id(a)
+            .effective_comment(),
+        OrderRequest::buy("EURUSD", 0.1)
+            .client_order_id(b)
+            .effective_comment()
     );
 
     let broker = MockBroker::new();
@@ -109,8 +132,15 @@ fn ids_sharing_a_long_prefix_get_distinct_wire_identities_and_both_execute() {
     let ta = mgr.submit_order(&broker, buy("EURUSD", 0.1, a)).unwrap();
     let tb = mgr.submit_order(&broker, buy("EURUSD", 0.2, b)).unwrap();
     assert_ne!(ta.position_ticket, tb.position_ticket);
-    assert_eq!(broker.executions(), 2, "second order must not be swallowed as a 'duplicate'");
-    assert!((tb.filled_volume - 0.2).abs() < 1e-12, "second order must report its OWN fill");
+    assert_eq!(
+        broker.executions(),
+        2,
+        "second order must not be swallowed as a 'duplicate'"
+    );
+    assert!(
+        (tb.filled_volume - 0.2).abs() < 1e-12,
+        "second order must report its OWN fill"
+    );
 }
 
 #[test]
@@ -129,11 +159,19 @@ fn free_text_comment_is_never_an_idempotency_key() {
 fn reusing_a_client_order_id_for_a_different_request_is_an_error_not_a_silent_replay() {
     let broker = MockBroker::new();
     let mut mgr = manager();
-    mgr.submit_order(&broker, buy("EURUSD", 0.1, "same-id")).unwrap();
-    let err = mgr.submit_order(&broker, buy("GBPUSD", 5.0, "same-id")).unwrap_err();
-    assert!(matches!(err, Mt5Error::ClientOrderIdConflict { .. }), "got {err:?}");
+    mgr.submit_order(&broker, buy("EURUSD", 0.1, "same-id"))
+        .unwrap();
+    let err = mgr
+        .submit_order(&broker, buy("GBPUSD", 5.0, "same-id"))
+        .unwrap_err();
+    assert!(
+        matches!(err, Mt5Error::ClientOrderIdConflict { .. }),
+        "got {err:?}"
+    );
     // identical replay is still a quiet no-op
-    let again = mgr.submit_order(&broker, buy("EURUSD", 0.1, "same-id")).unwrap();
+    let again = mgr
+        .submit_order(&broker, buy("EURUSD", 0.1, "same-id"))
+        .unwrap();
     assert_eq!(again.state, OrderState::Filled);
     assert_eq!(broker.executions(), 1);
 }
@@ -142,10 +180,19 @@ fn reusing_a_client_order_id_for_a_different_request_is_an_error_not_a_silent_re
 fn wire_id_is_stable_fixed_width_and_pinned() {
     // These vectors are a compatibility contract: changing wire_id() orphans in-flight orders
     // across an upgrade. If this test fails, you changed the wire format — bump PROTOCOL_VERSION.
-    for id in ["a", "abc-123", "ord-1", "strategy-alpha-20260920-123456789-A", "é", ""] {
+    for id in [
+        "a",
+        "abc-123",
+        "ord-1",
+        "strategy-alpha-20260920-123456789-A",
+        "é",
+        "",
+    ] {
         let w = wire_id(id);
         assert_eq!(w.len(), WIRE_ID_LEN);
-        assert!(w.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)));
+        assert!(w
+            .bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)));
         assert_eq!(w, wire_id(id), "must be deterministic");
     }
     assert_eq!(wire_id("abc-123"), PINNED_ABC_123);
@@ -176,10 +223,18 @@ fn parse_wire_id_accepts_only_well_formed_tokens() {
     let w = wire_id("x");
     assert_eq!(parse_wire_id(&format!("cid:{w}")), Some(w.as_str()));
     assert_eq!(parse_wire_id(&format!("cid:{w}:scalp")), Some(w.as_str()));
-    assert_eq!(parse_wire_id(&format!("cid:{w}[sl 1.0850]")), Some(w.as_str()), "broker suffix");
+    assert_eq!(
+        parse_wire_id(&format!("cid:{w}[sl 1.0850]")),
+        Some(w.as_str()),
+        "broker suffix"
+    );
     assert_eq!(parse_wire_id("cid:tooshort"), None);
     assert_eq!(parse_wire_id("scalp"), None);
-    assert_eq!(parse_wire_id(&format!("cid:{w}X")), None, "token must not run into more alphanumerics");
+    assert_eq!(
+        parse_wire_id(&format!("cid:{w}X")),
+        None,
+        "token must not run into more alphanumerics"
+    );
     assert_eq!(parse_wire_id(&format!("xcid:{w}")), None);
     assert_eq!(parse_wire_id("cid:lowercase-not-a-token"), None);
     assert_eq!(parse_wire_id(""), None);
@@ -197,7 +252,9 @@ fn non_ascii_ids_and_comments_never_panic_at_any_truncation_boundary() {
             let cmt = format!("{}{}", "b".repeat(pad), g.repeat(12));
             for req in [
                 OrderRequest::buy("EURUSD", 0.1).client_order_id(cid.clone()),
-                OrderRequest::buy("EURUSD", 0.1).client_order_id(cid.clone()).comment(cmt.clone()),
+                OrderRequest::buy("EURUSD", 0.1)
+                    .client_order_id(cid.clone())
+                    .comment(cmt.clone()),
                 OrderRequest::buy("EURUSD", 0.1).comment(cmt.clone()),
             ] {
                 let eff = req.effective_comment(); // must not panic
@@ -212,7 +269,9 @@ fn non_ascii_ids_and_comments_never_panic_at_any_truncation_boundary() {
     let t = mgr
         .submit_order(
             &broker,
-            OrderRequest::buy("EURUSD", 0.1).client_order_id("ID-日本語-🚀-é").comment("コメント日本語コメント日本語"),
+            OrderRequest::buy("EURUSD", 0.1)
+                .client_order_id("ID-日本語-🚀-é")
+                .comment("コメント日本語コメント日本語"),
         )
         .unwrap();
     assert_eq!(t.state, OrderState::Filled);
@@ -225,7 +284,13 @@ fn non_ascii_ids_and_comments_never_panic_at_any_truncation_boundary() {
 fn generated_client_order_ids_are_unique_across_threads() {
     use std::collections::HashSet;
     let handles: Vec<_> = (0..8)
-        .map(|_| std::thread::spawn(|| (0..2000).map(|_| OrderManager::generate_client_order_id()).collect::<Vec<_>>()))
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..2000)
+                    .map(|_| OrderManager::generate_client_order_id())
+                    .collect::<Vec<_>>()
+            })
+        })
         .collect();
     let mut all = HashSet::new();
     let mut total = 0;
@@ -251,7 +316,11 @@ fn tracked_order_state_exported_by_older_versions_still_deserializes() {
     assert!(t.wire_id.is_empty() && t.deal_tickets.is_empty() && t.absent_observations == 0);
     let mut mgr = manager();
     mgr.restore_orders(vec![t]);
-    assert_eq!(mgr.get_order("legacy-1").unwrap().wire_id, wire_id("legacy-1"), "wire id backfilled");
+    assert_eq!(
+        mgr.get_order("legacy-1").unwrap().wire_id,
+        wire_id("legacy-1"),
+        "wire id backfilled"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -264,7 +333,9 @@ fn response_lost_after_execution_is_unknown_then_reconciled_from_the_live_positi
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     let mut mgr = manager();
 
-    let err = mgr.submit_order(&broker, buy("EURUSD", 0.5, "lost-1")).unwrap_err();
+    let err = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "lost-1"))
+        .unwrap_err();
     assert!(is_unknown(&err));
     assert_eq!(mgr.get_order("lost-1").unwrap().state, OrderState::Unknown);
     assert_eq!(mgr.lifecycle(), LifecycleState::Degraded);
@@ -286,7 +357,10 @@ fn response_lost_before_execution_resolves_to_rejected_only_after_confirmed_abse
     broker.push_fault(Fault::LoseBeforeExecution);
     let mut mgr = manager();
 
-    assert!(is_unknown(&mgr.submit_order(&broker, buy("EURUSD", 0.5, "lost-2")).unwrap_err()));
+    assert!(is_unknown(
+        &mgr.submit_order(&broker, buy("EURUSD", 0.5, "lost-2"))
+            .unwrap_err()
+    ));
     assert_eq!(broker.executions(), 0);
 
     let report = mgr.reconcile(&broker).unwrap();
@@ -303,19 +377,37 @@ fn delayed_broker_visibility_keeps_the_order_unknown_instead_of_misclassifying_i
     broker.set_visibility_delay(2);
     let mut mgr = OrderManager::with_policy(
         MAGIC,
-        SafetyPolicy { min_absent_observations: 4, min_absent_secs: 0, ..Default::default() },
+        SafetyPolicy {
+            min_absent_observations: 4,
+            min_absent_secs: 0,
+            ..Default::default()
+        },
     );
-    assert!(is_unknown(&mgr.submit_order(&broker, buy("EURUSD", 0.5, "slow-1")).unwrap_err()));
+    assert!(is_unknown(
+        &mgr.submit_order(&broker, buy("EURUSD", 0.5, "slow-1"))
+            .unwrap_err()
+    ));
 
     for _ in 0..2 {
         let r = mgr.reconcile(&broker).unwrap();
-        assert_eq!(r.unresolved_orders.len(), 1, "not visible yet → still Unknown, not Rejected");
+        assert_eq!(
+            r.unresolved_orders.len(),
+            1,
+            "not visible yet → still Unknown, not Rejected"
+        );
         assert_eq!(mgr.get_order("slow-1").unwrap().state, OrderState::Unknown);
     }
     let r = mgr.reconcile(&broker).unwrap();
     assert_eq!(r.reconciled_orders.len(), 1);
-    assert_eq!(mgr.get_order("slow-1").unwrap().state, OrderState::Reconciled);
-    assert_eq!(mgr.get_order("slow-1").unwrap().absent_observations, 0, "absence counter reset when found");
+    assert_eq!(
+        mgr.get_order("slow-1").unwrap().state,
+        OrderState::Reconciled
+    );
+    assert_eq!(
+        mgr.get_order("slow-1").unwrap().absent_observations,
+        0,
+        "absence counter reset when found"
+    );
 }
 
 #[test]
@@ -329,7 +421,11 @@ fn single_shot_policy_misclassifies_delayed_visibility_which_is_why_it_is_not_th
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "slow-2"));
     mgr.reconcile(&broker).unwrap();
     assert_eq!(mgr.get_order("slow-2").unwrap().state, OrderState::Rejected);
-    assert_eq!(broker.executions(), 1, "…while a live position exists on the broker");
+    assert_eq!(
+        broker.executions(),
+        1,
+        "…while a live position exists on the broker"
+    );
 }
 
 #[test]
@@ -339,7 +435,10 @@ fn default_policy_needs_multiple_observations_and_elapsed_time_before_rejecting(
     broker.push_fault(Fault::LoseBeforeExecution);
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "grace-1"));
     let t0 = chrono::Utc::now().timestamp();
-    let snap = || BrokerSnapshot { deals: Some(vec![]), ..Default::default() };
+    let snap = || BrokerSnapshot {
+        deals: Some(vec![]),
+        ..Default::default()
+    };
 
     // Three quick observations are not enough without elapsed time…
     for i in 0..3 {
@@ -350,7 +449,10 @@ fn default_policy_needs_multiple_observations_and_elapsed_time_before_rejecting(
     // …and elapsed time alone is not enough without observations (this is the 4th, 31 s in).
     let r = mgr.reconcile_snapshot_at(snap(), t0 + 31);
     assert_eq!(r.absent_orders.len(), 1);
-    assert_eq!(mgr.get_order("grace-1").unwrap().state, OrderState::Rejected);
+    assert_eq!(
+        mgr.get_order("grace-1").unwrap().state,
+        OrderState::Rejected
+    );
 }
 
 #[test]
@@ -365,7 +467,10 @@ fn absence_without_deal_history_never_rejects_under_default_policy() {
         assert!(!r.deal_history_available);
         assert_eq!(r.unresolved_orders.len(), 1);
     }
-    assert_eq!(mgr.get_order("nohist-1").unwrap().state, OrderState::Unknown);
+    assert_eq!(
+        mgr.get_order("nohist-1").unwrap().state,
+        OrderState::Unknown
+    );
 }
 
 #[test]
@@ -377,11 +482,20 @@ fn backend_without_history_support_leaves_absent_orders_unknown() {
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "nohist-2"));
     let r = mgr.reconcile(&broker).unwrap();
     assert!(!r.deal_history_available);
-    assert_eq!(mgr.get_order("nohist-2").unwrap().state, OrderState::Unknown);
+    assert_eq!(
+        mgr.get_order("nohist-2").unwrap().state,
+        OrderState::Unknown
+    );
     // Explicit opt-out for users of history-less setups:
-    mgr.set_policy(SafetyPolicy { require_deal_history: false, ..instant_policy() });
+    mgr.set_policy(SafetyPolicy {
+        require_deal_history: false,
+        ..instant_policy()
+    });
     mgr.reconcile(&broker).unwrap();
-    assert_eq!(mgr.get_order("nohist-2").unwrap().state, OrderState::Rejected);
+    assert_eq!(
+        mgr.get_order("nohist-2").unwrap().state,
+        OrderState::Rejected
+    );
 }
 
 #[test]
@@ -391,7 +505,13 @@ fn absence_counter_resets_when_the_order_is_seen_and_survives_persistence() {
     broker.push_fault(Fault::LoseBeforeExecution);
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "ctr-1"));
     let t0 = chrono::Utc::now().timestamp();
-    mgr.reconcile_snapshot_at(BrokerSnapshot { deals: Some(vec![]), ..Default::default() }, t0);
+    mgr.reconcile_snapshot_at(
+        BrokerSnapshot {
+            deals: Some(vec![]),
+            ..Default::default()
+        },
+        t0,
+    );
     assert_eq!(mgr.get_order("ctr-1").unwrap().absent_observations, 1);
 
     let mut restored = OrderManager::new(MAGIC);
@@ -446,13 +566,28 @@ fn two_partial_fills_are_reconstructed_from_deals_even_after_the_position_closed
 
     let report = mgr.reconcile(&broker).unwrap();
     let t = mgr.get_order("split-1").unwrap();
-    assert_eq!(t.state, OrderState::Reconciled, "mismatches: {:?}", t.mismatches);
+    assert_eq!(
+        t.state,
+        OrderState::Reconciled,
+        "mismatches: {:?}",
+        t.mismatches
+    );
     assert!((t.filled_volume - 1.0).abs() < 1e-12);
-    assert!((t.average_price - (0.4 * 1.0850 + 0.6 * 1.0860)).abs() < 1e-12, "volume-weighted");
-    assert_eq!(t.deal_tickets, vec![9001, 9002], "the closing deal must not be attributed");
+    assert!(
+        (t.average_price - (0.4 * 1.0850 + 0.6 * 1.0860)).abs() < 1e-12,
+        "volume-weighted"
+    );
+    assert_eq!(
+        t.deal_tickets,
+        vec![9001, 9002],
+        "the closing deal must not be attributed"
+    );
     assert_eq!(t.position_ticket, 7001);
     assert!(report.deal_history_available && report.is_clean());
-    assert!(broker.all_positions().is_empty(), "no live position was needed");
+    assert!(
+        broker.all_positions().is_empty(),
+        "no live position was needed"
+    );
 }
 
 #[test]
@@ -462,8 +597,14 @@ fn deals_covering_only_part_of_the_request_are_flagged_as_a_volume_mismatch() {
     let report = mgr.reconcile(&broker).unwrap();
     let t = mgr.get_order("short-1").unwrap();
     assert_eq!(t.state, OrderState::Mismatched);
-    assert!(t.mismatches.iter().any(|m| m.kind == MismatchKind::Volume && m.actual == "0.4"));
-    assert!((t.filled_volume - 0.4).abs() < 1e-12, "real exposure is still recorded");
+    assert!(t
+        .mismatches
+        .iter()
+        .any(|m| m.kind == MismatchKind::Volume && m.actual == "0.4"));
+    assert!(
+        (t.filled_volume - 0.4).abs() < 1e-12,
+        "real exposure is still recorded"
+    );
     assert_eq!(report.mismatched_orders.len(), 1);
     assert!(!report.is_clean());
 }
@@ -473,7 +614,8 @@ fn partially_filled_limit_order_with_a_working_remainder() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::LoseBeforeExecution);
     let mut mgr = manager();
-    let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800).client_order_id("lim-1");
+    let req =
+        OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800).client_order_id("lim-1");
     let _ = mgr.submit_order(&broker, req);
 
     broker.inject_deal(entry_deal(9201, 8201, 7201, "lim-1", 0.4, 1.0800));
@@ -493,7 +635,12 @@ fn partially_filled_limit_order_with_a_working_remainder() {
     });
     mgr.reconcile(&broker).unwrap();
     let t = mgr.get_order("lim-1").unwrap();
-    assert_eq!(t.state, OrderState::PartiallyFilled, "mismatches: {:?}", t.mismatches);
+    assert_eq!(
+        t.state,
+        OrderState::PartiallyFilled,
+        "mismatches: {:?}",
+        t.mismatches
+    );
     assert!((t.filled_volume - 0.4).abs() < 1e-12 && (t.remaining_volume - 0.6).abs() < 1e-12);
     assert_eq!(t.order_ticket, 8201);
 }
@@ -521,12 +668,23 @@ fn netting_account_fill_is_attributed_by_deals_not_the_merged_position_volume() 
     let mut mgr = manager();
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "net-1"));
     assert_eq!(broker.all_positions().len(), 1);
-    assert!((broker.all_positions()[0].volume - 1.3).abs() < 1e-12, "merged into ticket 77");
+    assert!(
+        (broker.all_positions()[0].volume - 1.3).abs() < 1e-12,
+        "merged into ticket 77"
+    );
 
     let report = mgr.reconcile(&broker).unwrap();
     let t = mgr.get_order("net-1").unwrap();
-    assert_eq!(t.state, OrderState::Reconciled, "mismatches: {:?}", t.mismatches);
-    assert!((t.filled_volume - 0.5).abs() < 1e-12, "own fill, not the 1.3 lot aggregate");
+    assert_eq!(
+        t.state,
+        OrderState::Reconciled,
+        "mismatches: {:?}",
+        t.mismatches
+    );
+    assert!(
+        (t.filled_volume - 0.5).abs() < 1e-12,
+        "own fill, not the 1.3 lot aggregate"
+    );
     assert_eq!(t.position_ticket, 77);
     assert!(report.foreign_positions.is_empty());
 }
@@ -541,9 +699,19 @@ fn netting_without_deal_history_cannot_attribute_the_fill_and_stays_unknown() {
     broker.set_netting(true);
     broker.set_history_supported(false);
     broker.inject_position(Position {
-        ticket: 77, time: 0, position_type: OrderType::Buy, magic: MAGIC, volume: 0.8,
-        price_open: 1.07, stop_loss: 0.0, take_profit: 0.0, price_current: 1.08, profit: 0.0,
-        swap: 0.0, symbol: "EURUSD".to_string(), comment: "pre-existing".to_string(),
+        ticket: 77,
+        time: 0,
+        position_type: OrderType::Buy,
+        magic: MAGIC,
+        volume: 0.8,
+        price_open: 1.07,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        price_current: 1.08,
+        profit: 0.0,
+        swap: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "pre-existing".to_string(),
     });
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     let mut mgr = manager();
@@ -562,15 +730,28 @@ fn hedging_selects_the_correct_ticket_among_same_symbol_positions() {
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     let mut mgr = OrderManager::with_policy(
         MAGIC,
-        SafetyPolicy { unknown_block_scope: UnknownBlockScope::Disabled, ..instant_policy() },
+        SafetyPolicy {
+            unknown_block_scope: UnknownBlockScope::Disabled,
+            ..instant_policy()
+        },
     );
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.1, "hedge-A"));
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.2, "hedge-B"));
     // plus an untracked position on the same symbol/magic
     broker.inject_position(Position {
-        ticket: 5555, time: 0, position_type: OrderType::Buy, magic: MAGIC, volume: 0.3,
-        price_open: 1.08, stop_loss: 0.0, take_profit: 0.0, price_current: 1.08, profit: 0.0,
-        swap: 0.0, symbol: "EURUSD".to_string(), comment: "manual".to_string(),
+        ticket: 5555,
+        time: 0,
+        position_type: OrderType::Buy,
+        magic: MAGIC,
+        volume: 0.3,
+        price_open: 1.08,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        price_current: 1.08,
+        profit: 0.0,
+        swap: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "manual".to_string(),
     });
 
     // Use history-less mode so position matching (not deals) is what's exercised.
@@ -578,7 +759,10 @@ fn hedging_selects_the_correct_ticket_among_same_symbol_positions() {
     let report = mgr.reconcile(&broker).unwrap();
     let a = mgr.get_order("hedge-A").unwrap();
     let b = mgr.get_order("hedge-B").unwrap();
-    assert_eq!((a.state, b.state), (OrderState::Reconciled, OrderState::Reconciled));
+    assert_eq!(
+        (a.state, b.state),
+        (OrderState::Reconciled, OrderState::Reconciled)
+    );
     assert_ne!(a.position_ticket, b.position_ticket);
     assert!((a.filled_volume - 0.1).abs() < 1e-12 && (b.filled_volume - 0.2).abs() < 1e-12);
     assert_eq!(report.foreign_positions.len(), 1);
@@ -589,9 +773,19 @@ fn hedging_selects_the_correct_ticket_among_same_symbol_positions() {
 fn positions_of_other_strategies_are_never_touched_or_claimed() {
     let broker = MockBroker::new();
     broker.inject_position(Position {
-        ticket: 6001, time: 0, position_type: OrderType::Buy, magic: 999, volume: 1.0,
-        price_open: 1.08, stop_loss: 0.0, take_profit: 0.0, price_current: 1.08, profit: 0.0,
-        swap: 0.0, symbol: "EURUSD".to_string(), comment: "other strategy".to_string(),
+        ticket: 6001,
+        time: 0,
+        position_type: OrderType::Buy,
+        magic: 999,
+        volume: 1.0,
+        price_open: 1.08,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        price_current: 1.08,
+        profit: 0.0,
+        swap: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "other strategy".to_string(),
     });
     let mut mgr = manager();
     let report = mgr.reconcile(&broker).unwrap();
@@ -608,7 +802,10 @@ fn positions_of_other_strategies_are_never_touched_or_claimed() {
 fn unknown_order_with_protection() -> OrderManager {
     let mut mgr = manager();
     let mut t = TrackedOrder::new(
-        &OrderRequest::buy("EURUSD", 1.0).stop_loss(1.0800).take_profit(1.0900).magic(MAGIC),
+        &OrderRequest::buy("EURUSD", 1.0)
+            .stop_loss(1.0800)
+            .take_profit(1.0900)
+            .magic(MAGIC),
         "attr-1",
     );
     t.mark_unknown("test");
@@ -638,7 +835,10 @@ fn matching_position() -> Position {
 fn a_position_that_matches_every_attribute_is_reconciled_cleanly() {
     let mut mgr = unknown_order_with_protection();
     let r = mgr.reconcile_with_deals(vec![matching_position()], vec![], vec![]);
-    assert_eq!(mgr.get_order("attr-1").unwrap().state, OrderState::Reconciled);
+    assert_eq!(
+        mgr.get_order("attr-1").unwrap().state,
+        OrderState::Reconciled
+    );
     assert!(r.is_clean() && r.mismatched_orders.is_empty());
     assert_eq!(mgr.lifecycle(), LifecycleState::Ready);
 }
@@ -647,11 +847,27 @@ fn a_position_that_matches_every_attribute_is_reconciled_cleanly() {
 fn every_attribute_disagreement_is_detected_and_reported() {
     type Case = (&'static str, Box<dyn Fn(&mut Position)>, MismatchKind);
     let cases: Vec<Case> = vec![
-        ("direction", Box::new(|p| p.position_type = OrderType::Sell), MismatchKind::Direction),
+        (
+            "direction",
+            Box::new(|p| p.position_type = OrderType::Sell),
+            MismatchKind::Direction,
+        ),
         ("volume", Box::new(|p| p.volume = 0.5), MismatchKind::Volume),
-        ("stop loss removed", Box::new(|p| p.stop_loss = 0.0), MismatchKind::StopLoss),
-        ("take profit moved", Box::new(|p| p.take_profit = 1.1000), MismatchKind::TakeProfit),
-        ("symbol", Box::new(|p| p.symbol = "GBPUSD".into()), MismatchKind::Symbol),
+        (
+            "stop loss removed",
+            Box::new(|p| p.stop_loss = 0.0),
+            MismatchKind::StopLoss,
+        ),
+        (
+            "take profit moved",
+            Box::new(|p| p.take_profit = 1.1000),
+            MismatchKind::TakeProfit,
+        ),
+        (
+            "symbol",
+            Box::new(|p| p.symbol = "GBPUSD".into()),
+            MismatchKind::Symbol,
+        ),
         ("magic", Box::new(|p| p.magic = 1), MismatchKind::Magic),
     ];
     for (name, mutate, kind) in cases {
@@ -661,11 +877,18 @@ fn every_attribute_disagreement_is_detected_and_reported() {
         let r = mgr.reconcile_with_deals(vec![pos], vec![], vec![]);
         let t = mgr.get_order("attr-1").unwrap();
         assert_eq!(t.state, OrderState::Mismatched, "{name}");
-        assert!(t.mismatches.iter().any(|m| m.kind == kind), "{name}: {:?}", t.mismatches);
+        assert!(
+            t.mismatches.iter().any(|m| m.kind == kind),
+            "{name}: {:?}",
+            t.mismatches
+        );
         assert_eq!(r.mismatched_orders.len(), 1, "{name}");
         assert!(r.reconciled_orders.is_empty() && !r.is_clean(), "{name}");
         assert_eq!(mgr.lifecycle(), LifecycleState::Degraded, "{name}");
-        assert_eq!(t.position_ticket, 4242, "{name}: exposure is real and must stay linked");
+        assert_eq!(
+            t.position_ticket, 4242,
+            "{name}: exposure is real and must stay linked"
+        );
     }
 }
 
@@ -679,14 +902,33 @@ fn mismatched_pending_order_type_price_and_volume_are_detected() {
     t.mark_unknown("test");
     mgr.track_order(t);
     let ord = WorkingOrder {
-        ticket: 3001, time_setup: 0, order_type: OrderType::SellStop, magic: MAGIC,
-        volume_initial: 2.0, volume_current: 2.0, price_open: 1.0900, stop_loss: 0.0,
-        take_profit: 0.0, price_current: 1.0, symbol: "EURUSD".into(),
+        ticket: 3001,
+        time_setup: 0,
+        order_type: OrderType::SellStop,
+        magic: MAGIC,
+        volume_initial: 2.0,
+        volume_current: 2.0,
+        price_open: 1.0900,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        price_current: 1.0,
+        symbol: "EURUSD".into(),
         comment: format!("cid:{}", wire_id("pend-1")),
     };
     mgr.reconcile_with_deals(vec![], vec![ord], vec![]);
-    let kinds: Vec<_> = mgr.get_order("pend-1").unwrap().mismatches.iter().map(|m| m.kind).collect();
-    for k in [MismatchKind::OrderType, MismatchKind::Direction, MismatchKind::Volume, MismatchKind::Price] {
+    let kinds: Vec<_> = mgr
+        .get_order("pend-1")
+        .unwrap()
+        .mismatches
+        .iter()
+        .map(|m| m.kind)
+        .collect();
+    for k in [
+        MismatchKind::OrderType,
+        MismatchKind::Direction,
+        MismatchKind::Volume,
+        MismatchKind::Price,
+    ] {
         assert!(kinds.contains(&k), "missing {k:?} in {kinds:?}");
     }
 }
@@ -713,7 +955,10 @@ fn operator_can_acknowledge_a_mismatch_and_only_a_mismatch() {
     let t = mgr.acknowledge_mismatch("attr-1").unwrap();
     assert_eq!(t.state, OrderState::Reconciled);
     assert!(t.mismatches.is_empty());
-    assert!(mgr.acknowledge_mismatch("attr-1").is_err(), "no longer Mismatched");
+    assert!(
+        mgr.acknowledge_mismatch("attr-1").is_err(),
+        "no longer Mismatched"
+    );
     assert!(mgr.acknowledge_mismatch("nope").is_err());
 }
 
@@ -721,10 +966,16 @@ fn operator_can_acknowledge_a_mismatch_and_only_a_mismatch() {
 fn deliberate_sl_tp_modification_updates_the_expectation() {
     let broker = MockBroker::new();
     let mut mgr = manager();
-    let t = mgr.submit_order(&broker, buy("EURUSD", 0.5, "mod-1")).unwrap();
-    mgr.modify_order(&broker, t.position_ticket, 1.0700, 1.1000).unwrap();
+    let t = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "mod-1"))
+        .unwrap();
+    mgr.modify_order(&broker, t.position_ticket, 1.0700, 1.1000)
+        .unwrap();
     let o = mgr.get_order("mod-1").unwrap();
-    assert_eq!((o.requested_stop_loss, o.requested_take_profit), (1.0700, 1.1000));
+    assert_eq!(
+        (o.requested_stop_loss, o.requested_take_profit),
+        (1.0700, 1.1000)
+    );
 }
 
 #[test]
@@ -749,19 +1000,35 @@ fn naive_retry_with_a_new_id_after_an_unknown_that_actually_executed_is_blocked(
     let broker = MockBroker::new();
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     let mut mgr = manager();
-    assert!(is_unknown(&mgr.submit_order(&broker, buy("EURUSD", 0.5, "A")).unwrap_err()));
+    assert!(is_unknown(
+        &mgr.submit_order(&broker, buy("EURUSD", 0.5, "A"))
+            .unwrap_err()
+    ));
 
-    let err = mgr.submit_order(&broker, buy("EURUSD", 0.5, "B")).unwrap_err();
+    let err = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "B"))
+        .unwrap_err();
     match err {
-        Mt5Error::UnresolvedUnknownOrders { client_order_ids, .. } => assert_eq!(client_order_ids, vec!["A"]),
+        Mt5Error::UnresolvedUnknownOrders {
+            client_order_ids, ..
+        } => assert_eq!(client_order_ids, vec!["A"]),
         other => panic!("expected UnresolvedUnknownOrders, got {other:?}"),
     }
     assert_eq!(broker.executions(), 1, "exposure must not double");
-    assert_eq!(broker.send_calls(), 1, "the blocked request must not even reach the broker");
+    assert_eq!(
+        broker.send_calls(),
+        1,
+        "the blocked request must not even reach the broker"
+    );
     assert!(mgr.get_order("B").is_none());
 
     // The same-ID replay stays a harmless no-op while blocked.
-    assert_eq!(mgr.submit_order(&broker, buy("EURUSD", 0.5, "A")).unwrap().state, OrderState::Unknown);
+    assert_eq!(
+        mgr.submit_order(&broker, buy("EURUSD", 0.5, "A"))
+            .unwrap()
+            .state,
+        OrderState::Unknown
+    );
 
     // After reconciliation resolves A, trading resumes.
     mgr.reconcile(&broker).unwrap();
@@ -780,16 +1047,21 @@ fn block_scope_strategy_symbol_and_disabled() {
         broker.push_fault(Fault::LoseBeforeExecution);
         let mut mgr = OrderManager::with_policy(
             MAGIC,
-            SafetyPolicy { unknown_block_scope: scope, ..instant_policy() },
+            SafetyPolicy {
+                unknown_block_scope: scope,
+                ..instant_policy()
+            },
         );
         let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "U"));
         assert_eq!(
-            mgr.submit_order(&broker, buy("GBPUSD", 0.1, "other")).is_ok(),
+            mgr.submit_order(&broker, buy("GBPUSD", 0.1, "other"))
+                .is_ok(),
             other_symbol_allowed,
             "{scope:?} other symbol"
         );
         assert_eq!(
-            mgr.submit_order(&broker, buy("EURUSD", 0.1, "same")).is_ok(),
+            mgr.submit_order(&broker, buy("EURUSD", 0.1, "same"))
+                .is_ok(),
             same_symbol_allowed,
             "{scope:?} same symbol"
         );
@@ -804,22 +1076,30 @@ fn retry_order_is_refused_until_the_original_is_definitively_not_placed() {
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "R"));
 
     // Unknown → refused
-    let err = mgr.retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5)).unwrap_err();
+    let err = mgr
+        .retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5))
+        .unwrap_err();
     assert!(matches!(err, Mt5Error::RetryNotAllowed { .. }), "{err:?}");
 
     // reconcile confirms absence → Rejected → retry allowed, with a derived traceable ID
     mgr.reconcile(&broker).unwrap();
     assert_eq!(mgr.get_order("R").unwrap().state, OrderState::Rejected);
-    let retried = mgr.retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5)).unwrap();
+    let retried = mgr
+        .retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5))
+        .unwrap();
     assert_eq!(retried.client_order_id, "R-r1");
     assert_eq!(retried.state, OrderState::Filled);
     assert_eq!(broker.executions(), 1);
 
     // a filled order must not be "retried" into double exposure
-    let err = mgr.retry_order(&broker, "R-r1", OrderRequest::buy("EURUSD", 0.5)).unwrap_err();
+    let err = mgr
+        .retry_order(&broker, "R-r1", OrderRequest::buy("EURUSD", 0.5))
+        .unwrap_err();
     assert!(matches!(err, Mt5Error::RetryNotAllowed { .. }));
     // unknown previous id / changed intent
-    assert!(mgr.retry_order(&broker, "ghost", OrderRequest::buy("EURUSD", 0.5)).is_err());
+    assert!(mgr
+        .retry_order(&broker, "ghost", OrderRequest::buy("EURUSD", 0.5))
+        .is_err());
 }
 
 #[test]
@@ -829,11 +1109,22 @@ fn retry_order_must_preserve_symbol_and_direction_and_numbers_attempts() {
     broker.push_fault(Fault::Reject(10019));
     let mut mgr = manager();
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "Q"));
-    assert!(mgr.retry_order(&broker, "Q", OrderRequest::sell("EURUSD", 0.5)).is_err());
-    assert!(mgr.retry_order(&broker, "Q", OrderRequest::buy("GBPUSD", 0.5)).is_err());
-    assert!(mgr.retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5)).is_err()); // rejected again (fault #2)
-    let third = mgr.retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5)).unwrap();
-    assert_eq!(third.client_order_id, "Q-r2", "attempts are numbered, never reused");
+    assert!(mgr
+        .retry_order(&broker, "Q", OrderRequest::sell("EURUSD", 0.5))
+        .is_err());
+    assert!(mgr
+        .retry_order(&broker, "Q", OrderRequest::buy("GBPUSD", 0.5))
+        .is_err());
+    assert!(mgr
+        .retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5))
+        .is_err()); // rejected again (fault #2)
+    let third = mgr
+        .retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5))
+        .unwrap();
+    assert_eq!(
+        third.client_order_id, "Q-r2",
+        "attempts are numbered, never reused"
+    );
 }
 
 #[test]
@@ -842,7 +1133,13 @@ fn reconcile_until_settled_waits_for_delayed_visibility_and_reports_timeouts() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.set_visibility_delay(3);
-    let mut mgr = OrderManager::with_policy(MAGIC, SafetyPolicy { min_absent_observations: 10, ..instant_policy() });
+    let mut mgr = OrderManager::with_policy(
+        MAGIC,
+        SafetyPolicy {
+            min_absent_observations: 10,
+            ..instant_policy()
+        },
+    );
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "S"));
     let r = mgr
         .reconcile_until_settled(&broker, Duration::from_millis(1), Duration::from_secs(5))
@@ -856,7 +1153,11 @@ fn reconcile_until_settled_waits_for_delayed_visibility_and_reports_timeouts() {
     let mut mgr2 = OrderManager::new(MAGIC);
     let _ = mgr2.submit_order(&broker2, buy("EURUSD", 0.5, "T"));
     let r2 = mgr2
-        .reconcile_until_settled(&broker2, Duration::from_millis(5), Duration::from_millis(40))
+        .reconcile_until_settled(
+            &broker2,
+            Duration::from_millis(5),
+            Duration::from_millis(40),
+        )
         .unwrap();
     assert!(!r2.is_settled());
     assert_eq!(mgr2.lifecycle(), LifecycleState::Degraded);
@@ -870,7 +1171,11 @@ fn ea_or_mt5_restart_loses_the_ea_cache_but_manager_idempotency_still_holds() {
     broker.restart_ea(); // EA idempotency cache gone
     let again = mgr.submit_order(&broker, buy("EURUSD", 0.5, "E")).unwrap();
     assert_eq!(again.state, OrderState::Filled);
-    assert_eq!(broker.executions(), 1, "manager-level idempotency does not depend on the EA cache");
+    assert_eq!(
+        broker.executions(),
+        1,
+        "manager-level idempotency does not depend on the EA cache"
+    );
     assert_eq!(broker.send_calls(), 1);
 }
 
@@ -881,7 +1186,11 @@ fn ea_cache_protects_a_raw_replay_but_only_until_the_ea_restarts() {
     let req = buy("EURUSD", 0.5, "raw-1");
     broker.order_send(&req).unwrap();
     broker.order_send(&req).unwrap();
-    assert_eq!(broker.executions(), 1, "EA cache replays the recorded result");
+    assert_eq!(
+        broker.executions(),
+        1,
+        "EA cache replays the recorded result"
+    );
     broker.restart_ea();
     broker.order_send(&req).unwrap();
     assert_eq!(broker.executions(), 2, "…but not after the EA restarts");
@@ -913,16 +1222,23 @@ fn shared_manager_same_client_order_id_from_many_threads_reaches_the_broker_once
             let (b, s, bar) = (broker.clone(), shared.clone(), barrier.clone());
             std::thread::spawn(move || {
                 bar.wait();
-                s.submit_order(&b, buy("EURUSD", 0.1, "shared-dup")).unwrap()
+                s.submit_order(&b, buy("EURUSD", 0.1, "shared-dup"))
+                    .unwrap()
             })
         })
         .collect();
     let results: Vec<TrackedOrder> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    assert_eq!(broker.executions(), 1, "exactly one broker execution for one client_order_id");
+    assert_eq!(
+        broker.executions(),
+        1,
+        "exactly one broker execution for one client_order_id"
+    );
     assert_eq!(broker.send_calls(), 1);
     let first = results[0].order_ticket;
-    assert!(results.iter().all(|r| r.order_ticket == first && r.state == OrderState::Filled));
+    assert!(results
+        .iter()
+        .all(|r| r.order_ticket == first && r.state == OrderState::Filled));
 }
 
 #[test]
@@ -933,7 +1249,10 @@ fn shared_manager_distinct_ids_from_many_threads_all_execute() {
     let handles: Vec<_> = (0..N)
         .map(|i| {
             let (b, s) = (broker.clone(), shared.clone());
-            std::thread::spawn(move || s.submit_order(&b, buy("EURUSD", 0.1, &format!("par-{i}"))).unwrap())
+            std::thread::spawn(move || {
+                s.submit_order(&b, buy("EURUSD", 0.1, &format!("par-{i}")))
+                    .unwrap()
+            })
         })
         .collect();
     for h in handles {
@@ -959,7 +1278,11 @@ fn documented_misuse_releasing_the_lock_between_check_and_send_duplicates_orders
             let (b, m, bar) = (broker.clone(), mgr.clone(), barrier.clone());
             std::thread::spawn(move || {
                 let mut req = buy("EURUSD", 0.1, "misuse-1");
-                let seen_before = m.lock().unwrap().check_idempotency_and_magic(&mut req).unwrap();
+                let seen_before = m
+                    .lock()
+                    .unwrap()
+                    .check_idempotency_and_magic(&mut req)
+                    .unwrap();
                 // lock released here ↓ — the bug
                 bar.wait();
                 if seen_before.is_none() {
@@ -971,7 +1294,11 @@ fn documented_misuse_releasing_the_lock_between_check_and_send_duplicates_orders
     for h in handles {
         h.join().unwrap();
     }
-    assert_eq!(broker.executions(), N, "every thread saw 'new' and sent: N executions for ONE id");
+    assert_eq!(
+        broker.executions(),
+        N,
+        "every thread saw 'new' and sent: N executions for ONE id"
+    );
 }
 
 #[test]
@@ -981,11 +1308,31 @@ fn a_panic_mid_submission_leaves_a_recoverable_state_and_does_not_poison_the_sha
         fn order_send(&self, _r: &OrderRequest) -> Result<TradeResult> {
             panic!("simulated crash inside order_send");
         }
-        fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> { self.0.order_close_with_magic(t, m) }
-        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> { self.0.order_modify_with_magic(t, m, sl, tp) }
-        fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> { self.0.positions_filtered(m, s) }
-        fn pending_orders_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<WorkingOrder>> { self.0.pending_orders_filtered(m, s) }
-        fn deals_filtered(&self, f: i64, t: i64, m: Option<u64>, s: Option<&str>) -> Result<Vec<Deal>> { self.0.deals_filtered(f, t, m, s) }
+        fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> {
+            self.0.order_close_with_magic(t, m)
+        }
+        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> {
+            self.0.order_modify_with_magic(t, m, sl, tp)
+        }
+        fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> {
+            self.0.positions_filtered(m, s)
+        }
+        fn pending_orders_filtered(
+            &self,
+            m: Option<u64>,
+            s: Option<&str>,
+        ) -> Result<Vec<WorkingOrder>> {
+            self.0.pending_orders_filtered(m, s)
+        }
+        fn deals_filtered(
+            &self,
+            f: i64,
+            t: i64,
+            m: Option<u64>,
+            s: Option<&str>,
+        ) -> Result<Vec<Deal>> {
+            self.0.deals_filtered(f, t, m, s)
+        }
     }
 
     let broker = Arc::new(MockBroker::new());
@@ -995,13 +1342,26 @@ fn a_panic_mid_submission_leaves_a_recoverable_state_and_does_not_poison_the_sha
         let _ = s.submit_order(&PanicOnSend(&b), buy("EURUSD", 0.5, "crash-1"));
     })
     .join();
-    assert!(crashed.is_err(), "the worker really panicked while holding the lock");
+    assert!(
+        crashed.is_err(),
+        "the worker really panicked while holding the lock"
+    );
 
     // The lock is recovered, and the interrupted order is visibly Submitting → resolvable.
-    assert_eq!(shared.get_order("crash-1").unwrap().state, OrderState::Submitting);
+    assert_eq!(
+        shared.get_order("crash-1").unwrap().state,
+        OrderState::Submitting
+    );
     let report = shared.reconcile(&*broker).unwrap();
-    assert_eq!(report.absent_orders.len(), 1, "nothing reached the broker → confirmed absent");
-    assert_eq!(shared.get_order("crash-1").unwrap().state, OrderState::Rejected);
+    assert_eq!(
+        report.absent_orders.len(),
+        1,
+        "nothing reached the broker → confirmed absent"
+    );
+    assert_eq!(
+        shared.get_order("crash-1").unwrap().state,
+        OrderState::Rejected
+    );
 }
 
 #[test]
@@ -1010,7 +1370,8 @@ fn arc_and_reference_backends_are_accepted_by_the_manager() {
     let mut mgr = manager();
     mgr.submit_order(&arc, buy("EURUSD", 0.1, "arc-1")).unwrap(); // &Arc<MockBroker>
     let by_ref: &MockBroker = &arc;
-    mgr.submit_order(&by_ref, buy("EURUSD", 0.1, "ref-1")).unwrap(); // &&MockBroker
+    mgr.submit_order(&by_ref, buy("EURUSD", 0.1, "ref-1"))
+        .unwrap(); // &&MockBroker
     assert_eq!(arc.executions(), 2);
 }
 
@@ -1032,26 +1393,42 @@ fn restart_after_a_lost_response_resumes_from_disk_and_reconciles() {
     {
         let mut mgr = OrderManager::with_store(MAGIC, store_at(&path)).unwrap();
         mgr.set_policy(instant_policy());
-        assert!(is_unknown(&mgr.submit_order(&broker, buy("EURUSD", 0.5, "durable-1")).unwrap_err()));
+        assert!(is_unknown(
+            &mgr.submit_order(&broker, buy("EURUSD", 0.5, "durable-1"))
+                .unwrap_err()
+        ));
     } // process "exits"
 
     let mut mgr = OrderManager::with_store(MAGIC, store_at(&path)).unwrap();
     mgr.set_policy(instant_policy());
-    assert_eq!(mgr.get_order("durable-1").unwrap().state, OrderState::Unknown);
+    assert_eq!(
+        mgr.get_order("durable-1").unwrap().state,
+        OrderState::Unknown
+    );
     // …and the restored Unknown order blocks a naive re-submission under a NEW id:
     assert!(matches!(
-        mgr.submit_order(&broker, buy("EURUSD", 0.5, "durable-2")).unwrap_err(),
+        mgr.submit_order(&broker, buy("EURUSD", 0.5, "durable-2"))
+            .unwrap_err(),
         Mt5Error::UnresolvedUnknownOrders { .. }
     ));
 
     mgr.reconcile(&broker).unwrap();
-    assert_eq!(mgr.get_order("durable-1").unwrap().state, OrderState::Reconciled);
+    assert_eq!(
+        mgr.get_order("durable-1").unwrap().state,
+        OrderState::Reconciled
+    );
     assert_eq!(broker.executions(), 1);
 
     // the resolution itself was journaled
     let mgr2 = OrderManager::with_store(MAGIC, store_at(&path)).unwrap();
-    assert_eq!(mgr2.get_order("durable-1").unwrap().state, OrderState::Reconciled);
-    assert_eq!(mgr2.get_order("durable-1").unwrap().wire_id, wire_id("durable-1"));
+    assert_eq!(
+        mgr2.get_order("durable-1").unwrap().state,
+        OrderState::Reconciled
+    );
+    assert_eq!(
+        mgr2.get_order("durable-1").unwrap().wire_id,
+        wire_id("durable-1")
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1064,11 +1441,31 @@ fn a_crash_between_write_ahead_and_outcome_restores_as_unknown() {
             let _ = self.0.order_send(r);
             panic!("simulated process death after transmission");
         }
-        fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> { self.0.order_close_with_magic(t, m) }
-        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> { self.0.order_modify_with_magic(t, m, sl, tp) }
-        fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> { self.0.positions_filtered(m, s) }
-        fn pending_orders_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<WorkingOrder>> { self.0.pending_orders_filtered(m, s) }
-        fn deals_filtered(&self, f: i64, t: i64, m: Option<u64>, s: Option<&str>) -> Result<Vec<Deal>> { self.0.deals_filtered(f, t, m, s) }
+        fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> {
+            self.0.order_close_with_magic(t, m)
+        }
+        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> {
+            self.0.order_modify_with_magic(t, m, sl, tp)
+        }
+        fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> {
+            self.0.positions_filtered(m, s)
+        }
+        fn pending_orders_filtered(
+            &self,
+            m: Option<u64>,
+            s: Option<&str>,
+        ) -> Result<Vec<WorkingOrder>> {
+            self.0.pending_orders_filtered(m, s)
+        }
+        fn deals_filtered(
+            &self,
+            f: i64,
+            t: i64,
+            m: Option<u64>,
+            s: Option<&str>,
+        ) -> Result<Vec<Deal>> {
+            self.0.deals_filtered(f, t, m, s)
+        }
     }
     let dir = scratch_dir("crash");
     let path = dir.join("orders.json");
@@ -1079,17 +1476,28 @@ fn a_crash_between_write_ahead_and_outcome_restores_as_unknown() {
         let _ = mgr.submit_order(&CrashOnSend(&broker), buy("EURUSD", 0.5, "wal-1"));
     }));
     assert!(died.is_err());
-    assert_eq!(broker.executions(), 1, "the order reached the broker before the 'crash'");
+    assert_eq!(
+        broker.executions(),
+        1,
+        "the order reached the broker before the 'crash'"
+    );
     drop(mgr); // the in-memory state is gone; only the file remains
 
     // The file holds the write-ahead Submitting record; a fresh process restores it as Unknown.
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("Submitting"), "write-ahead record must be on disk before transmission");
+    assert!(
+        raw.contains("Submitting"),
+        "write-ahead record must be on disk before transmission"
+    );
     let mut mgr = OrderManager::with_store(MAGIC, store_at(&path)).unwrap();
     mgr.set_policy(instant_policy());
     assert_eq!(mgr.get_order("wal-1").unwrap().state, OrderState::Unknown);
     mgr.reconcile(&broker).unwrap();
-    assert_eq!(mgr.get_order("wal-1").unwrap().state, OrderState::Reconciled, "found via position/deal");
+    assert_eq!(
+        mgr.get_order("wal-1").unwrap().state,
+        OrderState::Reconciled,
+        "found via position/deal"
+    );
     assert_eq!(broker.executions(), 1);
     std::fs::remove_dir_all(dir).ok();
 }
@@ -1100,10 +1508,19 @@ fn if_the_write_ahead_record_cannot_be_saved_the_order_is_not_transmitted() {
     let path = dir.join("missing-subdir").join("orders.json"); // parent does not exist → save fails
     let broker = MockBroker::new();
     let mut mgr = OrderManager::with_store(MAGIC, store_at(&path)).unwrap(); // load of absent file = empty
-    let err = mgr.submit_order(&broker, buy("EURUSD", 0.5, "nowal-1")).unwrap_err();
+    let err = mgr
+        .submit_order(&broker, buy("EURUSD", 0.5, "nowal-1"))
+        .unwrap_err();
     assert!(matches!(err, Mt5Error::PersistenceError(_)), "{err:?}");
-    assert_eq!(broker.send_calls(), 0, "no durable record ⇒ nothing may be sent");
-    assert!(mgr.get_order("nowal-1").is_none(), "in-memory record rolled back so the caller can retry");
+    assert_eq!(
+        broker.send_calls(),
+        0,
+        "no durable record ⇒ nothing may be sent"
+    );
+    assert!(
+        mgr.get_order("nowal-1").is_none(),
+        "in-memory record rolled back so the caller can retry"
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1120,7 +1537,10 @@ fn corrupt_or_foreign_journal_files_are_an_error_never_an_empty_order_book() {
     ] {
         std::fs::write(&path, &bad).unwrap();
         let r = OrderManager::with_store(MAGIC, store_at(&path));
-        assert!(matches!(r, Err(Mt5Error::PersistenceError(_))), "accepted bad journal: {bad:?}");
+        assert!(
+            matches!(r, Err(Mt5Error::PersistenceError(_))),
+            "accepted bad journal: {bad:?}"
+        );
     }
     std::fs::remove_dir_all(dir).ok();
 }
@@ -1133,16 +1553,25 @@ fn a_stale_temp_file_from_a_crash_mid_write_is_ignored_and_overwritten() {
 
     let broker = MockBroker::new();
     let mut mgr = OrderManager::with_store(MAGIC, Box::new(store.clone())).unwrap();
-    mgr.submit_order(&broker, buy("EURUSD", 0.1, "tmp-1")).unwrap();
+    mgr.submit_order(&broker, buy("EURUSD", 0.1, "tmp-1"))
+        .unwrap();
 
     // Simulate a crash halfway through a later save: garbage left in the temp file.
     std::fs::write(dir.join("orders.json.tmp"), b"{ truncated garb").unwrap();
     let loaded = store.load().unwrap();
-    assert_eq!(loaded.len(), 1, "the committed file is untouched by a torn temp file");
+    assert_eq!(
+        loaded.len(),
+        1,
+        "the committed file is untouched by a torn temp file"
+    );
 
-    mgr.submit_order(&broker, buy("EURUSD", 0.1, "tmp-2")).unwrap(); // next save overwrites the temp file
+    mgr.submit_order(&broker, buy("EURUSD", 0.1, "tmp-2"))
+        .unwrap(); // next save overwrites the temp file
     assert_eq!(store.load().unwrap().len(), 2);
-    assert!(!dir.join("orders.json.tmp").exists(), "temp file is consumed by the atomic rename");
+    assert!(
+        !dir.join("orders.json.tmp").exists(),
+        "temp file is consumed by the atomic rename"
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1151,11 +1580,16 @@ fn journal_file_is_a_versioned_envelope_and_a_fresh_store_loads_empty() {
     let dir = scratch_dir("envelope");
     let path = dir.join("orders.json");
     let store = JsonFileStore::new(&path);
-    assert!(store.load().unwrap().is_empty(), "never-written store = first run");
+    assert!(
+        store.load().unwrap().is_empty(),
+        "never-written store = first run"
+    );
     let broker = MockBroker::new();
     let mut mgr = OrderManager::with_store(MAGIC, Box::new(store)).unwrap();
-    mgr.submit_order(&broker, buy("EURUSD", 0.1, "env-1")).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    mgr.submit_order(&broker, buy("EURUSD", 0.1, "env-1"))
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["format"], "mt5-bridge/orders");
     assert_eq!(v["version"], 1);
     assert_eq!(v["orders"][0]["client_order_id"], "env-1");

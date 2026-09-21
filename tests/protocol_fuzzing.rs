@@ -179,14 +179,12 @@ fn fuzz_parse_wire_id_malformed_tokens() {
 fn fuzz_effective_comment_utf8_boundaries() {
     // Tests various multi-byte Unicode strings (accented, Asian characters, emoji, combining chars)
     let fragments = [
-        "a", "€", "ç", "ö", "ü", "ş", "ğ", "日", "本", "語",
-        "😀", "🚀", "💡", "—", "\u{200B}", "\u{FEFF}",
+        "a", "€", "ç", "ö", "ü", "ş", "ğ", "日", "本", "語", "😀", "🚀", "💡", "—", "\u{200B}",
+        "\u{FEFF}",
     ];
 
     for depth in 1..40 {
-        let s: String = (0..depth)
-            .map(|i| fragments[i % fragments.len()])
-            .collect();
+        let s: String = (0..depth).map(|i| fragments[i % fragments.len()]).collect();
 
         let req1 = OrderRequest::buy("EURUSD", 0.1)
             .client_order_id(&s)
@@ -209,9 +207,19 @@ fn fuzz_effective_comment_utf8_boundaries() {
 #[test]
 fn fuzz_order_request_validation_extreme_values() {
     let floats = [
-        0.0, -0.0, 1.0, -1.0, 0.01, 1e-10, 1e10,
-        f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
-        f64::MIN_POSITIVE, f64::MAX, f64::MIN,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.01,
+        1e-10,
+        1e10,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::MIN,
     ];
 
     for &vol in &floats {
@@ -285,7 +293,7 @@ fn fuzz_tick_arithmetic_random_values() {
         let tick_size_bits = rng.next_u64();
         let price = f64::from_bits(price_bits);
         let tick_size = f64::from_bits(tick_size_bits);
-        let digits = (rng.next_u32() % 10) as u32;
+        let digits = rng.next_u32() % 10;
 
         // Must not panic on arbitrary floats
         let ticks = price_to_ticks(price, tick_size);

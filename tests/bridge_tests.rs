@@ -543,7 +543,8 @@ fn test_trade_result_wire_abi_layout() {
 
     assert_eq!(bytes.len(), 44);
 
-    let raw: Mt5TradeResult = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Mt5TradeResult) };
+    let raw: Mt5TradeResult =
+        unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Mt5TradeResult) };
     let (raw_retcode, raw_deal, raw_order, raw_position, raw_volume, raw_price) = (
         raw.retcode,
         raw.deal,
@@ -771,7 +772,10 @@ fn test_order_request_client_order_id_and_comment() {
     assert!(eff.len() <= 31);
     assert_eq!(
         eff,
-        format!("cid:{}:hello", wire_id("very-long-client-order-id-1234567890"))
+        format!(
+            "cid:{}:hello",
+            wire_id("very-long-client-order-id-1234567890")
+        )
     );
 }
 
@@ -1003,10 +1007,7 @@ fn test_mt5_retcode_descriptions() {
         mt5_retcode_description(10031),
         "TRADE_RETCODE_CONNECTION: No connection with the trade server"
     );
-    assert_eq!(
-        mt5_retcode_description(999999),
-        "Unknown MT5 retcode"
-    );
+    assert_eq!(mt5_retcode_description(999999), "Unknown MT5 retcode");
 }
 
 #[test]
@@ -1027,12 +1028,17 @@ fn test_mt5_error_display_formatting() {
         expected_magic: 555,
         actual_magic: 666,
     };
-    assert!(err_own.to_string().contains("does not match expected strategy magic"));
+    assert!(err_own
+        .to_string()
+        .contains("does not match expected strategy magic"));
 
     let err_rec = Mt5Error::ReconciliationError("mismatch".to_string());
     assert_eq!(err_rec.to_string(), "Reconciliation error: mismatch");
 
-    let err_range = Mt5Error::InvalidTimeRange { start: 200, end: 100 };
+    let err_range = Mt5Error::InvalidTimeRange {
+        start: 200,
+        end: 100,
+    };
     assert!(err_range.to_string().contains("greater than end timestamp"));
 }
 
@@ -1128,13 +1134,11 @@ fn test_order_request_stops_validation_with_symbol() {
     };
 
     // SL not aligned to tick size (0.00005)
-    let bad_sl = OrderRequest::buy("EURUSD", 0.1)
-        .stop_loss(1.08003);
+    let bad_sl = OrderRequest::buy("EURUSD", 0.1).stop_loss(1.08003);
     assert!(bad_sl.validate_with_symbol(&sym).is_err());
 
     // TP not aligned to tick size (0.00005)
-    let bad_tp = OrderRequest::buy("EURUSD", 0.1)
-        .take_profit(1.09002);
+    let bad_tp = OrderRequest::buy("EURUSD", 0.1).take_profit(1.09002);
     assert!(bad_tp.validate_with_symbol(&sym).is_err());
 
     // Both properly aligned
@@ -1158,7 +1162,8 @@ fn test_reconciliation_report_serde_and_clean() {
     assert!(report_clean.is_clean());
 
     let json = serde_json::to_string(&report_clean).expect("Failed to serialize report");
-    let deserialized: ReconciliationReport = serde_json::from_str(&json).expect("Failed to deserialize report");
+    let deserialized: ReconciliationReport =
+        serde_json::from_str(&json).expect("Failed to deserialize report");
     assert_eq!(deserialized, report_clean);
 
     let state = LifecycleState::Reconciling;
@@ -1184,7 +1189,11 @@ fn test_order_manager_magic_and_idempotency_check() {
     let check_err = mgr.check_idempotency_and_magic(&mut req_wrong_magic);
     assert!(check_err.is_err());
     match check_err.unwrap_err() {
-        Mt5Error::OwnershipMismatch { expected_magic, actual_magic, .. } => {
+        Mt5Error::OwnershipMismatch {
+            expected_magic,
+            actual_magic,
+            ..
+        } => {
             assert_eq!(expected_magic, 888999);
             assert_eq!(actual_magic, 111222);
         }
@@ -1246,6 +1255,76 @@ fn test_order_manager_pending_order_reconciliation() {
     assert_eq!(rec_ord.state, OrderState::Accepted);
     assert_eq!(rec_ord.remaining_volume, 0.6);
     assert!((rec_ord.filled_volume - 0.4).abs() < 1e-6);
+}
+
+#[test]
+fn test_order_manager_apply_trade_event() {
+    let mut mgr = OrderManager::new(12345);
+
+    let req = OrderRequest::buy("EURUSD", 1.0)
+        .magic(12345)
+        .comment("test-comment");
+    let cid = "order-trade-evt-1";
+    let tracked = TrackedOrder::new(&req, cid);
+    mgr.track_order(tracked);
+
+    let order = mgr.get_order(cid).unwrap();
+    assert_eq!(order.state, OrderState::Created);
+    let wire_token = order.wire_id.clone();
+
+    // 1. Asynchronous trade transaction for deal execution pushed via TradeEvent
+    let trade_ev = TradeEvent {
+        deal: 554433,
+        order: 998877,
+        position: 112233,
+        time: 1710009999,
+        trans_type: 2, // DealAdd
+        order_type: OrderType::Buy,
+        price: 1.0855,
+        volume: 0.5,
+        sl: 1.0800,
+        tp: 1.0900,
+        symbol: "EURUSD".to_string(),
+        comment: format!("cid:{}", wire_token),
+    };
+
+    let updated = mgr
+        .apply_trade_event(&trade_ev)
+        .unwrap()
+        .expect("should match order");
+    assert_eq!(updated.client_order_id, cid);
+    assert_eq!(updated.state, OrderState::PartiallyFilled);
+    assert_eq!(updated.filled_volume, 0.5);
+    assert_eq!(updated.remaining_volume, 0.5);
+    assert_eq!(updated.deal_ticket, 554433);
+    assert_eq!(updated.position_ticket, 112233);
+    assert_eq!(updated.average_price, 1.0855);
+
+    // 2. Second partial fill to complete the position
+    let trade_ev_2 = TradeEvent {
+        deal: 554434,
+        order: 998877,
+        position: 112233,
+        time: 1710010000,
+        trans_type: 2,
+        order_type: OrderType::Buy,
+        price: 1.0865,
+        volume: 0.5,
+        sl: 1.0800,
+        tp: 1.0900,
+        symbol: "EURUSD".to_string(),
+        comment: format!("cid:{}", wire_token),
+    };
+
+    let final_order = mgr
+        .apply_trade_event(&trade_ev_2)
+        .unwrap()
+        .expect("should match order");
+    assert_eq!(final_order.state, OrderState::Filled);
+    assert_eq!(final_order.filled_volume, 1.0);
+    assert_eq!(final_order.remaining_volume, 0.0);
+    assert_eq!(final_order.deal_tickets.len(), 2);
+    assert!((final_order.average_price - 1.0860).abs() < 1e-6);
 }
 
 #[tokio::test]
@@ -1437,3 +1516,53 @@ fn test_raw_event_wire_conversions() {
     assert_eq!(book.volume, 100.0);
 }
 
+#[test]
+fn test_trading_backend_close_position_alias() {
+    use mt5_bridge::backend::TradingBackend;
+    use mt5_bridge::{Mt5Error, OrderRequest, Position, TradeResult, WorkingOrder};
+
+    struct DummyBackend;
+    impl TradingBackend for DummyBackend {
+        fn order_send(&self, _req: &OrderRequest) -> Result<TradeResult, Mt5Error> {
+            unimplemented!()
+        }
+        fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult, Mt5Error> {
+            Ok(TradeResult {
+                retcode: 10009,
+                deal: ticket * 10,
+                order: magic,
+                position: ticket,
+                volume: 1.0,
+                price: 1.0,
+            })
+        }
+        fn order_modify_with_magic(
+            &self,
+            _ticket: u64,
+            _magic: u64,
+            _stop_loss: f64,
+            _take_profit: f64,
+        ) -> Result<TradeResult, Mt5Error> {
+            unimplemented!()
+        }
+        fn positions_filtered(
+            &self,
+            _magic: Option<u64>,
+            _symbol: Option<&str>,
+        ) -> Result<Vec<Position>, Mt5Error> {
+            unimplemented!()
+        }
+        fn pending_orders_filtered(
+            &self,
+            _magic: Option<u64>,
+            _symbol: Option<&str>,
+        ) -> Result<Vec<WorkingOrder>, Mt5Error> {
+            unimplemented!()
+        }
+    }
+
+    let backend = DummyBackend;
+    let res = backend.close_position_with_magic(42, 999).unwrap();
+    assert_eq!(res.deal, 420);
+    assert_eq!(res.order, 999);
+}

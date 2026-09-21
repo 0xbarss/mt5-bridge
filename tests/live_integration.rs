@@ -246,12 +246,25 @@ fn test_live_market_order_lifecycle() {
         ticket: target_ticket,
     };
 
-    // Close position
+    // Close position using the ergonomic close_position API
     let close_res = client
-        .order_close(target_ticket)
-        .expect("order_close failed");
+        .close_position(target_ticket)
+        .expect("close_position failed");
     assert!(close_res.is_success());
     guard.ticket = 0;
+}
+
+#[test]
+fn test_live_events_dropped_total() {
+    let (client, _guard) = match get_client() {
+        Some(cg) => cg,
+        None => return,
+    };
+
+    let dropped = client.events_dropped_total();
+    println!("Live events dropped counter: {dropped}");
+    // Counter should be accessible without crashing or UB
+    assert!(dropped < 100_000_000);
 }
 
 #[test]
@@ -264,7 +277,9 @@ fn test_live_positions_and_orders() {
     let positions = client.positions().expect("client.positions failed");
     println!("Live positions retrieved: {}", positions.len());
 
-    let orders = client.pending_orders().expect("client.pending_orders failed");
+    let orders = client
+        .pending_orders()
+        .expect("client.pending_orders failed");
     println!("Live working orders retrieved: {}", orders.len());
 }
 
@@ -280,7 +295,9 @@ fn test_live_reconciliation_engine() {
     let mut manager = OrderManager::new(998877);
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
 
-    let report = manager.reconcile(&client).expect("manager.reconcile failed");
+    let report = manager
+        .reconcile(&client)
+        .expect("manager.reconcile failed");
     assert_eq!(manager.lifecycle(), LifecycleState::Ready);
     println!(
         "Live reconciliation completed: {} positions, {} orders, is_clean: {}",
@@ -319,7 +336,9 @@ fn test_live_order_manager_reconciliation_with_deals() {
     let mut manager = OrderManager::new(998877);
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
 
-    let report = manager.reconcile(&client).expect("manager.reconcile failed");
+    let report = manager
+        .reconcile(&client)
+        .expect("manager.reconcile failed");
     assert_eq!(manager.lifecycle(), LifecycleState::Ready);
     assert!(
         report.unresolved_orders.is_empty(),
@@ -328,6 +347,7 @@ fn test_live_order_manager_reconciliation_with_deals() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_lossless() {
     let (client, _guard) = match get_client() {
         Some(cg) => cg,
@@ -347,7 +367,11 @@ async fn test_live_push_tick_stream_lossless() {
             assert_eq!(tick.symbol, "EURUSD");
             assert!(tick.bid > 0.0);
             assert!(tick.ask >= tick.bid);
-            assert_eq!(sub.dropped_ticks(), 0, "No ticks should be dropped in normal flow");
+            assert_eq!(
+                sub.dropped_ticks(),
+                0,
+                "No ticks should be dropped in normal flow"
+            );
         }
         Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
             panic!("Lossless mode lagged unexpectedly: skipped {skipped}");
@@ -362,6 +386,7 @@ async fn test_live_push_tick_stream_lossless() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_latest() {
     let (client, _guard) = match get_client() {
         Some(cg) => cg,

@@ -129,7 +129,13 @@ impl MockBroker {
         self.inner.lock().unwrap().send_calls
     }
     pub fn all_positions(&self) -> Vec<Position> {
-        self.inner.lock().unwrap().positions.iter().map(|(p, _)| p.clone()).collect()
+        self.inner
+            .lock()
+            .unwrap()
+            .positions
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     // ---- direct state injection (for scenarios that pre-date the manager) ----
@@ -144,7 +150,11 @@ impl MockBroker {
     }
     pub fn close_externally(&self, position_ticket: u64) {
         let mut g = self.inner.lock().unwrap();
-        if let Some(i) = g.positions.iter().position(|(p, _)| p.ticket == position_ticket) {
+        if let Some(i) = g
+            .positions
+            .iter()
+            .position(|(p, _)| p.ticket == position_ticket)
+        {
             let (p, _) = g.positions.remove(i);
             let t = g.next_ticket;
             g.next_ticket += 1;
@@ -153,7 +163,11 @@ impl MockBroker {
                 order: t,
                 position_id: p.ticket,
                 time: chrono::Utc::now().timestamp(),
-                direction: if p.is_buy() { OrderType::Sell } else { OrderType::Buy },
+                direction: if p.is_buy() {
+                    OrderType::Sell
+                } else {
+                    OrderType::Buy
+                },
                 entry: DealEntry::Out,
                 magic: p.magic,
                 volume: p.volume,
@@ -179,7 +193,11 @@ impl Inner {
     /// Emulates the EA + broker executing a request. Returns the synchronous result.
     fn execute(&mut self, req: &OrderRequest, fill_override: Option<f64>) -> Result<TradeResult> {
         let comment = req.effective_comment();
-        let key = if self.ea_idempotency { ea_extract_key(&comment) } else { None };
+        let key = if self.ea_idempotency {
+            ea_extract_key(&comment)
+        } else {
+            None
+        };
 
         if let Some(k) = &key {
             if let Some(c) = self.ea_cache.get(k) {
@@ -213,7 +231,9 @@ impl Inner {
 
             // netting: merge into an existing same-symbol position; hedging: new position
             let merge_idx = if self.netting {
-                self.positions.iter().position(|(p, _)| p.symbol == req.symbol && p.magic == magic)
+                self.positions
+                    .iter()
+                    .position(|(p, _)| p.symbol == req.symbol && p.magic == magic)
             } else {
                 None
             };
@@ -265,7 +285,7 @@ impl Inner {
                 },
                 visible_from,
             ));
-            let partial = fill_override.map_or(false, |v| v + 1e-12 < req.volume);
+            let partial = fill_override.is_some_and(|v| v + 1e-12 < req.volume);
             TradeResult {
                 retcode: if partial { 10010 } else { 10009 },
                 deal: deal_ticket,
@@ -375,7 +395,14 @@ impl TradingBackend for MockBroker {
         }
         drop(g);
         self.close_externally(ticket);
-        Ok(TradeResult { retcode: 10009, deal: 0, order: 0, position: ticket, volume: 0.0, price: 0.0 })
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 0,
+            order: 0,
+            position: ticket,
+            volume: 0.0,
+            price: 0.0,
+        })
     }
 
     fn order_modify_with_magic(
@@ -397,7 +424,14 @@ impl TradingBackend for MockBroker {
                 }
                 p.stop_loss = stop_loss;
                 p.take_profit = take_profit;
-                return Ok(TradeResult { retcode: 10009, deal: 0, order: 0, position: ticket, volume: 0.0, price: 0.0 });
+                return Ok(TradeResult {
+                    retcode: 10009,
+                    deal: 0,
+                    order: 0,
+                    position: ticket,
+                    volume: 0.0,
+                    price: 0.0,
+                });
             }
         }
         Err(Mt5Error::OrderModifyFailed {
@@ -407,7 +441,11 @@ impl TradingBackend for MockBroker {
         })
     }
 
-    fn positions_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Position>> {
+    fn positions_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
         let mut g = self.inner.lock().unwrap();
         g.query_count += 1;
         let q = g.query_count;
@@ -415,26 +453,36 @@ impl TradingBackend for MockBroker {
             .iter()
             .filter(|(_, vis)| *vis <= q)
             .map(|(p, _)| p)
-            .filter(|p| magic.map_or(true, |m| p.magic == m))
-            .filter(|p| symbol.map_or(true, |s| p.symbol == s))
+            .filter(|p| magic.is_none_or(|m| p.magic == m))
+            .filter(|p| symbol.is_none_or(|s| p.symbol == s))
             .cloned()
             .collect())
     }
 
-    fn pending_orders_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<WorkingOrder>> {
+    fn pending_orders_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
         let g = self.inner.lock().unwrap();
         let q = g.query_count;
         Ok(g.pending
             .iter()
             .filter(|(_, vis)| *vis <= q)
             .map(|(o, _)| o)
-            .filter(|o| magic.map_or(true, |m| o.magic == m))
-            .filter(|o| symbol.map_or(true, |s| o.symbol == s))
+            .filter(|o| magic.is_none_or(|m| o.magic == m))
+            .filter(|o| symbol.is_none_or(|s| o.symbol == s))
             .cloned()
             .collect())
     }
 
-    fn deals_filtered(&self, from: i64, to: i64, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Deal>> {
+    fn deals_filtered(
+        &self,
+        from: i64,
+        to: i64,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Deal>> {
         let g = self.inner.lock().unwrap();
         if !g.history_supported {
             return Err(Mt5Error::UnsupportedFeature("DealsGet"));
@@ -445,8 +493,8 @@ impl TradingBackend for MockBroker {
             .filter(|(_, vis)| *vis <= q)
             .map(|(d, _)| d)
             .filter(|d| d.time >= from && d.time <= to)
-            .filter(|d| magic.map_or(true, |m| d.magic == m))
-            .filter(|d| symbol.map_or(true, |s| d.symbol == s))
+            .filter(|d| magic.is_none_or(|m| d.magic == m))
+            .filter(|d| symbol.is_none_or(|s| d.symbol == s))
             .cloned()
             .collect())
     }

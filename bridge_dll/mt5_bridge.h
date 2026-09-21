@@ -247,6 +247,9 @@ typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint3
 MT5_API int RegisterEventCallback(Mt5EventCallback cb);
 MT5_API int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_t* out_len, uint32_t timeout_ms);
 
+/* Queue observability (protocol v5+) */
+MT5_API uint64_t EventsDroppedTotal(void);
+
 #ifdef __cplusplus
 }
 #endif

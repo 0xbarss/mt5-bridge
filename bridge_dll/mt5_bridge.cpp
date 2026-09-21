@@ -97,6 +97,7 @@ struct QueuedRawEvent {
 };
 static const size_t             MAX_EVENT_QUEUE = 8192;
 static std::queue<QueuedRawEvent> g_event_queue;
+static std::atomic<uint64_t>    g_events_dropped_total{0};
 
 /* ── Low-level I/O ───────────────────────────────────────────────────────── */
 
@@ -166,6 +167,7 @@ static void reader_loop() {
                 cb = g_event_callback;
                 if (g_event_queue.size() >= MAX_EVENT_QUEUE) {
                     g_event_queue.pop(); // drop oldest to preserve real-time responsiveness
+                    g_events_dropped_total.fetch_add(1, std::memory_order_relaxed);
                 }
                 g_event_queue.push({hdr.id, payload});
                 g_event_cv.notify_one();
@@ -665,6 +667,10 @@ int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_
     }
     if (out_len) *out_len = n;
     return 1;
+}
+
+MT5_API uint64_t EventsDroppedTotal(void) {
+    return g_events_dropped_total.load(std::memory_order_relaxed);
 }
 
 } /* extern "C" */

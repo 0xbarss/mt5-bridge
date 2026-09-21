@@ -8,23 +8,31 @@ use mt5_bridge::*;
 
 /// Exhaustive tick range: 1.5M in optimized builds (`cargo test --release`), 150k in debug so a
 /// plain `cargo test` stays quick. CI should run the release sweep.
-const EXHAUSTIVE: i64 = if cfg!(debug_assertions) { 150_000 } else { 1_500_000 };
-const SAMPLES: usize = if cfg!(debug_assertions) { 20_000 } else { 200_000 };
+const EXHAUSTIVE: i64 = if cfg!(debug_assertions) {
+    150_000
+} else {
+    1_500_000
+};
+const SAMPLES: usize = if cfg!(debug_assertions) {
+    20_000
+} else {
+    200_000
+};
 
 /// (tick_size, digits, tick expressed as an integer number of 10^-digits units)
 const CONFIGS: &[(f64, u32, i128)] = &[
-    (0.00001, 5, 1),   // 5-digit FX
+    (0.00001, 5, 1), // 5-digit FX
     (0.00005, 5, 5),
-    (0.0001, 4, 1),    // 4-digit FX
-    (0.001, 3, 1),     // JPY 3-digit
+    (0.0001, 4, 1), // 4-digit FX
+    (0.001, 3, 1),  // JPY 3-digit
     (0.005, 3, 5),
-    (0.01, 2, 1),      // JPY 2-digit / crypto / metals
+    (0.01, 2, 1), // JPY 2-digit / crypto / metals
     (0.05, 2, 5),
     (0.1, 1, 1),
-    (0.25, 2, 25),     // index futures style
+    (0.25, 2, 25), // index futures style
     (0.5, 1, 5),
     (1.0, 0, 1),
-    (0.000001, 6, 1),  // 6-digit exotics
+    (0.000001, 6, 1), // 6-digit exotics
 ];
 
 /// Exact decimal rendering of `n` ticks: n * tick_units / 10^digits.
@@ -37,7 +45,11 @@ fn oracle_price(n: i64, tick_units: i128, digits: u32) -> f64 {
     let s = if digits == 0 {
         format!("{}{int}", if neg { "-" } else { "" })
     } else {
-        format!("{}{int}.{frac:0width$}", if neg { "-" } else { "" }, width = digits as usize)
+        format!(
+            "{}{int}.{frac:0width$}",
+            if neg { "-" } else { "" },
+            width = digits as usize
+        )
     };
     s.parse().unwrap()
 }
@@ -46,7 +58,10 @@ fn oracle_price(n: i64, tick_units: i128, digits: u32) -> f64 {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
 }
@@ -58,7 +73,11 @@ fn ticks_to_price_matches_the_exact_decimal_oracle_bit_for_bit() {
         for n in 0..=EXHAUSTIVE {
             let got = ticks_to_price(n, ts, d);
             let want = oracle_price(n, tu, d);
-            assert_eq!(got.to_bits(), want.to_bits(), "ts={ts} d={d} n={n}: {got} != {want}");
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "ts={ts} d={d} n={n}: {got} != {want}"
+            );
         }
         // …plus a large random sample up to prices of ~10^9 / negative ticks (spreads/deltas).
         let mut rng = Lcg(0x5EED ^ (d as u64) << 8 ^ tu as u64);
@@ -117,7 +136,10 @@ fn off_grid_prices_snap_to_the_nearest_tick_and_are_monotonic() {
             let t = price_to_ticks(p, ts);
             assert!(t >= prev, "non-monotonic at ts={ts} step={step}");
             prev = t;
-            assert!((t as f64 - n_f).abs() <= 0.5 + 1e-6, "ts={ts} step={step}: {t} vs {n_f}");
+            assert!(
+                (t as f64 - n_f).abs() <= 0.5 + 1e-6,
+                "ts={ts} step={step}: {t} vs {n_f}"
+            );
         }
     }
 }
@@ -138,12 +160,23 @@ fn sl_and_tp_are_exact_tick_offsets_in_both_directions() {
                 } else {
                     (entry_ticks + dist, entry_ticks - dist)
                 };
-                assert_eq!(sl.to_bits(), oracle_price(sl_n, tu, d).to_bits(), "SL ts={ts} buy={is_buy}");
-                assert_eq!(tp.to_bits(), oracle_price(tp_n, tu, d).to_bits(), "TP ts={ts} buy={is_buy}");
+                assert_eq!(
+                    sl.to_bits(),
+                    oracle_price(sl_n, tu, d).to_bits(),
+                    "SL ts={ts} buy={is_buy}"
+                );
+                assert_eq!(
+                    tp.to_bits(),
+                    oracle_price(tp_n, tu, d).to_bits(),
+                    "TP ts={ts} buy={is_buy}"
+                );
                 assert_eq!(price_to_ticks(sl, ts), sl_n);
                 assert_eq!(price_to_ticks(tp, ts), tp_n);
                 // distance sign is irrelevant
-                assert_eq!(calculate_sl_ticks(entry, -dist, is_buy, ts, d).to_bits(), sl.to_bits());
+                assert_eq!(
+                    calculate_sl_ticks(entry, -dist, is_buy, ts, d).to_bits(),
+                    sl.to_bits()
+                );
             }
         }
     }
@@ -172,7 +205,11 @@ fn degenerate_inputs_are_handled_without_panicking() {
     assert_eq!(price_to_ticks(f64::NAN, 0.1), 0);
     assert_eq!(price_to_ticks(f64::INFINITY, 0.1), 0);
     assert_eq!(price_to_ticks(f64::NEG_INFINITY, 0.1), 0);
-    assert_eq!(price_to_ticks(1e300, 1e-5), i64::MAX, "saturates instead of wrapping");
+    assert_eq!(
+        price_to_ticks(1e300, 1e-5),
+        i64::MAX,
+        "saturates instead of wrapping"
+    );
     assert_eq!(price_to_ticks(-1e300, 1e-5), i64::MIN);
     assert_eq!(price_to_ticks(0.0, 0.01), 0);
     assert_eq!(ticks_to_price(0, 0.01, 2), 0.0);
@@ -183,10 +220,22 @@ fn degenerate_inputs_are_handled_without_panicking() {
     // Extreme distances must keep protection on the correct SIDE of entry (regression: in release
     // builds `i64::MIN.abs()` wrapped negative, flipping a buy's stop above entry).
     for dist in [i64::MIN, i64::MIN + 1, i64::MAX] {
-        assert!(calculate_sl_ticks(1.0, dist, true, 0.01, 2) <= 1.0, "buy SL below entry, dist={dist}");
-        assert!(calculate_sl_ticks(1.0, dist, false, 0.01, 2) >= 1.0, "sell SL above entry, dist={dist}");
-        assert!(calculate_tp_ticks(1.0, dist, true, 0.01, 2) >= 1.0, "buy TP above entry, dist={dist}");
-        assert!(calculate_tp_ticks(1.0, dist, false, 0.01, 2) <= 1.0, "sell TP below entry, dist={dist}");
+        assert!(
+            calculate_sl_ticks(1.0, dist, true, 0.01, 2) <= 1.0,
+            "buy SL below entry, dist={dist}"
+        );
+        assert!(
+            calculate_sl_ticks(1.0, dist, false, 0.01, 2) >= 1.0,
+            "sell SL above entry, dist={dist}"
+        );
+        assert!(
+            calculate_tp_ticks(1.0, dist, true, 0.01, 2) >= 1.0,
+            "buy TP above entry, dist={dist}"
+        );
+        assert!(
+            calculate_tp_ticks(1.0, dist, false, 0.01, 2) <= 1.0,
+            "sell TP below entry, dist={dist}"
+        );
     }
     // Saturated entry (absurd price) must not overflow either.
     let _ = calculate_sl_ticks(1e300, 5, true, 1e-5, 5);

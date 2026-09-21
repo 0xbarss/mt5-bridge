@@ -45,12 +45,16 @@ pub struct Mt5Client {
     fn_unsubscribe_book: Option<FnUnsubscribeBook>,
     #[allow(dead_code)]
     fn_poll_event: Option<FnPollEvent>,
+    #[allow(dead_code)]
+    fn_events_dropped_total: Option<FnEventsDroppedTotal>,
     symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     symbol_cache_ttl: Duration,
     #[cfg(feature = "async")]
     event_bus: Arc<crate::stream::EventBus>,
     #[cfg(feature = "async")]
     event_loop_running: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(feature = "async")]
+    event_pump_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 // Safety: Mt5Client is safe to send and share across threads.
@@ -155,6 +159,7 @@ impl Mt5Client {
             fn_subscribe_book,
             fn_unsubscribe_book,
             fn_poll_event,
+            fn_events_dropped_total,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -281,8 +286,11 @@ impl Mt5Client {
                 .map(|s| *s)
                 .ok();
 
-            let fn_poll_event: Option<FnPollEvent> = lib
-                .get::<FnPollEvent>(b"PollEvent\0")
+            let fn_poll_event: Option<FnPollEvent> =
+                lib.get::<FnPollEvent>(b"PollEvent\0").map(|s| *s).ok();
+
+            let fn_events_dropped_total: Option<FnEventsDroppedTotal> = lib
+                .get::<FnEventsDroppedTotal>(b"EventsDroppedTotal\0")
                 .map(|s| *s)
                 .ok();
 
@@ -308,6 +316,7 @@ impl Mt5Client {
                 fn_subscribe_book,
                 fn_unsubscribe_book,
                 fn_poll_event,
+                fn_events_dropped_total,
             )
         };
 
@@ -317,7 +326,7 @@ impl Mt5Client {
         let event_loop_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         #[cfg(feature = "async")]
-        if let Some(poll_fn) = fn_poll_event {
+        let event_pump_handle = if let Some(poll_fn) = fn_poll_event {
             let running = Arc::clone(&event_loop_running);
             let bus = Arc::clone(&event_bus);
             std::thread::Builder::new()
@@ -339,15 +348,21 @@ impl Mt5Client {
                         if res == 1 && out_len > 0 {
                             match event_type {
                                 1 if out_len >= std::mem::size_of::<Mt5TickEvent>() as u32 => {
-                                    let raw: Mt5TickEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    let raw: Mt5TickEvent = unsafe {
+                                        std::ptr::read_unaligned(buf.as_ptr() as *const _)
+                                    };
                                     bus.dispatch_tick(Tick::from_event(raw));
                                 }
                                 2 if out_len >= std::mem::size_of::<Mt5TradeEvent>() as u32 => {
-                                    let raw: Mt5TradeEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    let raw: Mt5TradeEvent = unsafe {
+                                        std::ptr::read_unaligned(buf.as_ptr() as *const _)
+                                    };
                                     bus.dispatch_trade(TradeEvent::from_raw(raw));
                                 }
                                 3 if out_len >= std::mem::size_of::<Mt5BookEvent>() as u32 => {
-                                    let raw: Mt5BookEvent = unsafe { std::ptr::read(buf.as_ptr() as *const _) };
+                                    let raw: Mt5BookEvent = unsafe {
+                                        std::ptr::read_unaligned(buf.as_ptr() as *const _)
+                                    };
                                     bus.dispatch_book(BookEvent::from_raw(raw));
                                 }
                                 _ => {}
@@ -355,8 +370,10 @@ impl Mt5Client {
                         }
                     }
                 })
-                .ok();
-        }
+                .ok()
+        } else {
+            None
+        };
 
         let client = Mt5Client {
             _lib: lib,
@@ -381,12 +398,15 @@ impl Mt5Client {
             fn_subscribe_book,
             fn_unsubscribe_book,
             fn_poll_event,
+            fn_events_dropped_total,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: DEFAULT_SYMBOL_CACHE_TTL,
             #[cfg(feature = "async")]
             event_bus,
             #[cfg(feature = "async")]
             event_loop_running,
+            #[cfg(feature = "async")]
+            event_pump_handle,
         };
 
         let pwd_c = CString::new(password)?;
@@ -849,6 +869,20 @@ impl Mt5Client {
         self.order_close(ticket)
     }
 
+    /// Close an open market position by its position ticket number.
+    ///
+    /// This is an ergonomic counterpart to [`order_cancel`](Self::order_cancel) specifically intended
+    /// for market positions. Under the hood, the EA detects that the ticket represents an open
+    /// position and executes an opposing market deal (`TRADE_ACTION_DEAL`) to close it.
+    pub fn close_position(&self, ticket: u64) -> Result<TradeResult> {
+        self.order_close(ticket)
+    }
+
+    /// Close an open market position by its position ticket number, verifying strategy magic number ownership.
+    pub fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
+        self.order_close_with_magic(ticket, magic)
+    }
+
     /// Modify the Stop Loss and/or Take Profit of an open position or pending order.
     pub fn order_modify(
         &self,
@@ -1015,7 +1049,11 @@ impl Mt5Client {
         }
 
         let n = (count as usize).min(buf.len());
-        let orders = buf[..n].iter().copied().map(WorkingOrder::from_raw).collect();
+        let orders = buf[..n]
+            .iter()
+            .copied()
+            .map(WorkingOrder::from_raw)
+            .collect();
         Ok(orders)
     }
 
@@ -1116,7 +1154,11 @@ impl Mt5Client {
             )));
         }
         let rx = self.event_bus.subscribe_ticks(symbol.trim());
-        Ok(crate::stream::TickSubscription::new(symbol.trim(), mode, rx))
+        Ok(crate::stream::TickSubscription::new(
+            symbol.trim(),
+            mode,
+            rx,
+        ))
     }
 
     /// Unsubscribe from real-time pushed ticks for a symbol (protocol v5+).
@@ -1170,7 +1212,10 @@ impl Mt5Client {
 
     /// Subscribe to depth-of-market book events for a symbol (protocol v5+).
     #[cfg(feature = "async")]
-    pub fn subscribe_book(&self, symbol: &str) -> Result<tokio::sync::broadcast::Receiver<BookEvent>> {
+    pub fn subscribe_book(
+        &self,
+        symbol: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<BookEvent>> {
         let fn_sub = self
             .fn_subscribe_book
             .ok_or(Mt5Error::UnsupportedFeature("SubscribeBook"))?;
@@ -1208,10 +1253,20 @@ impl Mt5Client {
         Arc::clone(&self.event_bus)
     }
 
+    /// Total events dropped by the native C++ DLL buffer queue due to overflow.
+    pub fn events_dropped_total(&self) -> u64 {
+        if let Some(f) = self.fn_events_dropped_total {
+            unsafe { f() }
+        } else {
+            0
+        }
+    }
+
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.
     pub fn shutdown(&self) -> Result<()> {
         #[cfg(feature = "async")]
-        self.event_loop_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.event_loop_running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let ret = unsafe { (self.fn_shut)() };
         if ret != 1 {
             return Err(Mt5Error::Other(format!(
@@ -1226,10 +1281,16 @@ impl Mt5Client {
 impl Drop for Mt5Client {
     fn drop(&mut self) {
         #[cfg(feature = "async")]
-        self.event_loop_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.event_loop_running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         // Shutdown is intentionally idempotent in the DLL (returns 1 if already disconnected).
+        // This sets g_running to false and signals g_event_cv in the DLL, waking up poll_fn.
         unsafe {
             let _ = (self.fn_shut)();
+        }
+        #[cfg(feature = "async")]
+        if let Some(handle) = self.event_pump_handle.take() {
+            let _ = handle.join();
         }
     }
 }

@@ -348,11 +348,9 @@ pub type FnModifyMagic =
     unsafe extern "C" fn(u64, u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnSymTick = unsafe extern "C" fn(*const c_char, *mut Mt5Tick) -> c_int;
 pub type FnSymInfo = unsafe extern "C" fn(*const c_char, *mut Mt5SymInfo) -> c_int;
-pub type FnPositions =
-    unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const c_char) -> c_int;
+pub type FnPositions = unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const c_char) -> c_int;
 pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_char) -> c_int;
-pub type FnDeals =
-    unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
+pub type FnDeals = unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
 
 // Protocol v5 subscription and event function signatures.
 pub type FnSubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
@@ -364,6 +362,7 @@ pub type FnUnsubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type Mt5EventCallback = unsafe extern "C" fn(u16, *const u8, u32);
 pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_int;
 pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
+pub type FnEventsDroppedTotal = unsafe extern "C" fn() -> u64;
 
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]

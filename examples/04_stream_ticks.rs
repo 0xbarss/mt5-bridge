@@ -16,7 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Mt5Client::connect(login, &password, &server)?;
     let symbol = "EURUSD";
 
-    println!("Starting real-time push tick streams for {} (Protocol v5+)...\n", symbol);
+    println!(
+        "Starting real-time push tick streams for {} (Protocol v5+)...\n",
+        symbol
+    );
 
     // --- Part 1: StreamMode::Lossless (Recorder stream) ---
     println!("=== 1. Testing StreamMode::Lossless (Auditing / Recording Stream) ===");

@@ -85,8 +85,8 @@ pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
     BookEvent, Deal, DealEntry, HistoryResult, MismatchKind, OrderRequest, OrderState, OrderType,
-    Position, Rate, StreamMode, SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent,
-    TradeResult, TradeStatus, WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES,
+    Position, Rate, StreamMode, SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult,
+    TradeStatus, WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES,
     WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
 };
 

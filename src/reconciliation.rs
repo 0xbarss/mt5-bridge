@@ -39,8 +39,8 @@ use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
 use crate::journal::OrderStore;
 use crate::types::{
-    comment_matches_client_order_id, wire_id, Deal, OrderRequest, OrderState, Position,
-    TrackedOrder, TradeResult, WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES,
+    comment_matches_client_order_id, parse_wire_id, wire_id, Deal, OrderRequest, OrderState,
+    Position, TrackedOrder, TradeEvent, TradeResult, WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -829,11 +829,15 @@ impl OrderManager {
                 continue;
             }
             let cid = tracked.client_order_id.clone();
-            let owned_by_other = |owner: Option<&String>| owner.map_or(false, |o| o != &cid);
+            let owned_by_other = |owner: Option<&String>| owner.is_some_and(|o| o != &cid);
 
             // ---- Candidate positions: exact ticket wins; otherwise unambiguous wire-token match.
             let exact_pos = (tracked.position_ticket > 0)
-                .then(|| live_positions.iter().find(|p| p.ticket == tracked.position_ticket))
+                .then(|| {
+                    live_positions
+                        .iter()
+                        .find(|p| p.ticket == tracked.position_ticket)
+                })
                 .flatten();
             let pos_cands: Vec<&Position> = match exact_pos {
                 Some(p) => vec![p],
@@ -847,7 +851,11 @@ impl OrderManager {
 
             // ---- Candidate working orders.
             let exact_ord = (tracked.order_ticket > 0)
-                .then(|| live_orders.iter().find(|o| o.ticket == tracked.order_ticket))
+                .then(|| {
+                    live_orders
+                        .iter()
+                        .find(|o| o.ticket == tracked.order_ticket)
+                })
                 .flatten();
             let ord_cands: Vec<&WorkingOrder> = match exact_ord {
                 Some(o) => vec![o],
@@ -881,10 +889,7 @@ impl OrderManager {
             }
 
             if !entry_deals.is_empty() {
-                let deal_position_id = entry_deals
-                    .iter()
-                    .map(|d| d.position_id)
-                    .find(|&id| id > 0);
+                let deal_position_id = entry_deals.iter().map(|d| d.position_id).find(|&id| id > 0);
                 let pos = deal_position_id
                     .and_then(|id| live_positions.iter().find(|p| p.ticket == id))
                     .or_else(|| pos_cands.first().copied());
@@ -1002,6 +1007,53 @@ impl OrderManager {
             deal_history_available,
         }
     }
+
+    /// Apply an asynchronous broker `TradeEvent` (protocol v5+ push model).
+    ///
+    /// Correlates the event by wire token (parsed from the event comment), position ticket,
+    /// or order ticket, and updates the tracked order's state. If a durable [`OrderStore`]
+    /// is configured, the updated state is immediately saved to disk.
+    ///
+    /// Returns the updated [`TrackedOrder`] if an active order matched the event.
+    pub fn apply_trade_event(&mut self, ev: &TradeEvent) -> Result<Option<TrackedOrder>> {
+        // 1. Try matching via wire token from event comment
+        let matched_id = if !ev.comment.is_empty() {
+            if let Some(id) = self.wire_index.get(&ev.comment).cloned() {
+                Some(id)
+            } else if let Some(token) = parse_wire_id(&ev.comment) {
+                self.wire_index.get(token).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 2. Fallback to ticket matching
+        let target_id = matched_id.or_else(|| {
+            self.orders.values().find_map(|ord| {
+                if (ev.position > 0 && ord.position_ticket == ev.position)
+                    || (ev.order > 0 && ord.order_ticket == ev.order)
+                    || (ev.deal > 0 && ord.deal_tickets.contains(&ev.deal))
+                {
+                    Some(ord.client_order_id.clone())
+                } else {
+                    None
+                }
+            })
+        });
+
+        if let Some(id) = target_id {
+            if let Some(ord) = self.orders.get_mut(&id) {
+                ord.update_from_trade_event(ev);
+                let cloned = ord.clone();
+                self.persist()?;
+                return Ok(Some(cloned));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 /// Thread-safe handle to an [`OrderManager`] that **structurally** enforces the locking
@@ -1056,7 +1108,8 @@ impl SharedOrderManager {
         previous_client_order_id: &str,
         req: OrderRequest,
     ) -> Result<TrackedOrder> {
-        self.lock().retry_order(client, previous_client_order_id, req)
+        self.lock()
+            .retry_order(client, previous_client_order_id, req)
     }
 
     /// See [`OrderManager::reconcile`].
@@ -1084,7 +1137,8 @@ impl SharedOrderManager {
         stop_loss: f64,
         take_profit: f64,
     ) -> Result<TradeResult> {
-        self.lock().modify_order(client, ticket, stop_loss, take_profit)
+        self.lock()
+            .modify_order(client, ticket, stop_loss, take_profit)
     }
 
     /// Snapshot of one tracked order.
@@ -1100,5 +1154,10 @@ impl SharedOrderManager {
     /// Current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         self.lock().lifecycle()
+    }
+
+    /// Apply an asynchronous broker `TradeEvent` (protocol v5+ push model).
+    pub fn apply_trade_event(&self, ev: &TradeEvent) -> Result<Option<TrackedOrder>> {
+        self.lock().apply_trade_event(ev)
     }
 }

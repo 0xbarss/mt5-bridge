@@ -1415,7 +1415,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         req.price       = NormalizeDouble(ord_price, sym_digits);
         req.sl          = target_sl;
         req.tp          = target_tp;
-        req.type_time   = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TIME_TYPE);
+        req.type_time   = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
         req.expiration  = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
         req.magic       = (ord_magic > 0) ? ord_magic : InpMagicNumber;
         ok = OrderSend(req, res);

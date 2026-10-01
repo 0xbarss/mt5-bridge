@@ -3,11 +3,29 @@ use mt5_bridge::{Mt5Client, Mt5Error, OrderRequest, OrderType, Timeframe};
 use std::env;
 
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 static MT5_LOCK: Mutex<()> = Mutex::new(());
 
-fn get_client() -> Option<(Mt5Client, MutexGuard<'static, ()>)> {
-    let guard = MT5_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+struct LiveGuard(MutexGuard<'static, ()>);
+
+impl std::ops::Deref for LiveGuard {
+    type Target = MutexGuard<'static, ()>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        // Allow the MT5 EA timer loop to cycle, disconnect the named pipe, and re-listen
+        std::thread::sleep(Duration::from_millis(60));
+    }
+}
+
+fn get_client() -> Option<(Mt5Client, LiveGuard)> {
+    let raw_guard = MT5_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = LiveGuard(raw_guard);
 
     let login: i64 = env::var("MT5_LOGIN")
         .unwrap_or_else(|_| "0".to_string())
@@ -22,15 +40,23 @@ fn get_client() -> Option<(Mt5Client, MutexGuard<'static, ()>)> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    match Mt5Client::connect(login, &password, &server) {
-        Ok(client) => Some((client, guard)),
-        Err(e) => {
-            if require_live {
-                panic!("MT5_REQUIRE_LIVE is set, but Mt5Client::connect failed: {e:?}");
+    let mut last_err = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        match Mt5Client::connect(login, &password, &server) {
+            Ok(client) => return Some((client, guard)),
+            Err(e) => {
+                last_err = Some(e);
             }
-            None // Gracefully skip if MT5 bridge is not active/available
         }
     }
+
+    if require_live {
+        panic!("MT5_REQUIRE_LIVE is set, but Mt5Client::connect failed: {last_err:?}");
+    }
+    None
 }
 
 #[test]

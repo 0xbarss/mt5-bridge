@@ -43,9 +43,6 @@ pub struct Mt5Client {
     fn_unsubscribe_trade: Option<FnUnsubscribeTrade>,
     fn_subscribe_book: Option<FnSubscribeBook>,
     fn_unsubscribe_book: Option<FnUnsubscribeBook>,
-    #[allow(dead_code)]
-    fn_poll_event: Option<FnPollEvent>,
-    #[allow(dead_code)]
     fn_events_dropped_total: Option<FnEventsDroppedTotal>,
     symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     symbol_cache_ttl: Duration,
@@ -408,7 +405,6 @@ impl Mt5Client {
             fn_unsubscribe_trade,
             fn_subscribe_book,
             fn_unsubscribe_book,
-            fn_poll_event,
             fn_events_dropped_total,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: DEFAULT_SYMBOL_CACHE_TTL,

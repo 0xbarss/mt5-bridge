@@ -9,7 +9,6 @@
 //! `mql5/Experts/mt5_bridge.mq5` (`ExtractClientOrderId`): only a well-formed
 //! `cid:<13 Crockford-base32 chars>` prefix is an idempotency key, free-text comments never are,
 //! and a cache hit whose symbol/type/volume differ is rejected rather than replayed.
-#![allow(dead_code)]
 
 use mt5_bridge::*;
 use std::collections::{HashMap, VecDeque};

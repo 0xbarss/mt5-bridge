@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-01
+
+### Added
+
+- **Protocol v6 IPC Engine**:
+  - Ring buffer architecture in C++ DLL (`PollEvent`, `EventsDroppedTotal`) enabling push event streaming.
+  - Push event feeds for real-time ticks, order/deal transactions, and DOM depth-of-market book updates.
+  - Multi-client pipe connection handshake with optional secret authentication (`MT5_PIPE_SECRET`).
+- **Live Integration Test Suite**:
+  - Comprehensive live test suite (`tests/live_integration.rs`) covering market and pending order lifecycles, deal reconciliation, chunked history fetching, and tick streaming against live MetaTrader 5 instances.
+  - Safe client connection pooling and teardown management for rapid sequential sessions.
+
+### Changed
+
+- **MQL5 Expert Advisor**:
+  - Upgraded order modification handling with `ORDER_TYPE_TIME` alignment.
+  - Refined timer dispatch and event emission loop for lower latency tick distribution.
+
+### Fixed
+
+- Eliminated all dead code warnings and unused struct field allocations across client, tests, and mock backends.
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

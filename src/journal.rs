@@ -50,8 +50,22 @@ mod json_file {
     struct Envelope {
         format: String,
         version: u32,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        checksum: String,
         saved_at: i64,
         orders: Vec<TrackedOrder>,
+    }
+
+    fn compute_checksum(orders: &[TrackedOrder]) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let serialized = serde_json::to_vec(orders).unwrap_or_default();
+        for &b in &serialized {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{h:016x}")
     }
 
     /// Atomic, fsync'd JSON file implementation of [`OrderStore`].
@@ -62,6 +76,7 @@ mod json_file {
     #[derive(Debug, Clone)]
     pub struct JsonFileStore {
         path: PathBuf,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
 
     fn io_err(what: &str, path: &Path, e: std::io::Error) -> Mt5Error {
@@ -71,7 +86,10 @@ mod json_file {
     impl JsonFileStore {
         /// Create a store backed by `path`. The parent directory must exist.
         pub fn new(path: impl Into<PathBuf>) -> Self {
-            Self { path: path.into() }
+            Self {
+                path: path.into(),
+                generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            }
         }
 
         /// Path of the backing file.
@@ -88,13 +106,60 @@ mod json_file {
             name.push(".tmp");
             self.path.with_file_name(name)
         }
+
+        fn bak_path(&self) -> PathBuf {
+            let mut name = self
+                .path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            name.push(".bak");
+            self.path.with_file_name(name)
+        }
+
+        fn parse_and_verify(&self, bytes: &[u8], path: &Path) -> Result<Vec<TrackedOrder>> {
+            let envelope: Envelope = serde_json::from_slice(bytes).map_err(|e| {
+                Mt5Error::PersistenceError(format!(
+                    "'{}' is corrupt or not an order journal: {e}. Refusing to start with an empty order book; inspect or restore the file.",
+                    path.display()
+                ))
+            })?;
+            if envelope.format != FORMAT || envelope.version > VERSION {
+                return Err(Mt5Error::PersistenceError(format!(
+                    "'{}' has unsupported format '{}' v{}",
+                    path.display(),
+                    envelope.format,
+                    envelope.version
+                )));
+            }
+            if !envelope.checksum.is_empty() {
+                let expected = compute_checksum(&envelope.orders);
+                if envelope.checksum != expected {
+                    return Err(Mt5Error::PersistenceError(format!(
+                        "'{}' checksum mismatch: expected {expected}, recorded {}. Possible data corruption.",
+                        path.display(),
+                        envelope.checksum
+                    )));
+                }
+            }
+            self.generation
+                .store(envelope.generation, std::sync::atomic::Ordering::SeqCst);
+            Ok(envelope.orders)
+        }
     }
 
     impl OrderStore for JsonFileStore {
         fn save(&self, orders: &[TrackedOrder]) -> Result<()> {
+            let gen = self
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let checksum = compute_checksum(orders);
             let envelope = Envelope {
                 format: FORMAT.to_string(),
                 version: VERSION,
+                generation: gen,
+                checksum,
                 saved_at: chrono::Utc::now().timestamp(),
                 orders: orders.to_vec(),
             };
@@ -108,6 +173,11 @@ mod json_file {
                 // Data must be on stable storage *before* the rename makes it visible.
                 f.sync_all().map_err(|e| io_err("fsync", &tmp, e))?;
             }
+
+            if self.path.exists() {
+                let _ = fs::copy(&self.path, self.bak_path());
+            }
+
             fs::rename(&tmp, &self.path).map_err(|e| io_err("rename onto", &self.path, e))?;
 
             // Make the rename itself durable. (Directories cannot be opened for fsync on Windows;
@@ -128,24 +198,40 @@ mod json_file {
         fn load(&self) -> Result<Vec<TrackedOrder>> {
             let bytes = match fs::read(&self.path) {
                 Ok(b) => b,
-                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    let bak = self.bak_path();
+                    if bak.exists() {
+                        if let Ok(b) = fs::read(&bak) {
+                            tracing::warn!(
+                                "Primary journal missing; recovered from backup '{}'",
+                                bak.display()
+                            );
+                            return self.parse_and_verify(&b, &bak);
+                        }
+                    }
+                    return Ok(Vec::new());
+                }
                 Err(e) => return Err(io_err("read", &self.path, e)),
             };
-            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|e| {
-                Mt5Error::PersistenceError(format!(
-                    "'{}' is corrupt or not an order journal: {e}. Refusing to start with an empty order book; inspect or restore the file.",
-                    self.path.display()
-                ))
-            })?;
-            if envelope.format != FORMAT || envelope.version > VERSION {
-                return Err(Mt5Error::PersistenceError(format!(
-                    "'{}' has unsupported format '{}' v{}",
-                    self.path.display(),
-                    envelope.format,
-                    envelope.version
-                )));
+
+            match self.parse_and_verify(&bytes, &self.path) {
+                Ok(orders) => Ok(orders),
+                Err(primary_err) => {
+                    let bak = self.bak_path();
+                    if bak.exists() {
+                        if let Ok(b) = fs::read(&bak) {
+                            if let Ok(orders) = self.parse_and_verify(&b, &bak) {
+                                tracing::warn!(
+                                    "Primary journal corrupt; restored from backup '{}'",
+                                    bak.display()
+                                );
+                                return Ok(orders);
+                            }
+                        }
+                    }
+                    Err(primary_err)
+                }
             }
-            Ok(envelope.orders)
         }
     }
 }

@@ -969,8 +969,13 @@ fn deliberate_sl_tp_modification_updates_the_expectation() {
     let t = mgr
         .submit_order(&broker, buy("EURUSD", 0.5, "mod-1"))
         .unwrap();
-    mgr.modify_order(&broker, t.position_ticket, 1.0700, 1.1000)
-        .unwrap();
+    mgr.modify_order(
+        &broker,
+        t.position_ticket,
+        Level::Set(1.0700),
+        Level::Set(1.1000),
+    )
+    .unwrap();
     let o = mgr.get_order("mod-1").unwrap();
     assert_eq!(
         (o.requested_stop_loss, o.requested_take_profit),
@@ -1311,7 +1316,13 @@ fn a_panic_mid_submission_leaves_a_recoverable_state_and_does_not_poison_the_sha
         fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> {
             self.0.order_close_with_magic(t, m)
         }
-        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> {
+        fn order_modify_with_magic(
+            &self,
+            t: u64,
+            m: u64,
+            sl: Level,
+            tp: Level,
+        ) -> Result<TradeResult> {
             self.0.order_modify_with_magic(t, m, sl, tp)
         }
         fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> {
@@ -1444,7 +1455,13 @@ fn a_crash_between_write_ahead_and_outcome_restores_as_unknown() {
         fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> {
             self.0.order_close_with_magic(t, m)
         }
-        fn order_modify_with_magic(&self, t: u64, m: u64, sl: f64, tp: f64) -> Result<TradeResult> {
+        fn order_modify_with_magic(
+            &self,
+            t: u64,
+            m: u64,
+            sl: Level,
+            tp: Level,
+        ) -> Result<TradeResult> {
             self.0.order_modify_with_magic(t, m, sl, tp)
         }
         fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> {

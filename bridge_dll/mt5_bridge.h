@@ -6,10 +6,14 @@
 #pragma once
 #include <stdint.h>
 
-#ifdef MT5_BRIDGE_EXPORTS
-  #define MT5_API __declspec(dllexport)
+#if defined(_WIN32) || defined(__CYGWIN__)
+  #ifdef MT5_BRIDGE_EXPORTS
+    #define MT5_API __declspec(dllexport)
+  #else
+    #define MT5_API __declspec(dllimport)
+  #endif
 #else
-  #define MT5_API __declspec(dllimport)
+  #define MT5_API __attribute__((visibility("default")))
 #endif
 
 /* Match #[repr(C, packed)] structs in src/ffi.rs — all packed, no padding. */
@@ -105,16 +109,17 @@ typedef struct {
     char     comment[32];
 } Mt5Deal;               /* 152 bytes */
 
-/* Packet header for wire framing (protocol v5+). */
+/* Packet header for wire framing (protocol v6+). */
 typedef struct {
     uint32_t length;     /* payload length in bytes */
     uint8_t  kind;       /* 0 = REQUEST, 1 = RESPONSE, 2 = EVENT */
     uint8_t  _pad;       /* 0 (alignment) */
     uint16_t id;         /* cmd for REQUEST/RESPONSE, event_type for EVENT */
     int32_t  status;     /* response status (>= 0 ok/count, < 0 error; 0 for req/event) */
-} PacketHdr;             /* 12 bytes */
+    uint32_t request_id; /* request ID for matching responses; 0 for EVENT */
+} PacketHdr;             /* 16 bytes */
 
-/* Asynchronous market data tick event pushed by the EA (protocol v5+). */
+/* Asynchronous market data tick event pushed by the EA (protocol v6+). */
 typedef struct {
     char     symbol[32]; /* symbol name */
     int64_t  time_msc;   /* quote timestamp in milliseconds UTC */
@@ -123,15 +128,17 @@ typedef struct {
     double   last;
     uint64_t volume;
     uint32_t flags;
-} Mt5TickEvent;          /* 76 bytes */
+    int32_t  _pad;
+    uint64_t event_seq;  /* monotonic event sequence number */
+} Mt5TickEvent;          /* 88 bytes */
 
-/* Asynchronous trade transaction event pushed by the EA (protocol v5+). */
+/* Asynchronous trade transaction event pushed by the EA (protocol v6+). */
 typedef struct {
     uint64_t deal;
     uint64_t order;
     uint64_t position;
     int64_t  time;
-    int32_t  trans_type;
+    int32_t  trans_type;      /* WTX_* wire constant */
     int32_t  order_type;
     double   price;
     double   volume;
@@ -139,9 +146,16 @@ typedef struct {
     double   tp;
     char     symbol[32];
     char     comment[32];
-} Mt5TradeEvent;         /* 136 bytes */
+    int32_t  deal_entry;      /* 0 = In, 1 = Out, 2 = InOut, 3 = OutBy */
+    int32_t  deal_type;       /* 0 = Buy, 1 = Sell */
+    uint64_t deal_magic;
+    uint64_t deal_position_id;
+    int32_t  deal_reason;
+    int32_t  _pad;
+    uint64_t event_seq;       /* monotonic event sequence number */
+} Mt5TradeEvent;              /* 176 bytes */
 
-/* Asynchronous depth-of-market book event pushed by the EA (protocol v5+). */
+/* Asynchronous depth-of-market book event pushed by the EA (protocol v6+). */
 typedef struct {
     char     symbol[32];
     int64_t  time_msc;
@@ -149,22 +163,39 @@ typedef struct {
     int32_t  _pad;
     double   price;
     double   volume;
-} Mt5BookEvent;          /* 64 bytes */
+    uint64_t event_seq;  /* monotonic event sequence number */
+} Mt5BookEvent;          /* 72 bytes */
 
 #pragma pack(pop)
 
 /* Protocol version for wire handshake compatibility checks.
- * v5: adds asynchronous EVENT packets (TICK, TRADE, BOOK), subscription commands
- *     (CMD_SUBSCRIBE_TICKS, etc.), and full-duplex named pipe push model.
+ * v6: adds 16-byte PacketHdr with request_id echo, explicit event schema with
+ *     deal_entry/deal_magic/event_seq, challenge-response auth, and robust multiplexing.
  *     Must match PROTOCOL_VERSION in src/ffi.rs and EA's PROTOCOL_VERSION. */
-#define MT5_BRIDGE_PROTOCOL_VERSION 5
+#define MT5_BRIDGE_PROTOCOL_VERSION 6
+
+/* Wire transaction kinds (WTX_*) - stable across MT5 builds */
+#define WTX_OTHER         0
+#define WTX_DEAL_ADD      1
+#define WTX_ORDER_ADD     2
+#define WTX_ORDER_DELETE  3
+#define WTX_ORDER_UPDATE  4
+#define WTX_POSITION      5
+#define WTX_REQUEST       6
+
+/* Frame and query caps */
+#define MT5_MAX_FRAME_BYTES     (16 * 1024 * 1024) /* 16 MiB */
+#define MT5_MAX_BARS_PER_FETCH  ((MT5_MAX_FRAME_BYTES - 64) / sizeof(Mt5Rate)) /* 279,620 */
 
 /* Standard bridge operation return codes */
-#define MT5_OK                     1
-#define MT5_ERR_GENERAL            0
-#define MT5_ERR_SEND_FAILED       -1   /* Failed before transmission to MT5 (safe to retry) */
-#define MT5_ERR_UNKNOWN_EXECUTION -2   /* Packet sent, but response lost/disconnected (uncertain execution - reconcile) */
-#define MT5_ERR_PIPE_DISCONNECTED -3   /* Pipe not connected */
+#define MT5_OK                      1
+#define MT5_ERR_GENERAL             0
+#define MT5_ERR_SEND_FAILED        -1   /* Failed before transmission to MT5 (safe to retry) */
+#define MT5_ERR_UNKNOWN_EXECUTION  -2   /* Packet sent, but response lost/disconnected (uncertain execution - reconcile) */
+#define MT5_ERR_PIPE_DISCONNECTED  -3   /* Pipe not connected */
+#define MT5_ERR_SERVER_AUTH_FAILED -4   /* Server authentication failed */
+#define MT5_ERR_EA_REJECTED        -5   /* EA responded with an error status */
+#define MT5_ERR_ALREADY_INITIALIZED -6  /* Bridge client already initialized in this process */
 
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5SymInfo) == 60, "Mt5SymInfo size must be exactly 60 bytes");
@@ -174,10 +205,10 @@ static_assert(sizeof(Mt5TradeResult) == 44, "Mt5TradeResult size must be exactly
 static_assert(sizeof(Mt5Position) == 148, "Mt5Position size must be exactly 148 bytes");
 static_assert(sizeof(Mt5Order) == 140, "Mt5Order size must be exactly 140 bytes");
 static_assert(sizeof(Mt5Deal) == 152, "Mt5Deal size must be exactly 152 bytes");
-static_assert(sizeof(PacketHdr) == 12, "PacketHdr size must be exactly 12 bytes");
-static_assert(sizeof(Mt5TickEvent) == 76, "Mt5TickEvent size must be exactly 76 bytes");
-static_assert(sizeof(Mt5TradeEvent) == 136, "Mt5TradeEvent size must be exactly 136 bytes");
-static_assert(sizeof(Mt5BookEvent) == 64, "Mt5BookEvent size must be exactly 64 bytes");
+static_assert(sizeof(PacketHdr) == 16, "PacketHdr size must be exactly 16 bytes");
+static_assert(sizeof(Mt5TickEvent) == 88, "Mt5TickEvent size must be exactly 88 bytes");
+static_assert(sizeof(Mt5TradeEvent) == 176, "Mt5TradeEvent size must be exactly 176 bytes");
+static_assert(sizeof(Mt5BookEvent) == 72, "Mt5BookEvent size must be exactly 72 bytes");
 #endif
 
 #ifdef __cplusplus
@@ -189,6 +220,9 @@ MT5_API int Initialize(int64_t login, const char* password, const char* server);
 
 /* Disconnect and clean up. */
 MT5_API int Shutdown(void);
+
+/* Check connection liveness. Returns 1 if connected and reader alive, 0 otherwise. */
+MT5_API int IsConnected(void);
 
 /* Fetch OHLCV bars in [from, to] UTC range into buf (up to buf_capacity items). Returns bar count filled, -1 on error. */
 MT5_API int CopyRates(const char* symbol, int timeframe, int64_t from,
@@ -211,11 +245,11 @@ MT5_API int OrderClose(uint64_t ticket, Mt5TradeResult* result);
 /* Close position by ticket with magic number verification. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
 MT5_API int OrderCloseWithMagic(uint64_t ticket, uint64_t magic, Mt5TradeResult* result);
 
-/* Modify SL/TP. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
-MT5_API int OrderModify(uint64_t ticket, double sl, double tp, Mt5TradeResult* result);
+/* Modify SL/TP with explicit level modes (0=keep, 1=clear, 2=set). Returns 1 on success, -1 on send fail, -2 on unknown execution. */
+MT5_API int OrderModify(uint64_t ticket, uint8_t sl_mode, double sl, uint8_t tp_mode, double tp, Mt5TradeResult* result);
 
-/* Modify SL/TP with magic number verification. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
-MT5_API int OrderModifyWithMagic(uint64_t ticket, uint64_t magic, double sl, double tp, Mt5TradeResult* result);
+/* Modify SL/TP with magic number verification and explicit level modes. */
+MT5_API int OrderModifyWithMagic(uint64_t ticket, uint64_t magic, uint8_t sl_mode, double sl, uint8_t tp_mode, double tp, Mt5TradeResult* result);
 
 /* Latest tick for a symbol. Returns 1 on success. */
 MT5_API int SymbolInfoTick(const char* symbol, Mt5Tick* tick);
@@ -234,7 +268,7 @@ MT5_API int OrdersGet(Mt5Order* buf, int buf_capacity, uint64_t magic_filter, co
  * A return value equal to buf_capacity means the result may have been truncated. */
 MT5_API int DealsGet(Mt5Deal* buf, int buf_capacity, int64_t from, int64_t to, uint64_t magic_filter, const char* symbol_filter);
 
-/* Subscription management (protocol v5+) */
+/* Subscription management (protocol v6+) */
 MT5_API int SubscribeTicks(const char* symbol);
 MT5_API int UnsubscribeTicks(const char* symbol);
 MT5_API int SubscribeTrade(void);
@@ -242,14 +276,16 @@ MT5_API int UnsubscribeTrade(void);
 MT5_API int SubscribeBook(const char* symbol);
 MT5_API int UnsubscribeBook(const char* symbol);
 
-/* Event callback registration and polling (protocol v5+) */
+/* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);
 MT5_API int RegisterEventCallback(Mt5EventCallback cb);
 MT5_API int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_t* out_len, uint32_t timeout_ms);
 
-/* Queue observability (protocol v5+) */
+/* Queue observability and orphan tracking */
 MT5_API uint64_t EventsDroppedTotal(void);
+MT5_API uint64_t GetOrphanCount(void);
 
 #ifdef __cplusplus
 }
 #endif
+

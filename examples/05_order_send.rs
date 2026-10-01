@@ -82,7 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Modifying SL for ticket {} to {:.5}...",
         target_ticket, new_sl
     );
-    let mod_res = client.order_modify(target_ticket, new_sl, tp)?;
+    let mod_res = client.order_modify(
+        target_ticket,
+        mt5_bridge::types::Level::Set(new_sl),
+        mt5_bridge::types::Level::Set(tp),
+    )?;
     println!(
         "✓ Order SL modified successfully! (retcode: {} - {})",
         mod_res.retcode,

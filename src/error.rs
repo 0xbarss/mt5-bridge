@@ -119,11 +119,62 @@ pub enum Mt5Error {
     #[error("Thread task join error: {0}")]
     JoinError(String),
 
+    #[error(
+        "Order rejected by preflight validation or EA risk gate before transmission to broker: {0}"
+    )]
+    PreflightRejected(String),
+
+    #[error("Server authentication failed or pipe peer verification failed")]
+    ServerAuthFailed,
+
+    #[error("Another Mt5Client is already active in this process; multiple concurrent instances share DLL globals and are not permitted")]
+    AlreadyConnected,
+
+    #[error("Positions query snapshot truncated: received {returned} items out of {total} total matching positions")]
+    PositionsTruncated { returned: usize, total: usize },
+
+    #[error("Working orders query snapshot truncated: received {returned} items out of {total} total matching orders")]
+    OrdersTruncated { returned: usize, total: usize },
+
+    #[error("Deal history query snapshot truncated: received {returned} items exceeding buffer capacity {capacity}")]
+    DealHistoryTruncated { returned: usize, capacity: usize },
+
+    #[error("Invalid request parameters: {0}")]
+    InvalidRequest(String),
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     #[error("Stream channel disconnected")]
     ChannelDisconnected,
 
     #[error("Internal bridge error: {0}")]
     Other(String),
+}
+
+/// Classification of MT5 trade return codes according to execution certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetcodeClass {
+    /// Definitive positive execution.
+    Executed,
+    /// Definitive failure: order was proven NOT executed at the broker.
+    DefinitivelyNotExecuted,
+    /// Ambiguous outcome: execution cannot be determined from retcode alone.
+    Ambiguous,
+}
+
+/// Classify an MT5 trade retcode into Executed, DefinitivelyNotExecuted, or Ambiguous.
+pub fn classify_retcode(retcode: u32) -> RetcodeClass {
+    match retcode {
+        10008..=10010 => RetcodeClass::Executed,
+        10004 | 10006 | 10007 | 10013 | 10014 | 10015 | 10016 | 10017 | 10018 | 10019 | 10020
+        | 10021 | 10022 | 10024 | 10026 | 10027 | 10028 | 10029 | 10030 | 10032 | 10033 | 10034
+        | 10035 | 10036 | 10038 | 10039 | 10040 | 10042 | 10043 | 10044 | 10045 | 10046 => {
+            RetcodeClass::DefinitivelyNotExecuted
+        }
+        // 10011 (ERROR), 10012 (TIMEOUT), 10023 (ORDER_CHANGED), 10031 (CONNECTION), 0, and any unlisted codes:
+        _ => RetcodeClass::Ambiguous,
+    }
 }
 
 /// Helper function to translate standard MT5 retcodes to human-readable strings.

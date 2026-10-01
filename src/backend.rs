@@ -11,7 +11,7 @@
 
 use crate::client::Mt5Client;
 use crate::error::{Mt5Error, Result};
-use crate::types::{Deal, OrderRequest, Position, TradeResult, WorkingOrder};
+use crate::types::{Deal, Level, OrderRequest, Position, TradeResult, WorkingOrder};
 use std::sync::Arc;
 
 /// Trading operations required by [`OrderManager`](crate::OrderManager).
@@ -36,8 +36,8 @@ pub trait TradingBackend {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult>;
 
     /// Open positions, optionally filtered by magic number and/or symbol.
@@ -80,8 +80,8 @@ impl TradingBackend for Mt5Client {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         Mt5Client::order_modify_with_magic(self, ticket, magic, stop_loss, take_profit)
     }
@@ -126,8 +126,8 @@ impl<T: TradingBackend + ?Sized> TradingBackend for Arc<T> {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         (**self).order_modify_with_magic(ticket, magic, stop_loss, take_profit)
     }
@@ -167,8 +167,8 @@ impl<T: TradingBackend + ?Sized> TradingBackend for &T {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         (**self).order_modify_with_magic(ticket, magic, stop_loss, take_profit)
     }

@@ -176,7 +176,7 @@ impl Default for Mt5Deal {
     }
 }
 
-/// Wire format for packet header (12 bytes, protocol v5+).
+/// Wire format for packet header (16 bytes, protocol v6+).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketHdr {
@@ -185,9 +185,10 @@ pub struct PacketHdr {
     pub _pad: u8,
     pub id: u16,
     pub status: i32,
+    pub request_id: u32,
 }
 
-/// Asynchronous market data tick event pushed by the EA (76 bytes, protocol v5+).
+/// Asynchronous market data tick event pushed by the EA (88 bytes, protocol v6+).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5TickEvent {
@@ -198,6 +199,8 @@ pub struct Mt5TickEvent {
     pub last: f64,
     pub volume: u64,
     pub flags: u32,
+    pub _pad: i32,
+    pub event_seq: u64,
 }
 
 impl Default for Mt5TickEvent {
@@ -210,11 +213,13 @@ impl Default for Mt5TickEvent {
             last: 0.0,
             volume: 0,
             flags: 0,
+            _pad: 0,
+            event_seq: 0,
         }
     }
 }
 
-/// Asynchronous trade transaction event pushed by the EA (136 bytes, protocol v5+).
+/// Asynchronous trade transaction event pushed by the EA (176 bytes, protocol v6+).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5TradeEvent {
@@ -230,6 +235,13 @@ pub struct Mt5TradeEvent {
     pub tp: f64,
     pub symbol: [u8; 32],
     pub comment: [u8; 32],
+    pub deal_entry: i32,
+    pub deal_type: i32,
+    pub deal_magic: u64,
+    pub deal_position_id: u64,
+    pub deal_reason: i32,
+    pub _pad: i32,
+    pub event_seq: u64,
 }
 
 impl Default for Mt5TradeEvent {
@@ -247,11 +259,18 @@ impl Default for Mt5TradeEvent {
             tp: 0.0,
             symbol: [0u8; 32],
             comment: [0u8; 32],
+            deal_entry: 0,
+            deal_type: 0,
+            deal_magic: 0,
+            deal_position_id: 0,
+            deal_reason: 0,
+            _pad: 0,
+            event_seq: 0,
         }
     }
 }
 
-/// Asynchronous depth-of-market book event pushed by the EA (64 bytes, protocol v5+).
+/// Asynchronous depth-of-market book event pushed by the EA (72 bytes, protocol v6+).
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5BookEvent {
@@ -261,6 +280,7 @@ pub struct Mt5BookEvent {
     pub _pad: i32,
     pub price: f64,
     pub volume: f64,
+    pub event_seq: u64,
 }
 
 impl Default for Mt5BookEvent {
@@ -272,6 +292,7 @@ impl Default for Mt5BookEvent {
             _pad: 0,
             price: 0.0,
             volume: 0.0,
+            event_seq: 0,
         }
     }
 }
@@ -295,17 +316,34 @@ pub enum EventType {
     Bar = 4,
 }
 
+/// Wire transaction kinds (WTX_*) matching EA and C++ DLL
+pub const WTX_OTHER: i32 = 0;
+pub const WTX_DEAL_ADD: i32 = 1;
+pub const WTX_ORDER_ADD: i32 = 2;
+pub const WTX_ORDER_DELETE: i32 = 3;
+pub const WTX_ORDER_UPDATE: i32 = 4;
+pub const WTX_POSITION: i32 = 5;
+pub const WTX_REQUEST: i32 = 6;
+
+/// Frame and query caps
+pub const MT5_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MT5_MAX_BARS_PER_FETCH: usize =
+    (MT5_MAX_FRAME_BYTES - 64) / std::mem::size_of::<Mt5Rate>();
+
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
 //
-// v5: push model, asynchronous EVENT packets (TICK, TRADE, BOOK), subscriptions,
-//     and full-duplex named pipe streaming.
-pub const PROTOCOL_VERSION: u32 = 5;
+// v6: 16-byte PacketHdr with request_id echo, explicit event schema with
+//     deal_entry/deal_magic/event_seq, challenge-response auth, and robust multiplexing.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const MT5_OK: i32 = 1;
 pub const MT5_ERR_GENERAL: i32 = 0;
 pub const MT5_ERR_SEND_FAILED: i32 = -1;
 pub const MT5_ERR_UNKNOWN_EXECUTION: i32 = -2;
 pub const MT5_ERR_PIPE_DISCONNECTED: i32 = -3;
+pub const MT5_ERR_SERVER_AUTH_FAILED: i32 = -4;
+pub const MT5_ERR_EA_REJECTED: i32 = -5;
+pub const MT5_ERR_ALREADY_INITIALIZED: i32 = -6;
 
 // Ensure struct memory layouts match C header at compile-time.
 const _: () = {
@@ -316,15 +354,16 @@ const _: () = {
     assert!(std::mem::size_of::<Mt5Position>() == 148);
     assert!(std::mem::size_of::<Mt5Order>() == 140);
     assert!(std::mem::size_of::<Mt5Deal>() == 152);
-    assert!(std::mem::size_of::<PacketHdr>() == 12);
-    assert!(std::mem::size_of::<Mt5TickEvent>() == 76);
-    assert!(std::mem::size_of::<Mt5TradeEvent>() == 136);
-    assert!(std::mem::size_of::<Mt5BookEvent>() == 64);
+    assert!(std::mem::size_of::<PacketHdr>() == 16);
+    assert!(std::mem::size_of::<Mt5TickEvent>() == 88);
+    assert!(std::mem::size_of::<Mt5TradeEvent>() == 176);
+    assert!(std::mem::size_of::<Mt5BookEvent>() == 72);
 };
 
 // Function pointer signatures for dynamic library loading.
 pub type FnInit = unsafe extern "C" fn(i64, *const c_char, *const c_char) -> c_int;
 pub type FnShut = unsafe extern "C" fn() -> c_int;
+pub type FnIsConnected = unsafe extern "C" fn() -> c_int;
 pub type FnRates =
     unsafe extern "C" fn(*const c_char, c_int, i64, i64, *mut Mt5Rate, c_int) -> c_int;
 pub type FnAcct = unsafe extern "C" fn(*mut f64, *mut f64, *mut f64, *mut f64) -> c_int;
@@ -343,16 +382,17 @@ pub type FnSend = unsafe extern "C" fn(
 ) -> c_int;
 pub type FnClose = unsafe extern "C" fn(u64, *mut Mt5TradeResult) -> c_int;
 pub type FnCloseMagic = unsafe extern "C" fn(u64, u64, *mut Mt5TradeResult) -> c_int;
-pub type FnModify = unsafe extern "C" fn(u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
+pub type FnModify =
+    unsafe extern "C" fn(u64, u8, c_double, u8, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnModifyMagic =
-    unsafe extern "C" fn(u64, u64, c_double, c_double, *mut Mt5TradeResult) -> c_int;
+    unsafe extern "C" fn(u64, u64, u8, c_double, u8, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnSymTick = unsafe extern "C" fn(*const c_char, *mut Mt5Tick) -> c_int;
 pub type FnSymInfo = unsafe extern "C" fn(*const c_char, *mut Mt5SymInfo) -> c_int;
 pub type FnPositions = unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const c_char) -> c_int;
 pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_char) -> c_int;
 pub type FnDeals = unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
 
-// Protocol v5 subscription and event function signatures.
+// Protocol v6 subscription and event function signatures.
 pub type FnSubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnUnsubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnSubscribeTrade = unsafe extern "C" fn() -> c_int;
@@ -363,6 +403,7 @@ pub type Mt5EventCallback = unsafe extern "C" fn(u16, *const u8, u32);
 pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_int;
 pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
 pub type FnEventsDroppedTotal = unsafe extern "C" fn() -> u64;
+pub type FnGetOrphanCount = unsafe extern "C" fn() -> u64;
 
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]

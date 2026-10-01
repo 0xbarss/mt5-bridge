@@ -62,13 +62,14 @@ pub struct Mt5Client {
 // in the underlying C++ DLL. Note that because of this serialization, concurrent
 // operations across threads (such as streaming ticks/bars and order execution) will
 // serialize and contend on that single global mutex under the hood.
+static CLIENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 unsafe impl Send for Mt5Client {}
 unsafe impl Sync for Mt5Client {}
 
 impl Mt5Client {
     /// Resolve the default DLL path safely, preferring an explicit absolute path adjacent to
-    /// the running executable or in the current working directory, avoiding ambient Windows DLL
-    /// search order side-loading vulnerabilities.
+    /// the running executable, avoiding ambient working directory search order vulnerabilities.
     fn resolve_default_dll_path() -> std::path::PathBuf {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
@@ -76,12 +77,6 @@ impl Mt5Client {
                 if exe_dll.is_file() {
                     return exe_dll;
                 }
-            }
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            let cwd_dll = cwd.join("mt5_bridge.dll");
-            if cwd_dll.is_file() {
-                return cwd_dll;
             }
         }
         std::path::PathBuf::from("mt5_bridge.dll")
@@ -122,6 +117,18 @@ impl Mt5Client {
         password: &str,
         server: &str,
     ) -> Result<Self> {
+        if CLIENT_ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Err(Mt5Error::AlreadyConnected);
+        }
+
         let path_ref = dll_path.as_ref();
         let canonical_path = if path_ref.is_relative() && path_ref.exists() {
             std::fs::canonicalize(path_ref).unwrap_or_else(|_| path_ref.to_path_buf())
@@ -130,12 +137,16 @@ impl Mt5Client {
         };
         let path_str = canonical_path.to_string_lossy().to_string();
 
-        let lib = unsafe { libloading::Library::new(&canonical_path) }.map_err(|source| {
-            Mt5Error::DllLoadError {
-                path: path_str.clone(),
-                source,
+        let lib = match unsafe { libloading::Library::new(&canonical_path) } {
+            Ok(l) => l,
+            Err(source) => {
+                CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                return Err(Mt5Error::DllLoadError {
+                    path: path_str.clone(),
+                    source,
+                });
             }
-        })?;
+        };
 
         let (
             fn_init,
@@ -421,6 +432,7 @@ impl Mt5Client {
 
         let ret = unsafe { (client.fn_init)(login, pwd_c.as_ptr(), srv_c.as_ptr()) };
         if ret != 1 {
+            CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
             return Err(Mt5Error::InitFailed(ret));
         }
 
@@ -607,15 +619,16 @@ impl Mt5Client {
         let tf_const = timeframe.to_mt5_const();
         let tf_secs = timeframe.seconds().max(1);
 
-        let chunk_size = chunk_bars.max(100);
-        let chunk_duration = (chunk_size as i64) * tf_secs;
+        const MT5_MAX_BARS_PER_FETCH: usize = 100_000;
+        let chunk_size = chunk_bars.clamp(100, MT5_MAX_BARS_PER_FETCH);
+        let chunk_duration = (chunk_size as i64).saturating_mul(tf_secs);
 
         let mut all_rates: Vec<Rate> = Vec::new();
         let mut missing_ranges: Vec<(i64, i64)> = Vec::new();
         let mut current_start = start;
 
         while current_start <= end {
-            let current_end = (current_start + chunk_duration).min(end);
+            let current_end = current_start.saturating_add(chunk_duration).min(end);
             let max_bars = ((current_end - current_start) / tf_secs + 20) as usize;
 
             let mut attempts = 0;
@@ -682,6 +695,9 @@ impl Mt5Client {
                 .collect();
 
             all_rates.extend(filtered_chunk);
+            if current_end == i64::MAX {
+                break;
+            }
             current_start = current_end + 1;
         }
 
@@ -887,8 +903,8 @@ impl Mt5Client {
     pub fn order_modify(
         &self,
         ticket: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         self.order_modify_with_magic(ticket, 0, stop_loss, take_profit)
     }
@@ -899,24 +915,31 @@ impl Mt5Client {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         if ticket == 0 {
             return Err(Mt5Error::Other("Order ticket cannot be 0".to_string()));
         }
-        if stop_loss < 0.0 || stop_loss.is_nan() || stop_loss.is_infinite() {
-            return Err(Mt5Error::Other(format!(
-                "Invalid stop loss {}: stop loss cannot be negative or NaN",
-                stop_loss
-            )));
+        if let Level::Set(sl) = stop_loss {
+            if sl < 0.0 || sl.is_nan() || sl.is_infinite() {
+                return Err(Mt5Error::Other(format!(
+                    "Invalid stop loss {}: stop loss cannot be negative or NaN",
+                    sl
+                )));
+            }
         }
-        if take_profit < 0.0 || take_profit.is_nan() || take_profit.is_infinite() {
-            return Err(Mt5Error::Other(format!(
-                "Invalid take profit {}: take profit cannot be negative or NaN",
-                take_profit
-            )));
+        if let Level::Set(tp) = take_profit {
+            if tp < 0.0 || tp.is_nan() || tp.is_infinite() {
+                return Err(Mt5Error::Other(format!(
+                    "Invalid take profit {}: take profit cannot be negative or NaN",
+                    tp
+                )));
+            }
         }
+
+        let (sl_mode, sl_val) = stop_loss.to_wire();
+        let (tp_mode, tp_val) = take_profit.to_wire();
 
         let mut res = Mt5TradeResult::default();
         let ret = if let Some(fn_mod_mag) = self.fn_modify_magic {
@@ -924,8 +947,10 @@ impl Mt5Client {
                 fn_mod_mag(
                     ticket,
                     magic,
-                    stop_loss as c_double,
-                    take_profit as c_double,
+                    sl_mode,
+                    sl_val as c_double,
+                    tp_mode,
+                    tp_val as c_double,
                     &mut res,
                 )
             }
@@ -936,8 +961,10 @@ impl Mt5Client {
             unsafe {
                 fn_mod(
                     ticket,
-                    stop_loss as c_double,
-                    take_profit as c_double,
+                    sl_mode,
+                    sl_val as c_double,
+                    tp_mode,
+                    tp_val as c_double,
                     &mut res,
                 )
             }
@@ -969,8 +996,8 @@ impl Mt5Client {
 
         debug!(
             ticket = ticket,
-            sl = stop_loss,
-            tp = take_profit,
+            sl = ?stop_loss,
+            tp = ?take_profit,
             retcode = trade_result.retcode,
             "Order modified successfully"
         );
@@ -1002,12 +1029,18 @@ impl Mt5Client {
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null());
 
-        const CAPACITY: usize = 512;
+        const CAPACITY: usize = 4096;
         let mut buf = vec![Mt5Position::default(); CAPACITY];
 
         let count = unsafe { fn_pos(buf.as_mut_ptr(), CAPACITY as c_int, mag, sym_ptr) };
         if count < 0 {
             return Err(Mt5Error::PositionsFailed(count));
+        }
+        if count as usize > CAPACITY {
+            return Err(Mt5Error::PositionsTruncated {
+                returned: CAPACITY,
+                total: count as usize,
+            });
         }
 
         let n = (count as usize).min(buf.len());
@@ -1040,12 +1073,18 @@ impl Mt5Client {
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null());
 
-        const CAPACITY: usize = 512;
+        const CAPACITY: usize = 4096;
         let mut buf = vec![Mt5Order::default(); CAPACITY];
 
         let count = unsafe { fn_ord(buf.as_mut_ptr(), CAPACITY as c_int, mag, sym_ptr) };
         if count < 0 {
             return Err(Mt5Error::OrdersFailed(count));
+        }
+        if count as usize > CAPACITY {
+            return Err(Mt5Error::OrdersTruncated {
+                returned: CAPACITY,
+                total: count as usize,
+            });
         }
 
         let n = (count as usize).min(buf.len());
@@ -1117,13 +1156,13 @@ impl Mt5Client {
         if count < 0 {
             return Err(Mt5Error::DealsFailed(count));
         }
-        let n = (count as usize).min(buf.len());
-        if n >= Self::DEALS_CAPACITY {
-            return Err(Mt5Error::ReconciliationError(format!(
-                "deal history for the requested window reached the {} deal buffer limit and may be truncated; narrow the window or filters",
-                Self::DEALS_CAPACITY
-            )));
+        if count as usize > Self::DEALS_CAPACITY {
+            return Err(Mt5Error::DealHistoryTruncated {
+                returned: Self::DEALS_CAPACITY,
+                capacity: Self::DEALS_CAPACITY,
+            });
         }
+        let n = (count as usize).min(buf.len());
         Ok(buf[..n].iter().copied().map(Deal::from_raw).collect())
     }
 
@@ -1264,6 +1303,7 @@ impl Mt5Client {
 
     /// Gracefully shutdown the named pipe connection to MetaTrader 5.
     pub fn shutdown(&self) -> Result<()> {
+        CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         #[cfg(feature = "async")]
         self.event_loop_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1280,6 +1320,7 @@ impl Mt5Client {
 
 impl Drop for Mt5Client {
     fn drop(&mut self) {
+        CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         #[cfg(feature = "async")]
         self.event_loop_running
             .store(false, std::sync::atomic::Ordering::SeqCst);

@@ -179,7 +179,11 @@ fn test_live_pending_order_lifecycle() {
     let sl = info.round_price(limit_price - (100.0 * info.point));
     let tp = info.round_price(limit_price + (100.0 * info.point));
     let mod_res = client
-        .order_modify(ticket, sl, tp)
+        .order_modify(
+            ticket,
+            mt5_bridge::types::Level::Set(sl),
+            mt5_bridge::types::Level::Set(tp),
+        )
         .expect("order_modify failed");
     assert!(mod_res.is_success());
 

@@ -73,13 +73,14 @@ long  LocalFree(long hMem);
 #define PIPE_WAIT               0
 #define PIPE_NOWAIT             1
 #define PIPE_UNLIMITED_INSTANCES 255
+#define PIPE_REJECT_REMOTE_CLIENTS 0x00000008
 // INVALID_HANDLE is a built-in MQL5 constant (-1); no redefinition needed.
 #define ERROR_BROKEN_PIPE       109
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-// Wire protocol handshake version. v5: push model, asynchronous EVENT packets, and subscriptions.
+// Wire protocol handshake version. v6: 16-byte PacketHdr with request_id, event sequence counter, and enriched schemas.
 // Must equal PROTOCOL_VERSION in src/ffi.rs and MT5_BRIDGE_PROTOCOL_VERSION in bridge_dll/mt5_bridge.h.
-#define PROTOCOL_VERSION        5
+#define PROTOCOL_VERSION        6
 #define WIRE_ID_LEN             13       // length of the hashed client-order-id token in comments
 
 //---- Packet kinds (protocol v5+)
@@ -92,6 +93,20 @@ long  LocalFree(long hMem);
 #define EVENT_TRADE       2
 #define EVENT_BOOK        3
 #define EVENT_BAR         4
+
+//---- Wire transaction types (protocol v6+)
+#define WTX_OTHER         0
+#define WTX_DEAL_ADD      1
+#define WTX_ORDER_ADD     2
+#define WTX_ORDER_DELETE  3
+#define WTX_ORDER_UPDATE  4
+#define WTX_POSITION      5
+#define WTX_REQUEST       6
+
+//---- Wire level modification modes
+#define WIRE_LEVEL_KEEP   0
+#define WIRE_LEVEL_CLEAR  1
+#define WIRE_LEVEL_SET    2
 
 //---- Protocol commands
 #define CMD_INIT              1
@@ -125,6 +140,11 @@ input int    InpTimerIntervalMs      = 5;           // Timer polling interval in
 input int    InpMaxRequestsPerTimer  = 32;          // Max pipe requests serviced per timer tick (prevents UI starvation)
 input uint   InpMaxTimerBudgetUs     = 2000;        // Max execution budget per timer tick in microseconds (2000us = 2ms)
 input bool   InpAutoSelectSymbols    = true;        // Automatically select queried/traded symbols into Market Watch
+input bool   InpEnableKillSwitch     = false;       // Emergency kill switch: immediately block all outgoing orders
+input bool   InpRequireLiveAck       = true;        // Require explicit acknowledgement when running on a live (real) account
+input bool   InpLiveAckAcknowledged  = false;       // Set true to acknowledge live account trading
+input double InpMaxVolumePerOrder    = 50.0;        // Max volume allowed for a single order (0 = unlimited)
+input uint   InpMaxDeviation         = 100;         // Max allowed slippage deviation in points (0 = unlimited)
 
 // Ensure symbol is available in Market Watch, respecting InpAutoSelectSymbols
 bool EnsureSymbolAvailable(string sym) {
@@ -257,6 +277,13 @@ bool SafeUnpackF64(const uchar &b[], int &off, uint total_len, double &val) {
     return true;
 }
 
+bool SafeUnpackU8(const uchar &b[], int &off, uint total_len, uchar &val) {
+    if ((uint)off + 1 > total_len || (uint)off + 1 > (uint)ArraySize(b)) return false;
+    val = b[off];
+    off += 1;
+    return true;
+}
+
 // Unpack length-prefixed UTF-8 string with strict bounds verification.
 bool SafeUnpackStr(const uchar &b[], int &off, uint total_len, string &s) {
     uint str_len = 0;
@@ -272,6 +299,11 @@ bool SafeUnpackStr(const uchar &b[], int &off, uint total_len, string &s) {
 }
 
 // ── Binary pack helpers ──────────────────────────────────────────────────────
+
+void PackU8(uchar &b[], uchar v) {
+    int n = ArraySize(b); ArrayResize(b, n + 1);
+    b[n] = v;
+}
 
 void PackI32(uchar &b[], int v) {
     int n = ArraySize(b); ArrayResize(b, n + 4);
@@ -304,12 +336,14 @@ void PackF64(uchar &b[], double v) {
     ArrayCopy(b, tmp, n, 0, 8);
 }
 
-// ── Response senders (protocol v5+) ─────────────────────────────────────────
+// ── Response senders (protocol v6+) ─────────────────────────────────────────
 
-uint g_current_cmd = 0;
+uint  g_current_cmd    = 0;
+uint  g_current_req_id = 0;
+ulong g_event_seq      = 0;
 
 bool SendResponse(long h, int status, const uchar &data[], uint data_len) {
-    uchar hdr[12];
+    uchar hdr[16];
     // length (4 bytes)
     hdr[0] = (uchar)(data_len & 0xFF);
     hdr[1] = (uchar)((data_len >> 8)  & 0xFF);
@@ -327,15 +361,20 @@ bool SendResponse(long h, int status, const uchar &data[], uint data_len) {
     hdr[9]  = (uchar)((status >> 8)  & 0xFF);
     hdr[10] = (uchar)((status >> 16) & 0xFF);
     hdr[11] = (uchar)((status >> 24) & 0xFF);
+    // request_id (4 bytes) = g_current_req_id
+    hdr[12] = (uchar)(g_current_req_id & 0xFF);
+    hdr[13] = (uchar)((g_current_req_id >> 8)  & 0xFF);
+    hdr[14] = (uchar)((g_current_req_id >> 16) & 0xFF);
+    hdr[15] = (uchar)((g_current_req_id >> 24) & 0xFF);
 
-    if (!PipeWriteExact(h, hdr, 12)) return false;
+    if (!PipeWriteExact(h, hdr, 16)) return false;
     if (data_len > 0 && !PipeWriteExact(h, data, data_len)) return false;
     FlushFileBuffers(h);
     return true;
 }
 
 bool SendEvent(long h, uint event_type, const uchar &data[], uint data_len) {
-    uchar hdr[12];
+    uchar hdr[16];
     // length (4 bytes)
     hdr[0] = (uchar)(data_len & 0xFF);
     hdr[1] = (uchar)((data_len >> 8)  & 0xFF);
@@ -353,8 +392,13 @@ bool SendEvent(long h, uint event_type, const uchar &data[], uint data_len) {
     hdr[9]  = 0;
     hdr[10] = 0;
     hdr[11] = 0;
+    // request_id (4 bytes) = 0
+    hdr[12] = 0;
+    hdr[13] = 0;
+    hdr[14] = 0;
+    hdr[15] = 0;
 
-    if (!PipeWriteExact(h, hdr, 12)) return false;
+    if (!PipeWriteExact(h, hdr, 16)) return false;
     if (data_len > 0 && !PipeWriteExact(h, data, data_len)) return false;
     // Note: FlushFileBuffers removed from per-event path to avoid blocking MT5 event loop.
     // Flushes are performed once per batch in FlushTickQueue/FlushTradeQueue/OnBookEvent.
@@ -684,6 +728,9 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     uint deviation = 10;
     SafeUnpackU32(payload, off, len, deviation);
     if (deviation == 0) deviation = 10;
+    if (InpMaxDeviation > 0 && deviation > InpMaxDeviation) {
+        deviation = InpMaxDeviation;
+    }
 
     long expiration = 0;
     SafeUnpackI64(payload, off, len, expiration);
@@ -695,6 +742,21 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     if (InpEnforceMagicNumber && InpMagicNumber > 0 && magic > 0 && (long)magic != InpMagicNumber) {
         Print("MT5Bridge: rejected order — order magic (", magic,
               ") does not match EA magic (", InpMagicNumber, ")");
+        SendError(h);
+        return;
+    }
+
+    // Emergency kill switch check
+    if (InpEnableKillSwitch) {
+        Print("MT5Bridge: order rejected — emergency kill switch is active");
+        SendError(h);
+        return;
+    }
+
+    // Max volume limit check
+    if (InpMaxVolumePerOrder > 0.0 && volume > InpMaxVolumePerOrder) {
+        Print("MT5Bridge: order rejected — volume ", DoubleToString(volume, 2),
+              " exceeds InpMaxVolumePerOrder (", DoubleToString(InpMaxVolumePerOrder, 2), ")");
         SendError(h);
         return;
     }
@@ -1140,10 +1202,28 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
 void HandleOrderModify(long h, const uchar &payload[], uint len) {
     int off = 0;
     ulong ticket = 0;
-    double sl = 0.0, tp = 0.0;
-    if (!SafeUnpackU64(payload, off, len, ticket) ||
-        !SafeUnpackF64(payload, off, len, sl) ||
-        !SafeUnpackF64(payload, off, len, tp)) {
+    uchar sl_mode = WIRE_LEVEL_KEEP;
+    double sl = 0.0;
+    uchar tp_mode = WIRE_LEVEL_KEEP;
+    double tp = 0.0;
+
+    if (!SafeUnpackU64(payload, off, len, ticket)) {
+        SendError(h);
+        return;
+    }
+    if (!SafeUnpackU8(payload, off, len, sl_mode)) {
+        SendError(h);
+        return;
+    }
+    if (!SafeUnpackF64(payload, off, len, sl)) {
+        SendError(h);
+        return;
+    }
+    if (!SafeUnpackU8(payload, off, len, tp_mode)) {
+        SendError(h);
+        return;
+    }
+    if (!SafeUnpackF64(payload, off, len, tp)) {
         SendError(h);
         return;
     }
@@ -1186,49 +1266,66 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
         double min_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
 
+        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+        double cur_sl = PositionGetDouble(POSITION_SL);
+        double cur_tp = PositionGetDouble(POSITION_TP);
+
+        double target_sl = cur_sl;
+        if (sl_mode == WIRE_LEVEL_CLEAR) {
+            target_sl = 0.0;
+        } else if (sl_mode == WIRE_LEVEL_SET) {
+            target_sl = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+        }
+
+        double target_tp = cur_tp;
+        if (tp_mode == WIRE_LEVEL_CLEAR) {
+            target_tp = 0.0;
+        } else if (tp_mode == WIRE_LEVEL_SET) {
+            target_tp = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
+        }
+
         if (tick_size > 0.0) {
-            if (sl > 0.0 && MathAbs(sl / tick_size - MathRound(sl / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify SL ", DoubleToString(sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+            if (target_sl > 0.0 && MathAbs(target_sl / tick_size - MathRound(target_sl / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify SL ", DoubleToString(target_sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && MathAbs(tp / tick_size - MathRound(tp / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify TP ", DoubleToString(tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+            if (target_tp > 0.0 && MathAbs(target_tp / tick_size - MathRound(target_tp / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify TP ", DoubleToString(target_tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
                 SendError(h);
                 return;
             }
         }
 
         if (ptype == POSITION_TYPE_BUY) {
-            if (sl > 0.0 && (bid - sl) < min_dist - 1e-8) {
-                Print("MT5Bridge: modify Buy SL ", DoubleToString(sl, 5), " violates stops level from bid ", DoubleToString(bid, 5));
+            if (target_sl > 0.0 && (bid - target_sl) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Buy SL ", DoubleToString(target_sl, 5), " violates stops level from bid ", DoubleToString(bid, 5));
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && (tp - bid) < min_dist - 1e-8) {
-                Print("MT5Bridge: modify Buy TP ", DoubleToString(tp, 5), " violates stops level from bid ", DoubleToString(bid, 5));
+            if (target_tp > 0.0 && (target_tp - bid) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Buy TP ", DoubleToString(target_tp, 5), " violates stops level from bid ", DoubleToString(bid, 5));
                 SendError(h);
                 return;
             }
         } else if (ptype == POSITION_TYPE_SELL) {
-            if (sl > 0.0 && (sl - ask) < min_dist - 1e-8) {
-                Print("MT5Bridge: modify Sell SL ", DoubleToString(sl, 5), " violates stops level from ask ", DoubleToString(ask, 5));
+            if (target_sl > 0.0 && (target_sl - ask) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Sell SL ", DoubleToString(target_sl, 5), " violates stops level from ask ", DoubleToString(ask, 5));
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && (ask - tp) < min_dist - 1e-8) {
-                Print("MT5Bridge: modify Sell TP ", DoubleToString(tp, 5), " violates stops level from ask ", DoubleToString(ask, 5));
+            if (target_tp > 0.0 && (ask - target_tp) < min_dist - 1e-8) {
+                Print("MT5Bridge: modify Sell TP ", DoubleToString(target_tp, 5), " violates stops level from ask ", DoubleToString(ask, 5));
                 SendError(h);
                 return;
             }
         }
 
-        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
         req.action   = TRADE_ACTION_SLTP;
         req.position = ticket;
         req.symbol   = sym;
-        req.sl       = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
-        req.tp       = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
+        req.sl       = target_sl;
+        req.tp       = target_tp;
         req.magic    = (pos_magic > 0) ? pos_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else if (OrderSelect(ticket)) {
@@ -1257,51 +1354,70 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
         double min_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
 
+        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+        double cur_sl = OrderGetDouble(ORDER_SL);
+        double cur_tp = OrderGetDouble(ORDER_TP);
+
+        double target_sl = cur_sl;
+        if (sl_mode == WIRE_LEVEL_CLEAR) {
+            target_sl = 0.0;
+        } else if (sl_mode == WIRE_LEVEL_SET) {
+            target_sl = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+        }
+
+        double target_tp = cur_tp;
+        if (tp_mode == WIRE_LEVEL_CLEAR) {
+            target_tp = 0.0;
+        } else if (tp_mode == WIRE_LEVEL_SET) {
+            target_tp = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
+        }
+
         if (tick_size > 0.0) {
-            if (sl > 0.0 && MathAbs(sl / tick_size - MathRound(sl / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify pending SL ", DoubleToString(sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+            if (target_sl > 0.0 && MathAbs(target_sl / tick_size - MathRound(target_sl / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify pending SL ", DoubleToString(target_sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && MathAbs(tp / tick_size - MathRound(tp / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify pending TP ", DoubleToString(tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
+            if (target_tp > 0.0 && MathAbs(target_tp / tick_size - MathRound(target_tp / tick_size)) > 1e-4) {
+                Print("MT5Bridge: modify pending TP ", DoubleToString(target_tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
                 SendError(h);
                 return;
             }
         }
 
         if (otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP) {
-            if (sl > 0.0 && (ord_price - sl) < min_dist - 1e-8) {
+            if (target_sl > 0.0 && (ord_price - target_sl) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Buy SL violates stops level relative to price");
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && (tp - ord_price) < min_dist - 1e-8) {
+            if (target_tp > 0.0 && (target_tp - ord_price) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Buy TP violates stops level relative to price");
                 SendError(h);
                 return;
             }
         } else if (otype == ORDER_TYPE_SELL_LIMIT || otype == ORDER_TYPE_SELL_STOP) {
-            if (sl > 0.0 && (sl - ord_price) < min_dist - 1e-8) {
+            if (target_sl > 0.0 && (target_sl - ord_price) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Sell SL violates stops level relative to price");
                 SendError(h);
                 return;
             }
-            if (tp > 0.0 && (ord_price - tp) < min_dist - 1e-8) {
+            if (target_tp > 0.0 && (ord_price - target_tp) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Sell TP violates stops level relative to price");
                 SendError(h);
                 return;
             }
         }
 
-        int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-        req.action   = TRADE_ACTION_MODIFY;
-        req.order    = ticket;
-        req.symbol   = sym;
-        req.price    = NormalizeDouble(ord_price, sym_digits);
-        req.sl       = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
-        req.tp       = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
-        req.magic    = (ord_magic > 0) ? ord_magic : InpMagicNumber;
+        req.action      = TRADE_ACTION_MODIFY;
+        req.order       = ticket;
+        req.symbol      = sym;
+        req.price       = NormalizeDouble(ord_price, sym_digits);
+        req.sl          = target_sl;
+        req.tp          = target_tp;
+        req.type_time   = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TIME_TYPE);
+        req.expiration  = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+        req.magic       = (ord_magic > 0) ? ord_magic : InpMagicNumber;
         ok = OrderSend(req, res);
     } else {
         Print("MT5Bridge: ticket ", ticket, " not found for modify");
@@ -1433,8 +1549,9 @@ void HandlePositionsGet(long h, const uchar &payload[], uint len) {
     int total = PositionsTotal();
     uchar data[];
     int count = 0;
+    int total_matching = 0;
 
-    for (int i = 0; i < total && count < max_items; i++) {
+    for (int i = 0; i < total; i++) {
         ulong ticket = PositionGetTicket(i);
         if (ticket == 0) continue;
 
@@ -1443,6 +1560,9 @@ void HandlePositionsGet(long h, const uchar &payload[], uint len) {
 
         string sym = PositionGetString(POSITION_SYMBOL);
         if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        total_matching++;
+        if (count >= max_items) continue;
 
         long pos_time     = PositionGetInteger(POSITION_TIME);
         int pos_type      = (int)PositionGetInteger(POSITION_TYPE);
@@ -1472,7 +1592,7 @@ void HandlePositionsGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, count, data, (uint)ArraySize(data));
+    SendCount(h, total_matching, data, (uint)ArraySize(data));
 }
 
 void HandleOrdersGet(long h, const uchar &payload[], uint len) {
@@ -1489,8 +1609,9 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
     int total = OrdersTotal();
     uchar data[];
     int count = 0;
+    int total_matching = 0;
 
-    for (int i = 0; i < total && count < max_items; i++) {
+    for (int i = 0; i < total; i++) {
         ulong ticket = OrderGetTicket(i);
         if (ticket == 0) continue;
 
@@ -1499,6 +1620,9 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
 
         string sym = OrderGetString(ORDER_SYMBOL);
         if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        total_matching++;
+        if (count >= max_items) continue;
 
         long ord_time     = OrderGetInteger(ORDER_TIME_SETUP);
         int ord_type      = (int)OrderGetInteger(ORDER_TYPE);
@@ -1526,7 +1650,7 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, count, data, (uint)ArraySize(data));
+    SendCount(h, total_matching, data, (uint)ArraySize(data));
 }
 
 // Completed trade deals (MT5 history) in [from, to] (UTC seconds), filtered by magic / symbol.
@@ -1570,8 +1694,9 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
     int total = HistoryDealsTotal();
     uchar data[];
     int count = 0;
+    int total_matching = 0;
 
-    for (int i = 0; i < total && count < max_items; i++) {
+    for (int i = 0; i < total; i++) {
         ulong ticket = HistoryDealGetTicket(i);
         if (ticket == 0) continue;
 
@@ -1583,6 +1708,9 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
 
         string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
         if (StringLen(symbol_filter) > 0 && sym != symbol_filter) continue;
+
+        total_matching++;
+        if (count >= max_items) continue;
 
         long deal_time = HistoryDealGetInteger(ticket, DEAL_TIME);
         if (InpConvertToUTC) deal_time -= offset;
@@ -1605,7 +1733,7 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, count, data, (uint)ArraySize(data));
+    SendCount(h, total_matching, data, (uint)ArraySize(data));
 }
 
 // ── Subscription management (protocol v5+) ──────────────────────────────────
@@ -1809,8 +1937,10 @@ void FlushTickQueue() {
         PackF64(payload, qe.last);
         PackU64(payload, qe.volume);
         PackU32(payload, qe.flags);
+        PackI32(payload, 0); // _pad
+        PackU64(payload, ++g_event_seq);
 
-        if (!SendEvent(g_client, EVENT_TICK, payload, 76)) {
+        if (!SendEvent(g_client, EVENT_TICK, payload, 88)) {
             ResetPipeServer("failed to write tick event to pipe");
             return;
         }
@@ -1848,6 +1978,11 @@ struct QueuedTradeEvent {
     double tp;
     string symbol;
     string comment;
+    int    deal_entry;
+    int    deal_type;
+    ulong  deal_magic;
+    ulong  deal_position_id;
+    int    deal_reason;
 };
 
 #define TRADE_QUEUE_CAPACITY 512
@@ -1859,7 +1994,9 @@ ulong g_trades_dropped_total = 0;
 
 void EnqueueTrade(ulong deal, ulong order, ulong pos, long time, int trans_type,
                   int otype, double price, double vol, double sl, double tp,
-                  const string sym, const string cmt) {
+                  const string sym, const string cmt,
+                  int deal_entry, int deal_type, ulong deal_magic,
+                  ulong deal_position_id, int deal_reason) {
     if (g_trade_queue_count >= TRADE_QUEUE_CAPACITY) {
         g_trade_queue_tail = (g_trade_queue_tail + 1) % TRADE_QUEUE_CAPACITY;
         g_trade_queue_count--;
@@ -1867,18 +2004,23 @@ void EnqueueTrade(ulong deal, ulong order, ulong pos, long time, int trans_type,
         Print("MT5Bridge: CRITICAL — trade event queue full (capacity=", TRADE_QUEUE_CAPACITY,
               "), dropped oldest trade event (total dropped=", g_trades_dropped_total, ")");
     }
-    g_trade_queue[g_trade_queue_head].deal       = deal;
-    g_trade_queue[g_trade_queue_head].order      = order;
-    g_trade_queue[g_trade_queue_head].position   = pos;
-    g_trade_queue[g_trade_queue_head].time       = time;
-    g_trade_queue[g_trade_queue_head].trans_type = trans_type;
-    g_trade_queue[g_trade_queue_head].order_type = otype;
-    g_trade_queue[g_trade_queue_head].price      = price;
-    g_trade_queue[g_trade_queue_head].volume     = vol;
-    g_trade_queue[g_trade_queue_head].sl         = sl;
-    g_trade_queue[g_trade_queue_head].tp         = tp;
-    g_trade_queue[g_trade_queue_head].symbol     = sym;
-    g_trade_queue[g_trade_queue_head].comment    = cmt;
+    g_trade_queue[g_trade_queue_head].deal             = deal;
+    g_trade_queue[g_trade_queue_head].order            = order;
+    g_trade_queue[g_trade_queue_head].position         = pos;
+    g_trade_queue[g_trade_queue_head].time             = time;
+    g_trade_queue[g_trade_queue_head].trans_type       = trans_type;
+    g_trade_queue[g_trade_queue_head].order_type       = otype;
+    g_trade_queue[g_trade_queue_head].price            = price;
+    g_trade_queue[g_trade_queue_head].volume           = vol;
+    g_trade_queue[g_trade_queue_head].sl               = sl;
+    g_trade_queue[g_trade_queue_head].tp               = tp;
+    g_trade_queue[g_trade_queue_head].symbol           = sym;
+    g_trade_queue[g_trade_queue_head].comment          = cmt;
+    g_trade_queue[g_trade_queue_head].deal_entry       = deal_entry;
+    g_trade_queue[g_trade_queue_head].deal_type        = deal_type;
+    g_trade_queue[g_trade_queue_head].deal_magic       = deal_magic;
+    g_trade_queue[g_trade_queue_head].deal_position_id = deal_position_id;
+    g_trade_queue[g_trade_queue_head].deal_reason      = deal_reason;
     g_trade_queue_head = (g_trade_queue_head + 1) % TRADE_QUEUE_CAPACITY;
     g_trade_queue_count++;
 }
@@ -1906,8 +2048,15 @@ void FlushTradeQueue() {
         PackF64(payload, qe.tp);
         PackFixedString32(payload, qe.symbol);
         PackFixedString32(payload, qe.comment);
+        PackI32(payload, qe.deal_entry);
+        PackI32(payload, qe.deal_type);
+        PackU64(payload, qe.deal_magic);
+        PackU64(payload, qe.deal_position_id);
+        PackI32(payload, qe.deal_reason);
+        PackI32(payload, 0); // _pad
+        PackU64(payload, ++g_event_seq);
 
-        if (!SendEvent(g_client, EVENT_TRADE, payload, 136)) {
+        if (!SendEvent(g_client, EVENT_TRADE, payload, 176)) {
             ResetPipeServer("failed to write trade event to pipe");
             return;
         }
@@ -1921,15 +2070,17 @@ void FlushTradeQueue() {
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
-    // Read 12-byte request header: [uint32 length][uint8 kind][uint8 _pad][uint16 id][int32 status]
+    // Read 16-byte request header: [uint32 length][uint8 kind][uint8 _pad][uint16 id][int32 status][uint32 request_id]
     uchar hdr[];
-    if (!PipeReadExact(h, hdr, 12)) return false;
+    if (!PipeReadExact(h, hdr, 16)) return false;
 
     uint pay_len = UnpackU32(hdr, 0);
     uchar kind   = hdr[4];
     uint cmd     = (uint)hdr[6] | ((uint)hdr[7] << 8);
+    uint req_id  = UnpackU32(hdr, 12);
 
-    g_current_cmd = cmd;
+    g_current_cmd    = cmd;
+    g_current_req_id = req_id;
 
     if (pay_len > MAX_PAYLOAD_SIZE) {
         Print("MT5Bridge: request payload length ", pay_len, " exceeds limit (", MAX_PAYLOAD_SIZE, ")");
@@ -1976,7 +2127,7 @@ bool DispatchRequest(long h) {
 }
 
 // Helper to create the named pipe server with an explicit Win32 Security Descriptor.
-// Falls back gracefully to default security if SDDL conversion is disabled or fails.
+// Fails closed if SDDL conversion is enabled but fails.
 long CreatePipeHandle() {
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
@@ -1988,38 +2139,23 @@ long CreatePipeHandle() {
     long pSD = 0;
     uint sdSize = 0;
     if (StringLen(InpPipeSDDL) > 0) {
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(InpPipeSDDL, 1 /* SDDL_REVISION_1 */, pSD, sdSize) && pSD != 0) {
-            sa.lpSecurityDescriptor = pSD;
-        } else {
-            Print("MT5Bridge: warning — ConvertStringSecurityDescriptor failed, falling back to default security");
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(InpPipeSDDL, 1 /* SDDL_REVISION_1 */, pSD, sdSize) || pSD == 0) {
+            Print("MT5Bridge: FATAL — ConvertStringSecurityDescriptor failed; failing closed for security");
+            return INVALID_HANDLE;
         }
+        sa.lpSecurityDescriptor = pSD;
     }
 
     long h = CreateNamedPipeW(
         g_pipe_path,
         PIPE_ACCESS_DUPLEX | 0x00080000 /* FILE_FLAG_FIRST_PIPE_INSTANCE */,
-        PIPE_TYPE_BYTE | PIPE_NOWAIT,
+        PIPE_TYPE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,
         65536,
         65536,
         0,
         sa
     );
-
-    if (h == INVALID_HANDLE && sa.lpSecurityDescriptor != 0) {
-        Print("MT5Bridge: warning — pipe creation with SDDL descriptor failed, retrying with default security descriptor...");
-        sa.lpSecurityDescriptor = 0;
-        h = CreateNamedPipeW(
-            g_pipe_path,
-            PIPE_ACCESS_DUPLEX | 0x00080000 /* FILE_FLAG_FIRST_PIPE_INSTANCE */,
-            PIPE_TYPE_BYTE | PIPE_NOWAIT,
-            1,
-            65536,
-            65536,
-            0,
-            sa
-        );
-    }
 
     if (pSD != 0) {
         LocalFree(pSD);
@@ -2032,6 +2168,12 @@ long CreatePipeHandle() {
 int OnInit() {
     if (InpRequireSecret && StringLen(InpPipeSecret) == 0) {
         Print("MT5Bridge: INIT_FAILED — InpRequireSecret is enabled but InpPipeSecret is empty! Set InpPipeSecret in EA inputs or set InpRequireSecret = false to opt out.");
+        return INIT_FAILED;
+    }
+
+    long account_type = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+    if (account_type == ACCOUNT_TRADE_MODE_REAL && InpRequireLiveAck && !InpLiveAckAcknowledged) {
+        Print("MT5Bridge: INIT_FAILED — live trading account detected but InpLiveAckAcknowledged is false. Set InpLiveAckAcknowledged=true to permit live trading.");
         return INIT_FAILED;
     }
 
@@ -2081,19 +2223,18 @@ void OnDeinit(const int reason) {
 
 void ResetPipeServer(const string reason) {
     g_authenticated = false;
-    if (g_client != INVALID_HANDLE) {
-        DisconnectNamedPipe(g_client);
-        g_client = INVALID_HANDLE;
-    }
     if (g_server != INVALID_HANDLE) {
-        CloseHandle(g_server);
-        g_server = INVALID_HANDLE;
+        DisconnectNamedPipe(g_server);
+        g_client = INVALID_HANDLE;
+        Print("MT5Bridge: reset pipe server (", reason, ")");
+    } else {
+        g_server = CreatePipeHandle();
+        g_client = INVALID_HANDLE;
+        if (g_server == INVALID_HANDLE)
+            Print("MT5Bridge: failed to recreate pipe (", reason, ")");
+        else
+            Print("MT5Bridge: re-listening for next Rust client (", reason, ")");
     }
-    g_server = CreatePipeHandle();
-    if (g_server == INVALID_HANDLE)
-        Print("MT5Bridge: failed to recreate pipe (", reason, ")");
-    else
-        Print("MT5Bridge: re-listening for next Rust client (", reason, ")");
 }
 
 void OnTimer() {
@@ -2123,9 +2264,9 @@ void OnTimer() {
             break; // Time budget elapsed; yield to MT5 event loop until next timer tick
         }
 
-        uchar peek_hdr[12];
+        uchar peek_hdr[16];
         uint  peek_read = 0, peek_avail = 0, peek_left = 0;
-        bool has_data = PeekNamedPipe(g_client, peek_hdr, 12,
+        bool has_data = PeekNamedPipe(g_client, peek_hdr, 16,
                                       peek_read, peek_avail, peek_left);
         if (!has_data) {
             // Pipe broke or client disconnected abruptly without shutdown
@@ -2133,7 +2274,7 @@ void OnTimer() {
             return;
         }
 
-        if (peek_avail < 12) break;  // need at least complete 12-byte header
+        if (peek_avail < 16) break;  // need at least complete 16-byte header
 
         uint expected_pay_len = UnpackU32(peek_hdr, 0);
         if (expected_pay_len > MAX_PAYLOAD_SIZE) {
@@ -2143,7 +2284,7 @@ void OnTimer() {
         }
 
         // If full payload has not arrived yet, wait for next timer tick without blocking
-        if (peek_avail < 12 + expected_pay_len) break;
+        if (peek_avail < 16 + expected_pay_len) break;
 
         bool ok = DispatchRequest(g_client);
         if (!ok) {
@@ -2182,7 +2323,7 @@ void OnTick() {
     }
 }
 
-// Low-latency event-driven trade handler (protocol v5+ push model)
+// Low-latency event-driven trade handler (protocol v6+ push model)
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result) {
@@ -2197,13 +2338,45 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         cmt = HistoryOrderGetString(trans.order, ORDER_COMMENT);
     }
 
+    int wire_trans_type = WTX_OTHER;
+    switch (trans.type) {
+        case TRADE_TRANSACTION_DEAL_ADD:     wire_trans_type = WTX_DEAL_ADD;     break;
+        case TRADE_TRANSACTION_ORDER_ADD:    wire_trans_type = WTX_ORDER_ADD;    break;
+        case TRADE_TRANSACTION_ORDER_DELETE: wire_trans_type = WTX_ORDER_DELETE; break;
+        case TRADE_TRANSACTION_ORDER_UPDATE: wire_trans_type = WTX_ORDER_UPDATE; break;
+        case TRADE_TRANSACTION_POSITION:     wire_trans_type = WTX_POSITION;     break;
+        case TRADE_TRANSACTION_REQUEST:      wire_trans_type = WTX_REQUEST;      break;
+        default:                             wire_trans_type = WTX_OTHER;        break;
+    }
+
+    int deal_entry = 0;
+    int deal_type = 0;
+    ulong deal_magic = 0;
+    ulong deal_position_id = 0;
+    int deal_reason = 0;
+
+    if (trans.deal > 0 && HistoryDealSelect(trans.deal)) {
+        deal_entry = (int)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+        deal_type = (int)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+        deal_magic = (ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+        deal_position_id = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+        deal_reason = (int)HistoryDealGetInteger(trans.deal, DEAL_REASON);
+    }
+    if (deal_magic == 0 && request.magic > 0) {
+        deal_magic = request.magic;
+    }
+    if (deal_position_id == 0 && trans.position > 0) {
+        deal_position_id = trans.position;
+    }
+
     EnqueueTrade(trans.deal, trans.order, trans.position, (long)TimeCurrent(),
-                 (int)trans.type, (int)trans.order_type, trans.price,
+                 wire_trans_type, (int)trans.order_type, trans.price,
                  trans.volume, trans.price_sl, trans.price_tp,
-                 trans.symbol, cmt);
+                 trans.symbol, cmt,
+                 deal_entry, deal_type, deal_magic, deal_position_id, deal_reason);
 }
 
-// Low-latency event-driven depth-of-market handler (protocol v5+ push model)
+// Low-latency event-driven depth-of-market handler (protocol v6+ push model)
 void OnBookEvent(const string &symbol) {
     if (!g_running || g_client == INVALID_HANDLE || !g_authenticated)
         return;
@@ -2228,7 +2401,8 @@ void OnBookEvent(const string &symbol) {
             PackI32(payload, 0); // padding
             PackF64(payload, book[i].price);
             PackF64(payload, (double)book[i].volume);
-            SendEvent(g_client, EVENT_BOOK, payload, 64);
+            PackU64(payload, ++g_event_seq);
+            SendEvent(g_client, EVENT_BOOK, payload, 72);
         }
         if (book_count > 0) {
             FlushFileBuffers(g_client);

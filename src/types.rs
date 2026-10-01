@@ -468,7 +468,7 @@ pub enum StreamMode {
     Lossless,
 }
 
-/// Asynchronous trade transaction event from MT5 (protocol v5+).
+/// Asynchronous trade transaction event from MT5 (protocol v6+).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeEvent {
     pub deal: u64,
@@ -483,6 +483,18 @@ pub struct TradeEvent {
     pub tp: f64,
     pub symbol: String,
     pub comment: String,
+    #[serde(default)]
+    pub deal_entry: i32,
+    #[serde(default)]
+    pub deal_type: i32,
+    #[serde(default)]
+    pub deal_magic: u64,
+    #[serde(default)]
+    pub deal_position_id: u64,
+    #[serde(default)]
+    pub deal_reason: i32,
+    #[serde(default)]
+    pub event_seq: u64,
 }
 
 impl TradeEvent {
@@ -525,6 +537,12 @@ impl TradeEvent {
             tp: raw.tp,
             symbol,
             comment,
+            deal_entry: raw.deal_entry,
+            deal_type: raw.deal_type,
+            deal_magic: raw.deal_magic,
+            deal_position_id: raw.deal_position_id,
+            deal_reason: raw.deal_reason,
+            event_seq: raw.event_seq,
         }
     }
 }
@@ -686,6 +704,80 @@ impl OrderType {
             OrderType::Sell | OrderType::SellLimit | OrderType::SellStop
         )
     }
+}
+
+/// Target price level specification for stop-loss and take-profit modifications.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Level {
+    /// Keep the current level unchanged.
+    Keep,
+    /// Explicitly remove/clear the level (sets to 0.0).
+    Clear,
+    /// Update to an explicit price level.
+    Set(f64),
+}
+
+impl Level {
+    /// Convert to wire mode (0=keep, 1=clear, 2=set) and price value.
+    pub fn to_wire(self) -> (u8, f64) {
+        match self {
+            Level::Keep => (0, 0.0),
+            Level::Clear => (1, 0.0),
+            Level::Set(v) => (2, v),
+        }
+    }
+}
+
+/// Concrete evidence recorded when an order is determined to be Rejected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RejectionEvidence {
+    /// Order was never transmitted to the network (e.g. write-ahead failed or local validation rejected).
+    NeverTransmitted,
+    /// Order was rejected by EA-side preflight risk checks before hitting the broker.
+    PreflightRejected,
+    /// Broker returned a definitive rejection retcode (e.g. 10019 NO_MONEY).
+    BrokerRetcode(u32),
+    /// Multiple reconciliation passes observed the order absent with intact comments and no candidates.
+    ReconciledAbsent { observations: u32, span_secs: i64 },
+}
+
+/// Individual deal execution fill attributed to an order.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Fill {
+    pub deal: u64,
+    pub volume: f64,
+    pub price: f64,
+    pub time: i64,
+    pub deal_type: i32,
+    pub deal_entry: i32,
+}
+
+impl From<&TradeEvent> for Fill {
+    fn from(ev: &TradeEvent) -> Self {
+        Self {
+            deal: ev.deal,
+            volume: ev.volume,
+            price: ev.price,
+            time: ev.time,
+            deal_type: ev.deal_type,
+            deal_entry: ev.deal_entry,
+        }
+    }
+}
+
+/// Outcome effect when applying an asynchronous trade event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventEffect {
+    /// Fill or acceptance applied to order state.
+    Applied,
+    /// Event did not carry fill semantics or was irrelevant.
+    Ignored,
+    /// Exit deal was ignored to prevent double counting or reducing filled volume.
+    ExitDealIgnored,
+    /// Deal was already recorded (idempotent deduplication).
+    Duplicate,
+    /// Order was already in a terminal state (Filled, Cancelled, Rejected, Expired) and cannot be modified.
+    TerminalStateIgnored,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1489,6 +1581,12 @@ pub struct TrackedOrder {
     /// Attribute disagreements found when this order was matched to broker state.
     #[serde(default)]
     pub mismatches: Vec<AttributeMismatch>,
+    /// Concrete evidence recorded when an order is determined to be Rejected.
+    #[serde(default)]
+    pub rejection: Option<RejectionEvidence>,
+    /// Individual deal fills attributed to this order.
+    #[serde(default)]
+    pub fills: std::collections::BTreeMap<u64, Fill>,
 }
 
 impl TrackedOrder {
@@ -1519,6 +1617,8 @@ impl TrackedOrder {
             absent_observations: 0,
             first_absent_at: None,
             mismatches: Vec::new(),
+            rejection: None,
+            fills: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1564,41 +1664,60 @@ impl TrackedOrder {
     }
 
     /// Update order state from an asynchronous broker `TradeEvent` (protocol v5+ push model).
-    pub fn update_from_trade_event(&mut self, ev: &TradeEvent) {
+    pub fn update_from_trade_event(&mut self, ev: &TradeEvent) -> EventEffect {
+        if matches!(
+            self.state,
+            OrderState::Filled | OrderState::Cancelled | OrderState::Rejected
+        ) {
+            return EventEffect::TerminalStateIgnored;
+        }
+
         self.updated_at = chrono::Utc::now().timestamp();
         if ev.order > 0 && self.order_ticket == 0 {
             self.order_ticket = ev.order;
         }
-        if ev.position > 0 && self.position_ticket == 0 {
+        if ev.deal_position_id > 0 && self.position_ticket == 0 {
+            self.position_ticket = ev.deal_position_id;
+        } else if ev.position > 0 && self.position_ticket == 0 {
             self.position_ticket = ev.position;
         }
-        if ev.deal > 0 && !self.deal_tickets.contains(&ev.deal) {
-            self.deal_tickets.push(ev.deal);
-            self.deal_ticket = ev.deal;
-        }
 
-        // trans_type: 2 = TRADE_TRANSACTION_DEAL_ADD
-        if ev.deal > 0 || ev.trans_type == 2 {
-            let new_fill = (self.filled_volume + ev.volume).min(self.requested_volume);
-            if self.filled_volume > 0.0 && ev.price > 0.0 {
-                let total_cost = (self.filled_volume * self.average_price) + (ev.volume * ev.price);
-                self.average_price = total_cost / (self.filled_volume + ev.volume);
-            } else if ev.price > 0.0 {
-                self.average_price = ev.price;
+        if ev.deal > 0 {
+            if self.fills.contains_key(&ev.deal) {
+                return EventEffect::Duplicate;
             }
-            self.filled_volume = new_fill;
-            self.remaining_volume = (self.requested_volume - self.filled_volume).max(0.0);
+            if ev.deal_entry == 1 {
+                // Exit deal (OUT)
+                return EventEffect::ExitDealIgnored;
+            }
+            let fill = Fill::from(ev);
+            self.fills.insert(ev.deal, fill);
+            if !self.deal_tickets.contains(&ev.deal) {
+                self.deal_tickets.push(ev.deal);
+            }
+            self.deal_ticket = ev.deal;
 
+            let total_filled: f64 = self.fills.values().map(|f| f.volume).sum();
+            let total_value: f64 = self.fills.values().map(|f| f.volume * f.price).sum();
+            self.filled_volume = total_filled.min(self.requested_volume);
+            self.remaining_volume = (self.requested_volume - total_filled).max(0.0);
+            if total_filled > 0.0 {
+                self.average_price = total_value / total_filled;
+            }
             if self.remaining_volume < 1e-6 {
                 self.state = OrderState::Filled;
             } else {
                 self.state = OrderState::PartiallyFilled;
             }
             self.reset_absence();
+            return EventEffect::Applied;
         } else if self.state == OrderState::Submitting || self.state == OrderState::Created {
             self.state = OrderState::Accepted;
             self.reset_absence();
+            return EventEffect::Applied;
         }
+
+        EventEffect::Ignored
     }
 
     /// Mark order status as Unknown when network transmission is ambiguous (e.g. pipe broken during response).

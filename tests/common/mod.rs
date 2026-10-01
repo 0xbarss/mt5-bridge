@@ -409,8 +409,8 @@ impl TradingBackend for MockBroker {
         &self,
         ticket: u64,
         magic: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: mt5_bridge::types::Level,
+        take_profit: mt5_bridge::types::Level,
     ) -> Result<TradeResult> {
         let mut g = self.inner.lock().unwrap();
         for (p, _) in g.positions.iter_mut() {
@@ -422,8 +422,16 @@ impl TradingBackend for MockBroker {
                         actual_magic: p.magic,
                     });
                 }
-                p.stop_loss = stop_loss;
-                p.take_profit = take_profit;
+                match stop_loss {
+                    mt5_bridge::types::Level::Set(v) => p.stop_loss = v,
+                    mt5_bridge::types::Level::Clear => p.stop_loss = 0.0,
+                    mt5_bridge::types::Level::Keep => {}
+                }
+                match take_profit {
+                    mt5_bridge::types::Level::Set(v) => p.take_profit = v,
+                    mt5_bridge::types::Level::Clear => p.take_profit = 0.0,
+                    mt5_bridge::types::Level::Keep => {}
+                }
                 return Ok(TradeResult {
                     retcode: 10009,
                     deal: 0,

@@ -48,8 +48,8 @@ impl TradingBackend for DummyBackend {
         &self,
         ticket: u64,
         _magic: u64,
-        _stop_loss: f64,
-        _take_profit: f64,
+        _stop_loss: mt5_bridge::Level,
+        _take_profit: mt5_bridge::Level,
     ) -> Result<TradeResult> {
         Ok(TradeResult {
             retcode: 10009,
@@ -189,7 +189,7 @@ fn main() {
         },
     );
 
-    // 5. Asynchronous push event wire decoding (Protocol v5+)
+    // 5. Asynchronous push event wire decoding (Protocol v6+)
     let raw_tick = Mt5TickEvent {
         symbol: raw_deal.symbol,
         time_msc: 1700000000123,
@@ -198,9 +198,11 @@ fn main() {
         last: 1.08513,
         volume: 25,
         flags: 6,
+        _pad: 0,
+        event_seq: 1,
     };
     bench(
-        "tick_from_event (76-byte push tick decoding)",
+        "tick_from_event (88-byte push tick decoding)",
         500_000,
         || {
             black_box(Tick::from_event(black_box(raw_tick)));
@@ -220,9 +222,16 @@ fn main() {
         tp: 1.09000,
         symbol: raw_deal.symbol,
         comment: raw_deal.comment,
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: 0,
+        deal_position_id: 30303,
+        deal_reason: 0,
+        _pad: 0,
+        event_seq: 2,
     };
     bench(
-        "trade_event_from_raw (136-byte push trade decoding)",
+        "trade_event_from_raw (176-byte push trade decoding)",
         500_000,
         || {
             black_box(TradeEvent::from_raw(black_box(raw_trade)));
@@ -236,9 +245,10 @@ fn main() {
         _pad: 0,
         price: 1.08515,
         volume: 100.0,
+        event_seq: 3,
     };
     bench(
-        "book_event_from_raw (64-byte push DOM decoding)",
+        "book_event_from_raw (72-byte push DOM decoding)",
         500_000,
         || {
             black_box(BookEvent::from_raw(black_box(raw_book)));

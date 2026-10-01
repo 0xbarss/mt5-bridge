@@ -36,11 +36,12 @@
 //!   failure modes.)
 
 use crate::backend::TradingBackend;
-use crate::error::{Mt5Error, Result};
+use crate::error::{classify_retcode, Mt5Error, Result, RetcodeClass};
 use crate::journal::OrderStore;
 use crate::types::{
-    comment_matches_client_order_id, parse_wire_id, wire_id, Deal, OrderRequest, OrderState,
-    Position, TrackedOrder, TradeEvent, TradeResult, WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES,
+    comment_matches_client_order_id, parse_wire_id, wire_id, Deal, Level, OrderRequest, OrderState,
+    OrderType, Position, RejectionEvidence, TrackedOrder, TradeEvent, TradeResult, WorkingOrder,
+    MAX_CLIENT_ORDER_ID_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -48,6 +49,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
+
+/// Classify submission outcome to ensure only verifiably unplaced orders transition to Rejected.
+fn classify_send_error(err: &Mt5Error) -> (OrderState, Option<RejectionEvidence>, String) {
+    match err {
+        Mt5Error::TransmissionFailed(msg) => (
+            OrderState::Rejected,
+            Some(RejectionEvidence::NeverTransmitted),
+            msg.clone(),
+        ),
+        Mt5Error::PreflightRejected(msg) => (
+            OrderState::Rejected,
+            Some(RejectionEvidence::PreflightRejected),
+            msg.clone(),
+        ),
+        Mt5Error::OrderSendFailed {
+            retcode,
+            description,
+            ..
+        } => match classify_retcode(*retcode) {
+            RetcodeClass::DefinitivelyNotExecuted => (
+                OrderState::Rejected,
+                Some(RejectionEvidence::BrokerRetcode(*retcode)),
+                format!("retcode {retcode}: {description}"),
+            ),
+            RetcodeClass::Ambiguous | RetcodeClass::Executed => (
+                OrderState::Unknown,
+                None,
+                format!("ambiguous retcode {retcode}: {description}"),
+            ),
+        },
+        Mt5Error::UnknownExecutionState { description, .. } => {
+            (OrderState::Unknown, None, description.clone())
+        }
+        other => (
+            OrderState::Unknown,
+            None,
+            format!("unverified transmission error: {other}"),
+        ),
+    }
+}
 
 /// Slack (seconds) added on both sides of the deal-history window fetched by
 /// [`OrderManager::reconcile`], to tolerate clock skew between this host and the broker.
@@ -201,7 +242,12 @@ pub struct OrderManager {
 impl OrderManager {
     /// Create a new `OrderManager` bound to a specific strategy magic number, with no
     /// durable journal (state lives in memory only — see [`with_store`](Self::with_store)).
+    /// Panics if `strategy_magic == 0`.
     pub fn new(strategy_magic: u64) -> Self {
+        assert!(
+            strategy_magic != 0,
+            "strategy magic number must be non-zero"
+        );
         Self {
             strategy_magic,
             lifecycle: LifecycleState::Starting,
@@ -210,6 +256,16 @@ impl OrderManager {
             policy: SafetyPolicy::default(),
             store: None,
         }
+    }
+
+    /// Safely create a new `OrderManager` validating that strategy magic is non-zero.
+    pub fn try_new(strategy_magic: u64) -> Result<Self> {
+        if strategy_magic == 0 {
+            return Err(Mt5Error::InvalidRequest(
+                "strategy magic number must be non-zero".to_string(),
+            ));
+        }
+        Ok(Self::new(strategy_magic))
     }
 
     /// Create a manager with an explicit [`SafetyPolicy`].
@@ -229,6 +285,11 @@ impl OrderManager {
     ///
     /// Fails (rather than starting empty) if the store exists but cannot be read.
     pub fn with_store(strategy_magic: u64, store: Box<dyn OrderStore>) -> Result<Self> {
+        if strategy_magic == 0 {
+            return Err(Mt5Error::InvalidRequest(
+                "strategy magic number must be non-zero".to_string(),
+            ));
+        }
         let restored = store.load()?;
         let mut m = Self::new(strategy_magic);
         m.restore_orders(restored);
@@ -498,25 +559,31 @@ impl OrderManager {
                 );
                 Ok(())
             }
-            Err(Mt5Error::UnknownExecutionState { description, .. }) => {
-                // Ambiguous network outcome: response lost after submission!
-                tracked.mark_unknown(&description);
-                self.lifecycle = LifecycleState::Degraded;
-                warn!(
-                    client_order_id = %cid,
-                    "Order execution outcome is UNKNOWN! Reconcile against broker before retrying."
-                );
-                Err(Mt5Error::UnknownExecutionState {
-                    symbol: req.symbol.clone(),
-                    client_order_id: Some(cid.clone()),
-                    description,
-                })
-            }
             Err(e) => {
-                tracked.state = OrderState::Rejected;
-                tracked.error_message = Some(e.to_string());
-                tracked.updated_at = chrono::Utc::now().timestamp();
-                Err(e)
+                let (new_state, evidence, desc) = classify_send_error(&e);
+                match new_state {
+                    OrderState::Unknown => {
+                        tracked.mark_unknown(&desc);
+                        self.lifecycle = LifecycleState::Degraded;
+                        warn!(
+                            client_order_id = %cid,
+                            "Order execution outcome is UNKNOWN! Reconcile against broker before retrying."
+                        );
+                        Err(Mt5Error::UnknownExecutionState {
+                            symbol: req.symbol.clone(),
+                            client_order_id: Some(cid.clone()),
+                            description: desc,
+                        })
+                    }
+                    OrderState::Rejected => {
+                        tracked.state = OrderState::Rejected;
+                        tracked.rejection = evidence;
+                        tracked.error_message = Some(desc);
+                        tracked.updated_at = chrono::Utc::now().timestamp();
+                        Err(e)
+                    }
+                    _ => Err(e),
+                }
             }
         };
 
@@ -636,16 +703,24 @@ impl OrderManager {
         &mut self,
         client: &B,
         ticket: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         let res =
             client.order_modify_with_magic(ticket, self.strategy_magic, stop_loss, take_profit)?;
         let mut touched = false;
         for o in self.orders.values_mut() {
             if o.position_ticket == ticket || o.order_ticket == ticket {
-                o.requested_stop_loss = stop_loss;
-                o.requested_take_profit = take_profit;
+                match stop_loss {
+                    Level::Set(v) => o.requested_stop_loss = v,
+                    Level::Clear => o.requested_stop_loss = 0.0,
+                    Level::Keep => {}
+                }
+                match take_profit {
+                    Level::Set(v) => o.requested_take_profit = v,
+                    Level::Clear => o.requested_take_profit = 0.0,
+                    Level::Keep => {}
+                }
                 o.updated_at = chrono::Utc::now().timestamp();
                 touched = true;
             }
@@ -923,6 +998,36 @@ impl OrderManager {
                 );
             } else {
                 // ---- Not found anywhere in this snapshot.
+                // Profile matching: if the broker stripped or modified comments,
+                // check if an unowned candidate matches symbol, side, volume, and time window.
+                let profile_match = live_positions.iter().any(|p| {
+                    !owned_by_other(position_owner.get(&p.ticket))
+                        && p.symbol.eq_ignore_ascii_case(&tracked.symbol)
+                        && (tracked.order_type.is_buy() == (p.position_type == OrderType::Buy))
+                        && (p.volume - tracked.requested_volume).abs() < 1e-6
+                        && (p.time - tracked.created_at).abs() <= 300
+                }) || live_orders.iter().any(|o| {
+                    !owned_by_other(order_owner.get(&o.ticket))
+                        && o.symbol.eq_ignore_ascii_case(&tracked.symbol)
+                        && (tracked.order_type == o.order_type)
+                        && (o.volume_initial - tracked.requested_volume).abs() < 1e-6
+                        && (o.time_setup - tracked.created_at).abs() <= 300
+                }) || all_deals.iter().any(|d| {
+                    d.entry.is_entry()
+                        && d.symbol.eq_ignore_ascii_case(&tracked.symbol)
+                        && (d.volume - tracked.requested_volume).abs() < 1e-6
+                        && (d.time - tracked.created_at).abs() <= 300
+                });
+
+                if profile_match {
+                    warn!(
+                        client_order_id = %cid,
+                        "Order comment match not found, but broker has matching candidate profile(s); cannot conclude absent"
+                    );
+                    unresolved_orders.push(tracked.clone());
+                    continue;
+                }
+
                 if policy.require_deal_history && !deal_history_available {
                     warn!(
                         client_order_id = %cid,
@@ -941,6 +1046,10 @@ impl OrderManager {
                 let old_enough = now - first >= policy.min_absent_secs;
                 if enough_observations && old_enough {
                     tracked.state = OrderState::Rejected;
+                    tracked.rejection = Some(RejectionEvidence::ReconciledAbsent {
+                        observations: tracked.absent_observations,
+                        span_secs: now - first,
+                    });
                     tracked.error_message = Some(format!(
                         "Reconciliation confirmed order was not placed with broker ({} absent observations over {}s)",
                         tracked.absent_observations,
@@ -1134,8 +1243,8 @@ impl SharedOrderManager {
         &self,
         client: &B,
         ticket: u64,
-        stop_loss: f64,
-        take_profit: f64,
+        stop_loss: Level,
+        take_profit: Level,
     ) -> Result<TradeResult> {
         self.lock()
             .modify_order(client, ticket, stop_loss, take_profit)

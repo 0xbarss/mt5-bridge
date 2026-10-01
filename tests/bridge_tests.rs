@@ -502,8 +502,8 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    // v5: push model, EVENT framing, and subscriptions.
-    assert_eq!(PROTOCOL_VERSION, 5);
+    // v6: 16-byte PacketHdr with request_id echo, explicit event schema, and robust multiplexing.
+    assert_eq!(PROTOCOL_VERSION, 6);
 }
 
 #[test]
@@ -1286,6 +1286,12 @@ fn test_order_manager_apply_trade_event() {
         tp: 1.0900,
         symbol: "EURUSD".to_string(),
         comment: format!("cid:{}", wire_token),
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: 0,
+        deal_position_id: 112233,
+        deal_reason: 0,
+        event_seq: 1,
     };
 
     let updated = mgr
@@ -1314,6 +1320,12 @@ fn test_order_manager_apply_trade_event() {
         tp: 1.0900,
         symbol: "EURUSD".to_string(),
         comment: format!("cid:{}", wire_token),
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: 0,
+        deal_position_id: 112233,
+        deal_reason: 0,
+        event_seq: 2,
     };
 
     let final_order = mgr
@@ -1435,6 +1447,12 @@ async fn test_event_bus_trade_and_book_dispatch() {
         tp: 1.0900,
         symbol: "EURUSD".to_string(),
         comment: "test deal".to_string(),
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: 0,
+        deal_position_id: 7701,
+        deal_reason: 0,
+        event_seq: 1,
     };
     bus.dispatch_trade(trade.clone());
 
@@ -1471,6 +1489,8 @@ fn test_raw_event_wire_conversions() {
         last: 1.08510,
         volume: 50,
         flags: 6,
+        _pad: 0,
+        event_seq: 1,
     };
     let tick = Tick::from_event(raw_tick);
     assert_eq!(tick.symbol, "EURUSD");
@@ -1494,6 +1514,13 @@ fn test_raw_event_wire_conversions() {
         tp: 1.09000,
         symbol: sym,
         comment: cmt,
+        deal_entry: 0,
+        deal_type: 1,
+        deal_magic: 0,
+        deal_position_id: 11223,
+        deal_reason: 0,
+        _pad: 0,
+        event_seq: 1,
     };
     let trade = TradeEvent::from_raw(raw_trade);
     assert_eq!(trade.deal, 12345);
@@ -1508,6 +1535,7 @@ fn test_raw_event_wire_conversions() {
         _pad: 0,
         price: 1.08530,
         volume: 100.0,
+        event_seq: 1,
     };
     let book = BookEvent::from_raw(raw_book);
     assert_eq!(book.symbol, "EURUSD");
@@ -1519,6 +1547,7 @@ fn test_raw_event_wire_conversions() {
 #[test]
 fn test_trading_backend_close_position_alias() {
     use mt5_bridge::backend::TradingBackend;
+    use mt5_bridge::types::Level;
     use mt5_bridge::{Mt5Error, OrderRequest, Position, TradeResult, WorkingOrder};
 
     struct DummyBackend;
@@ -1540,8 +1569,8 @@ fn test_trading_backend_close_position_alias() {
             &self,
             _ticket: u64,
             _magic: u64,
-            _stop_loss: f64,
-            _take_profit: f64,
+            _stop_loss: Level,
+            _take_profit: Level,
         ) -> Result<TradeResult, Mt5Error> {
             unimplemented!()
         }

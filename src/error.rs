@@ -13,6 +13,9 @@ pub enum Mt5Error {
         source: libloading::Error,
     },
 
+    #[error("MT5 bridge DLL path '{path}' is not safe to load: {reason}")]
+    InvalidDllPath { path: String, reason: String },
+
     #[error("Required DLL symbol '{symbol}' was not found: {source}")]
     SymbolNotFound {
         symbol: &'static str,

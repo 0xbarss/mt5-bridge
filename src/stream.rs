@@ -53,6 +53,7 @@ pub struct EventBus {
     ticks: Mutex<HashMap<String, broadcast::Sender<Tick>>>,
     trades: broadcast::Sender<TradeEvent>,
     books: Mutex<HashMap<String, broadcast::Sender<BookEvent>>>,
+    bars: Mutex<HashMap<(String, i32), broadcast::Sender<Bar>>>,
     buffer_capacity: usize,
 }
 
@@ -63,13 +64,17 @@ impl EventBus {
             ticks: Mutex::new(HashMap::new()),
             trades,
             books: Mutex::new(HashMap::new()),
+            bars: Mutex::new(HashMap::new()),
             buffer_capacity: buffer_capacity.max(64),
         }
     }
 
     /// Subscribe to real-time pushed ticks for a symbol.
     pub fn subscribe_ticks(&self, symbol: &str) -> broadcast::Receiver<Tick> {
-        let mut map = self.ticks.lock().unwrap();
+        let mut map = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sender = map.entry(symbol.to_string()).or_insert_with(|| {
             let (tx, _) = broadcast::channel(self.buffer_capacity);
             tx
@@ -84,7 +89,10 @@ impl EventBus {
 
     /// Subscribe to real-time pushed depth-of-market book events for a symbol.
     pub fn subscribe_book(&self, symbol: &str) -> broadcast::Receiver<BookEvent> {
-        let mut map = self.books.lock().unwrap();
+        let mut map = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sender = map.entry(symbol.to_string()).or_insert_with(|| {
             let (tx, _) = broadcast::channel(self.buffer_capacity);
             tx
@@ -92,9 +100,27 @@ impl EventBus {
         sender.subscribe()
     }
 
+    /// Subscribe to real-time pushed OHLCV bars for a symbol and timeframe.
+    pub fn subscribe_bars(&self, symbol: &str, timeframe: i32) -> broadcast::Receiver<Bar> {
+        let mut map = self
+            .bars
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = map
+            .entry((symbol.to_string(), timeframe))
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(self.buffer_capacity);
+                tx
+            });
+        sender.subscribe()
+    }
+
     /// Dispatch an incoming tick to all subscribers of that symbol.
     pub fn dispatch_tick(&self, tick: Tick) {
-        let map = self.ticks.lock().unwrap();
+        let map = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(tx) = map.get(&tick.symbol) {
             let _ = tx.send(tick);
         }
@@ -107,15 +133,34 @@ impl EventBus {
 
     /// Dispatch an incoming book depth event to all subscribers of that symbol.
     pub fn dispatch_book(&self, book: BookEvent) {
-        let map = self.books.lock().unwrap();
+        let map = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(tx) = map.get(&book.symbol) {
             let _ = tx.send(book);
         }
     }
 
+    /// Dispatch an incoming OHLCV bar event to all subscribers of that symbol and timeframe.
+    pub fn dispatch_bar(&self, symbol: &str, timeframe: i32, bar: Bar) {
+        let map = self
+            .bars
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(tx) = map.get(&(symbol.to_string(), timeframe)) {
+            let _ = tx.send(bar);
+        }
+    }
+
     /// Returns the symbols currently tracked in the tick subscription table.
     pub fn active_tick_symbols(&self) -> Vec<String> {
-        self.ticks.lock().unwrap().keys().cloned().collect()
+        self.ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 

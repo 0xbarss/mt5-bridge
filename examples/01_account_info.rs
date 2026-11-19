@@ -19,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let account = client.account_info()?;
     println!("=== Account Overview ===");
+    println!("Currency:    {}", account.currency);
+    println!("Leverage:    1:{:.0}", account.leverage);
     println!("Balance:     {:.2}", account.balance);
     println!("Equity:      {:.2}", account.equity);
     println!("Profit/Loss: {:.2}", account.profit());

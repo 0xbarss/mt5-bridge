@@ -28,7 +28,9 @@ typedef struct {
     double   max_lot;
     double   spread;
     int32_t  digits;
-} Mt5SymInfo;            /* 60 bytes */
+    double   bid;
+    double   ask;
+} Mt5SymInfo;            /* 76 bytes */
 
 typedef struct {
     int64_t  time;
@@ -166,13 +168,24 @@ typedef struct {
     uint64_t event_seq;  /* monotonic event sequence number */
 } Mt5BookEvent;          /* 72 bytes */
 
+/* Asynchronous bar event pushed by the EA upon bar close (protocol v7+). */
+typedef struct {
+    char     symbol[32];
+    int64_t  time;
+    double   open;
+    double   high;
+    double   low;
+    double   close;
+    int64_t  volume;
+    int32_t  timeframe;
+    int32_t  spread;
+    uint64_t event_seq;
+} Mt5BarEvent;           /* 96 bytes */
+
 #pragma pack(pop)
 
-/* Protocol version for wire handshake compatibility checks.
- * v6: adds 16-byte PacketHdr with request_id echo, explicit event schema with
- *     deal_entry/deal_magic/event_seq, challenge-response auth, and robust multiplexing.
- *     Must match PROTOCOL_VERSION in src/ffi.rs and EA's PROTOCOL_VERSION. */
-#define MT5_BRIDGE_PROTOCOL_VERSION 6
+/* Protocol version for wire handshake compatibility checks. */
+#define MT5_BRIDGE_PROTOCOL_VERSION 7
 
 /* Wire transaction kinds (WTX_*) - stable across MT5 builds */
 #define WTX_OTHER         0
@@ -198,7 +211,7 @@ typedef struct {
 #define MT5_ERR_ALREADY_INITIALIZED -6  /* Bridge client already initialized in this process */
 
 #if defined(__cplusplus)
-static_assert(sizeof(Mt5SymInfo) == 60, "Mt5SymInfo size must be exactly 60 bytes");
+static_assert(sizeof(Mt5SymInfo) == 76, "Mt5SymInfo size must be exactly 76 bytes");
 static_assert(sizeof(Mt5Rate) == 60, "Mt5Rate size must be exactly 60 bytes");
 static_assert(sizeof(Mt5Tick) == 44, "Mt5Tick size must be exactly 44 bytes");
 static_assert(sizeof(Mt5TradeResult) == 44, "Mt5TradeResult size must be exactly 44 bytes");
@@ -209,6 +222,7 @@ static_assert(sizeof(PacketHdr) == 16, "PacketHdr size must be exactly 16 bytes"
 static_assert(sizeof(Mt5TickEvent) == 88, "Mt5TickEvent size must be exactly 88 bytes");
 static_assert(sizeof(Mt5TradeEvent) == 176, "Mt5TradeEvent size must be exactly 176 bytes");
 static_assert(sizeof(Mt5BookEvent) == 72, "Mt5BookEvent size must be exactly 72 bytes");
+static_assert(sizeof(Mt5BarEvent) == 96, "Mt5BarEvent size must be exactly 96 bytes");
 #endif
 
 #ifdef __cplusplus
@@ -228,9 +242,11 @@ MT5_API int IsConnected(void);
 MT5_API int CopyRates(const char* symbol, int timeframe, int64_t from,
                       int64_t to, Mt5Rate* buf, int buf_capacity);
 
-/* Account balances. Returns 1 on success. */
+/* Account balances, the account leverage and the deposit currency.
+   `currency` is a NUL-terminated buffer of at least 32 bytes. Returns 1 on success. */
 MT5_API int AccountInfo(double* balance, double* equity,
-                        double* margin,  double* free_margin);
+                        double* margin,  double* free_margin,
+                        double* leverage, char* currency, int currency_len);
 
 /* Open or place an order. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
 MT5_API int OrderSend(const char* symbol, int type, double volume,
@@ -244,6 +260,9 @@ MT5_API int OrderClose(uint64_t ticket, Mt5TradeResult* result);
 
 /* Close position by ticket with magic number verification. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
 MT5_API int OrderCloseWithMagic(uint64_t ticket, uint64_t magic, Mt5TradeResult* result);
+
+/* Close position by ticket with deviation, volume, and magic number. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
+MT5_API int OrderCloseWithDeviation(uint64_t ticket, uint64_t magic, uint32_t deviation, double volume, Mt5TradeResult* result);
 
 /* Modify SL/TP with explicit level modes (0=keep, 1=clear, 2=set). Returns 1 on success, -1 on send fail, -2 on unknown execution. */
 MT5_API int OrderModify(uint64_t ticket, uint8_t sl_mode, double sl, uint8_t tp_mode, double tp, Mt5TradeResult* result);
@@ -275,6 +294,8 @@ MT5_API int SubscribeTrade(void);
 MT5_API int UnsubscribeTrade(void);
 MT5_API int SubscribeBook(const char* symbol);
 MT5_API int UnsubscribeBook(const char* symbol);
+MT5_API int SubscribeBars(const char* symbol, int timeframe);
+MT5_API int UnsubscribeBars(const char* symbol, int timeframe);
 
 /* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);

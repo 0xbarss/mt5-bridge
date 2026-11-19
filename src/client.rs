@@ -2,7 +2,7 @@ use crate::error::{mt5_retcode_description, Mt5Error, Result};
 use crate::ffi::*;
 use crate::types::*;
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_double, c_int};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -447,19 +447,37 @@ impl Mt5Client {
 
     /// Query current account balance, equity, and margin information.
     pub fn account_info(&self) -> Result<AccountInfo> {
-        let (mut balance, mut equity, mut margin, mut free_margin) = (0.0, 0.0, 0.0, 0.0);
-        let ret =
-            unsafe { (self.fn_acct)(&mut balance, &mut equity, &mut margin, &mut free_margin) };
+        let (mut balance, mut equity, mut margin, mut free_margin, mut leverage) =
+            (0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut currency = [0i8; 32];
+        let ret = unsafe {
+            (self.fn_acct)(
+                &mut balance,
+                &mut equity,
+                &mut margin,
+                &mut free_margin,
+                &mut leverage,
+                currency.as_mut_ptr(),
+                currency.len() as c_int,
+            )
+        };
 
         if ret != 1 {
             return Err(Mt5Error::AccountInfoFailed(ret));
         }
+
+        let currency = unsafe { CStr::from_ptr(currency.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
 
         Ok(AccountInfo {
             balance,
             equity,
             margin,
             free_margin,
+            leverage,
+            currency,
         })
     }
 

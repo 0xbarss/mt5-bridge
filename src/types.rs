@@ -154,7 +154,7 @@ impl FromStr for Timeframe {
 }
 
 /// MetaTrader 5 account balance, equity, and margin details.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AccountInfo {
     /// Account balance in deposit currency.
     pub balance: f64,
@@ -164,6 +164,10 @@ pub struct AccountInfo {
     pub margin: f64,
     /// Free margin available for opening new positions.
     pub free_margin: f64,
+    /// The account leverage, when the terminal reports it. `0` when unknown.
+    pub leverage: f64,
+    /// The deposit currency of the account, when the terminal reports it.
+    pub currency: String,
 }
 
 impl AccountInfo {
@@ -194,6 +198,10 @@ pub struct SymbolInfo {
     pub max_lot: f64,
     pub spread: f64,
     pub digits: u32,
+    /// The last bid the terminal reported. `0` when the tick was unavailable.
+    pub bid: f64,
+    /// The last ask the terminal reported. `0` when the tick was unavailable.
+    pub ask: f64,
 }
 
 impl SymbolInfo {
@@ -212,6 +220,8 @@ impl SymbolInfo {
             } else {
                 0
             },
+            bid: raw.bid,
+            ask: raw.ask,
         }
     }
 
@@ -2057,6 +2067,8 @@ mod tests {
             max_lot: 100.0,
             spread: 1.2,
             digits: 5,
+            ask: 0.0,
+            bid: 0.0,
         };
 
         assert_eq!(sym.round_lot(0.004), 0.0);
@@ -2096,6 +2108,8 @@ mod tests {
             max_lot: 50.0,
             spread: 2.0,
             digits: 2,
+            ask: 0.0,
+            bid: 0.0,
         };
 
         assert!(!sym.is_min_lot_zero_aligned());
@@ -2142,6 +2156,8 @@ mod tests {
             equity: 10500.0,
             margin: 2000.0,
             free_margin: 8500.0,
+            leverage: 100.0,
+            currency: "USD".to_string(),
         };
         assert_eq!(acct.profit(), 500.0);
         assert_eq!(acct.margin_level(), Some(525.0));
@@ -2181,6 +2197,8 @@ mod tests {
             max_lot: 100.0,
             spread: 1.0,
             digits: 5,
+            ask: 0.0,
+            bid: 0.0,
         };
         assert!((forex.point_value(1.0) - 1.0).abs() < 1e-6);
 
@@ -2195,6 +2213,8 @@ mod tests {
             max_lot: 100.0,
             spread: 2.0,
             digits: 2,
+            ask: 0.0,
+            bid: 0.0,
         };
         // 1 point (0.01) is 0.01 / 0.25 = 0.04 ticks. 0.04 * 12.50 = 0.50 per lot.
         assert!((index.point_value(1.0) - 0.50).abs() < 1e-6);
@@ -2213,6 +2233,8 @@ mod tests {
             max_lot: 100.0,
             spread: 2.0,
             digits: 2,
+            ask: 0.0,
+            bid: 0.0,
         };
         assert_eq!(sym.round_price(5000.12), 5000.0);
         assert_eq!(sym.round_price(5000.13), 5000.25);

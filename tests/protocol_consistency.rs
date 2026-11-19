@@ -92,6 +92,8 @@ fn command_ids_agree_across_rust_dll_and_ea() {
         ("CMD_UNSUBSCRIBE_TRADE", ProtocolCmd::UnsubscribeTrade),
         ("CMD_SUBSCRIBE_BOOK", ProtocolCmd::SubscribeBook),
         ("CMD_UNSUBSCRIBE_BOOK", ProtocolCmd::UnsubscribeBook),
+        ("CMD_SUBSCRIBE_BARS", ProtocolCmd::SubscribeBars),
+        ("CMD_UNSUBSCRIBE_BARS", ProtocolCmd::UnsubscribeBars),
     ];
     for (name, cmd) in table {
         assert_eq!(cpp_enum(&cpp, name), cmd as u64, "DLL {name}");
@@ -101,9 +103,11 @@ fn command_ids_agree_across_rust_dll_and_ea() {
     assert!(ea.contains("case CMD_DEALS_GET:") && ea.contains("void HandleDealsGet("));
     assert!(ea.contains("case CMD_SUBSCRIBE_TICKS:") && ea.contains("void HandleSubscribeTicks("));
     assert!(ea.contains("case CMD_SUBSCRIBE_TRADE:") && ea.contains("void HandleSubscribeTrade("));
+    assert!(ea.contains("case CMD_SUBSCRIBE_BARS:") && ea.contains("void HandleSubscribeBars("));
     assert!(cpp.contains("int DealsGet(Mt5Deal* buf"));
     assert!(cpp.contains("int SubscribeTicks(const char* symbol)"));
     assert!(cpp.contains("int SubscribeTrade(void)"));
+    assert!(cpp.contains("int SubscribeBars(const char* symbol, int timeframe)"));
 }
 
 #[test]
@@ -121,6 +125,7 @@ fn packed_struct_sizes_agree_between_rust_and_dll_static_asserts() {
         ("Mt5TickEvent", std::mem::size_of::<Mt5TickEvent>()),
         ("Mt5TradeEvent", std::mem::size_of::<Mt5TradeEvent>()),
         ("Mt5BookEvent", std::mem::size_of::<Mt5BookEvent>()),
+        ("Mt5BarEvent", std::mem::size_of::<Mt5BarEvent>()),
     ];
     for (name, rust_size) in expect {
         let needle = format!("static_assert(sizeof({name}) == ");

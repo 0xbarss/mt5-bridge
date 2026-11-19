@@ -45,7 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let raw_price = 1.0854321;
                 let rounded_price = info.round_price(raw_price);
                 println!(
-                    "  ↳ Lot {raw_lot} -> {rounded} (valid: {is_valid}) | 1-pt move: ${p_val:.5} | Price {raw_price} -> {rounded_price}"
+                    "  ↳ Bid: {} | Ask: {} | Lot {raw_lot} -> {rounded} (valid: {is_valid}) | 1-pt move: ${p_val:.5} | Price {raw_price} -> {rounded_price}",
+                    info.bid, info.ask
                 );
             }
             Err(e) => {

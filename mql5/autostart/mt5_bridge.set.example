@@ -1,0 +1,34 @@
+; ============================================================================
+; mt5_bridge EA inputs, loaded automatically via [StartUp] ExpertParameters.
+; Install to: <Terminal_Data_Folder>\MQL5\Presets\mt5_bridge.set
+;
+; Keep InpPipeSecret in sync with MT5_PIPE_SECRET in the Rust engine's .env.
+; This file is plain text; restrict its permissions (chmod 600 / ACL to owner).
+; ============================================================================
+
+InpMagicNumber=20240101
+InpPipeName=__PIPE_NAME__
+InpPipeSecret=__PIPE_SECRET__
+InpRequireSecret=true
+InpEnforceMagicNumber=true
+InpConvertToUTC=true
+; 0 = SERVER_TIME_FIXED, 1 = SERVER_TIME_NEW_YORK_DST, 2 = SERVER_TIME_EUROPE_DST
+InpServerTimeConvention=__SERVER_TIME_CONVENTION__
+InpServerUtcOffsetHours=__SERVER_UTC_OFFSET__
+InpTimerIntervalMs=1
+InpMaxRequestsPerTimer=64
+InpMaxTimerBudgetUs=5000
+InpAutoSelectSymbols=true
+; Monotonic version of this preset (normally a Unix timestamp). A running
+; instance with an older generation is asked to release the pipe so this one
+; can take over. Set to 0 to disable takeover.
+InpConfigGeneration=__CONFIG_GENERATION__
+InpTakeoverTimeoutMs=5000
+; Close every other chart once this instance owns the pipe, so repeated
+; restarts and takeovers leave exactly one chart behind.
+InpCloseStaleCharts=true
+InpEnableKillSwitch=false
+InpRequireLiveAck=true
+InpLiveAckAcknowledged=__LIVE_ACK__
+InpMaxVolumePerOrder=__MAX_VOLUME__
+InpMaxDeviation=__MAX_DEVIATION__

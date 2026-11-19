@@ -1430,7 +1430,8 @@ async fn test_tick_subscription_latest_mode_auto_drop_lag() {
 
     // In Latest mode, recv() handles Lagged, updates dropped_ticks, and returns the freshest quote
     let next_tick = sub.recv().await.unwrap();
-    assert!(sub.dropped_ticks() > 0);
+    assert_eq!(next_tick.time_msc, 1710000100 * 1000);
+    assert_eq!(sub.dropped_ticks(), 99);
     assert!(next_tick.bid > 1.08100);
 }
 
@@ -1509,6 +1510,27 @@ async fn test_event_bus_trade_and_book_dispatch() {
     let rec_book = book_sub.recv().await.unwrap();
     assert_eq!(rec_book.symbol, "USDJPY");
     assert_eq!(rec_book.price, 155.250);
+}
+
+#[tokio::test]
+async fn test_event_bus_bar_dispatch() {
+    let bus = EventBus::new(64);
+    let mut bar_sub = bus.subscribe_bars("EURUSD", 1);
+
+    let bar = Bar {
+        time: 1710000000,
+        open: 1.0850,
+        high: 1.0860,
+        low: 1.0845,
+        close: 1.0855,
+        volume: 50.0,
+    };
+    bus.dispatch_bar("EURUSD", 1, bar);
+
+    let rec_bar = bar_sub.recv().await.unwrap();
+    assert_eq!(rec_bar.time, 1710000000);
+    assert_eq!(rec_bar.open, 1.0850);
+    assert_eq!(rec_bar.close, 1.0855);
 }
 
 #[test]

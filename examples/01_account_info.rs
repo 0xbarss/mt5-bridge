@@ -12,13 +12,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = env::var("MT5_SERVER").unwrap_or_default();
 
     println!(
-        "Connecting to MT5 bridge (login: {}, server: {})...",
+        "Connecting to MT5 bridge (login: {}, server: {}, Protocol v7)...",
         login, server
     );
     let client = Mt5Client::connect(login, &password, &server)?;
 
     let account = client.account_info()?;
-    println!("=== Account Overview ===");
+    println!("=== Account Overview (Protocol v7) ===");
     println!("Currency:    {}", account.currency);
     println!("Leverage:    1:{:.0}", account.leverage);
     println!("Balance:     {:.2}", account.balance);

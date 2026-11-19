@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info.digits
                 );
 
-                // Show lot normalization & risk calculation helpers
+                // Show lot normalization & risk calculation helpers alongside Protocol v7 bid/ask fields
                 let raw_lot = 0.12345;
                 let rounded = info.round_lot(raw_lot);
                 let is_valid = info.is_valid_lot(rounded);
@@ -45,8 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let raw_price = 1.0854321;
                 let rounded_price = info.round_price(raw_price);
                 println!(
-                    "  ↳ Bid: {} | Ask: {} | Lot {raw_lot} -> {rounded} (valid: {is_valid}) | 1-pt move: ${p_val:.5} | Price {raw_price} -> {rounded_price}",
-                    info.bid, info.ask
+                    "  ↳ [Protocol v7] Bid: {} | Ask: {} | Spread: {} | Lot {raw_lot} -> {rounded} (valid: {is_valid}) | 1-pt move: ${p_val:.5} | Price {raw_price} -> {rounded_price}",
+                    info.bid, info.ask, info.spread
                 );
             }
             Err(e) => {

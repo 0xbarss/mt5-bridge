@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let symbol = "EURUSD";
 
     println!(
-        "Starting real-time push tick streams for {} (Protocol v5+)...\n",
+        "Starting real-time push tick streams for {} (Protocol v7)...\n",
         symbol
     );
 

@@ -34,3 +34,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[bench]]
+name = "latency_harness"
+harness = false
+
+[[bench]]
+name = "mt5_extensive_benchmark"
+harness = false
+
+[[bench]]
+name = "push_probe"
+harness = false

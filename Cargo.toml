@@ -1,6 +1,6 @@
 [package]
 name = "mt5-bridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["0xbarss <https://github.com/0xbarss>"]
 description = "Fast, unofficial MetaTrader 5 API bridge and client for Rust (OHLCV, Account, Orders, Tick & Bar Streaming)"

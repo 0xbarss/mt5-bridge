@@ -70,7 +70,7 @@ fn classify_send_error(err: &Mt5Error) -> (OrderState, Option<RejectionEvidence>
         } => match classify_retcode(*retcode) {
             RetcodeClass::DefinitivelyNotExecuted => (
                 OrderState::Rejected,
-                Some(RejectionEvidence::BrokerRetcode(*retcode)),
+                Some(RejectionEvidence::BrokerRetcode(*retcode as i32)),
                 format!("retcode {retcode}: {description}"),
             ),
             RetcodeClass::Ambiguous | RetcodeClass::Executed => (

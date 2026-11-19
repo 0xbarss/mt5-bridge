@@ -65,9 +65,13 @@ pub mod constants;
 pub mod error;
 pub mod ffi;
 pub mod journal;
+pub mod position_book;
 pub mod reconciliation;
 pub mod sync;
 pub mod types;
+
+#[cfg(feature = "serde_json")]
+pub mod wal;
 
 #[cfg(feature = "async")]
 pub mod stream;
@@ -77,9 +81,13 @@ pub use client::Mt5Client;
 pub use constants::*;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
-#[cfg(feature = "serde_json")]
-pub use journal::JsonFileStore;
 pub use journal::OrderStore;
+#[cfg(feature = "serde_json")]
+pub use journal::{migrate_json_to_wal, wal_to_json, JsonFileStore, WalConfig, WalOrderStore};
+pub use position_book::{
+    BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,
+    PositionTransition,
+};
 pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderManager, ReconciliationReport, SafetyPolicy,
     SharedOrderManager, UnknownBlockScope,

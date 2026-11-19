@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # C++ Build outputs
 bridge_dll/build/
@@ -21,3 +20,6 @@ bridge_dll/bin/
 *~
 .DS_Store
 Thumbs.db
+
+# Documentation
+docs/

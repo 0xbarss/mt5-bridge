@@ -61,10 +61,12 @@
 
 pub mod backend;
 pub mod client;
+pub mod constants;
 pub mod error;
 pub mod ffi;
 pub mod journal;
 pub mod reconciliation;
+pub mod sync;
 pub mod types;
 
 #[cfg(feature = "async")]
@@ -72,6 +74,7 @@ pub mod stream;
 
 pub use backend::TradingBackend;
 pub use client::Mt5Client;
+pub use constants::*;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
 #[cfg(feature = "serde_json")]
@@ -81,6 +84,7 @@ pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderManager, ReconciliationReport, SafetyPolicy,
     SharedOrderManager, UnknownBlockScope,
 };
+pub use sync::LockExt;
 pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,

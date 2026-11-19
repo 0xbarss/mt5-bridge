@@ -28,8 +28,40 @@ pub trait OrderStore: Send {
     /// Corrupt or unreadable state **must** be an error, never an empty list: silently
     /// starting empty would forget in-flight orders.
     fn load(&self) -> Result<Vec<TrackedOrder>>;
+
+    /// Returns `true` if this store supports incremental append-only records (e.g. WAL).
+    /// Stores returning `false` (e.g. [`JsonFileStore`]) rewrite all state on each snapshot.
+    fn is_incremental(&self) -> bool {
+        false
+    }
+
+    /// Journal a pre-send order intent (write-ahead record).
+    /// The record must reach stable storage before this call returns `Ok`.
+    fn record_intent(&self, order: &TrackedOrder) -> Result<()> {
+        let _ = order;
+        Ok(())
+    }
+
+    /// Journal an incremental order state update (fill, modify, close, reject).
+    fn record_update(&self, order: &TrackedOrder) -> Result<()> {
+        let _ = order;
+        Ok(())
+    }
+
+    /// Prune settled / terminal orders from durable storage.
+    fn prune(&self, keep_client_order_ids: &[String]) -> Result<()> {
+        let _ = keep_client_order_ids;
+        Ok(())
+    }
+
+    /// Flush any pending buffered records to disk.
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
+#[cfg(feature = "serde_json")]
+pub use crate::wal::{migrate_json_to_wal, wal_to_json, WalConfig, WalOrderStore};
 #[cfg(feature = "serde_json")]
 pub use json_file::JsonFileStore;
 

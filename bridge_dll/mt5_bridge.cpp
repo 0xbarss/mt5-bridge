@@ -53,8 +53,9 @@ inline BOOL ReadFile(HANDLE h, void* buf, DWORD len, DWORD* read, void*) {
     return TRUE;
 }
 inline BOOL CloseHandle(HANDLE h) {
+    if (!h || h == INVALID_HANDLE_VALUE) return TRUE;
     int fd = (int)(intptr_t)h;
-    if (fd >= 0) close(fd);
+    if (fd > 2) close(fd);
     return TRUE;
 }
 inline BOOL CancelIoEx(HANDLE, void*) {
@@ -109,7 +110,47 @@ enum Cmd : uint32_t {
     CMD_UNSUBSCRIBE_TRADE = 16,
     CMD_SUBSCRIBE_BOOK    = 17,
     CMD_UNSUBSCRIBE_BOOK  = 18,
+    CMD_SUBSCRIBE_BARS    = 19,
+    CMD_UNSUBSCRIBE_BARS  = 20,
 };
+
+/* ── Request deadlines ──────────────────────────────────────────────────────
+ *
+ * The Expert Advisor serves pipe requests ONE AT A TIME (single event loop),
+ * so a request that queues behind a slow order waits for the order's whole
+ * server round trip. A fixed deadline that does not account for that queueing
+ * makes the client give up on requests the broker has already executed.
+ *
+ * The deadlines are therefore configurable through the environment of the
+ * process that loads this DLL:
+ *
+ *   MT5_ORDER_TIMEOUT_SEC  deadline for order send/close/modify (default 20)
+ *   MT5_QUERY_TIMEOUT_SEC  deadline for account/positions/deals queries (default 5)
+ *   MT5_RATES_TIMEOUT_SEC  deadline for a rate request (default 60)
+ */
+static int env_timeout(const char* name, int fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    char* end = nullptr;
+    long value = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || value <= 0 || value > 3600) return fallback;
+    return static_cast<int>(value);
+}
+
+static int order_timeout_sec() {
+    static int value = env_timeout("MT5_ORDER_TIMEOUT_SEC", 20);
+    return value;
+}
+
+static int query_timeout_sec() {
+    static int value = env_timeout("MT5_QUERY_TIMEOUT_SEC", 5);
+    return value;
+}
+
+static int rates_timeout_sec() {
+    static int value = env_timeout("MT5_RATES_TIMEOUT_SEC", 60);
+    return value;
+}
 
 enum PacketKind : uint8_t {
     PKT_REQUEST  = 0,
@@ -162,7 +203,14 @@ struct PendingRequest {
 
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
-    explicit Connection(HANDLE pipe) : pipe_(pipe) {}
+    explicit Connection(HANDLE pipe) : pipe_(pipe) {
+#if defined(_WIN32)
+        read_event_ = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        read_ov_.hEvent = read_event_;
+        write_event_ = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        write_ov_.hEvent = write_event_;
+#endif
+    }
 
     ~Connection() {
         kill();
@@ -173,6 +221,16 @@ public:
             CloseHandle(pipe_);
             pipe_ = INVALID_HANDLE_VALUE;
         }
+#if defined(_WIN32)
+        if (read_event_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(read_event_);
+            read_event_ = INVALID_HANDLE_VALUE;
+        }
+        if (write_event_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(write_event_);
+            write_event_ = INVALID_HANDLE_VALUE;
+        }
+#endif
     }
 
     void start_reader() {
@@ -262,29 +320,43 @@ public:
             return Outcome::SEND_FAILED;
         }
 
-        // Wait for matching response on this request's private condition variable
-        std::unique_lock<std::mutex> lk(req->mu);
-        bool ok = req->cv.wait_for(lk, std::chrono::seconds(timeout_sec), [&]() {
-            return req->done || req->aborted || !is_alive();
-        });
+        // Wait for matching response on this request's private condition variable.
+        // Copy out the fields we need while holding req->mu, then release it before
+        // touching pending_mu_ so kill() (which takes pending_mu_ then req->mu)
+        // cannot deadlock with this thread.
+        bool aborted = false;
+        bool done = false;
+        bool ok = false;
+        uint16_t status = 0;
+        std::string data;
+        {
+            std::unique_lock<std::mutex> lk(req->mu);
+            ok = req->cv.wait_for(lk, std::chrono::seconds(timeout_sec), [&]() {
+                return req->done || req->aborted || !is_alive();
+            });
+            aborted = req->aborted;
+            done = req->done;
+            status = req->status;
+            data = std::move(req->data);
+        }  // req->mu released here, before pending_mu_
 
         {
             std::lock_guard<std::mutex> plk(pending_mu_);
             pending_.erase(req_id);
         }
 
-        if (req->aborted || !is_alive()) {
+        if (aborted || !is_alive()) {
             out_status = MT5_ERR_UNKNOWN_EXECUTION;
             return Outcome::UNKNOWN;
         }
 
-        if (!ok || !req->done) {
+        if (!ok || !done) {
             out_status = MT5_ERR_UNKNOWN_EXECUTION;
             return Outcome::UNKNOWN;
         }
 
-        out_status = req->status;
-        out_data   = std::move(req->data);
+        out_status = status;
+        out_data   = std::move(data);
         return Outcome::RESPONDED;
     }
 
@@ -301,6 +373,12 @@ private:
     std::atomic<uint32_t>           next_req_id_{1};
     std::atomic<uint64_t>           orphans_{0};
     std::thread                     reader_thread_;
+#if defined(_WIN32)
+    OVERLAPPED                      read_ov_{};
+    HANDLE                          read_event_ = INVALID_HANDLE_VALUE;
+    OVERLAPPED                      write_ov_{};
+    HANDLE                          write_event_ = INVALID_HANDLE_VALUE;
+#endif
 
     bool write_raw(const void* data, DWORD len) {
         if (pipe_ == INVALID_HANDLE_VALUE) return false;
@@ -308,9 +386,25 @@ private:
         DWORD done = 0;
         while (done < len) {
             DWORD n = 0;
+#if defined(_WIN32)
+            ResetEvent(write_event_);
+            BOOL ok = WriteFile(pipe_, p + done, len - done, &n, &write_ov_);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_IO_PENDING) {
+                    if (!GetOverlappedResult(pipe_, &write_ov_, &n, TRUE)) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+#else
             if (!WriteFile(pipe_, p + done, len - done, &n, nullptr) || n == 0) {
                 return false;
             }
+#endif
+            if (n == 0) return false;
             done += n;
         }
         return true;
@@ -322,9 +416,25 @@ private:
         DWORD done = 0;
         while (done < len) {
             DWORD n = 0;
+#if defined(_WIN32)
+            ResetEvent(read_event_);
+            BOOL ok = ReadFile(pipe_, p + done, len - done, &n, &read_ov_);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_IO_PENDING) {
+                    if (!GetOverlappedResult(pipe_, &read_ov_, &n, TRUE)) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+#else
             if (!ReadFile(pipe_, p + done, len - done, &n, nullptr) || n == 0) {
                 return false;
             }
+#endif
+            if (n == 0) return false;
             done += n;
         }
         return true;
@@ -381,15 +491,18 @@ private:
                 {
                     std::lock_guard<std::mutex> lk(g_event_mutex);
                     cb = g_event_callback;
+                }
+                if (cb) {
+                    cb(hdr.id, payload.data(), static_cast<uint32_t>(payload.size()));
+                }
+                {
+                    std::lock_guard<std::mutex> lk(g_event_mutex);
                     if (g_event_queue.size() >= MAX_EVENT_QUEUE) {
                         g_event_queue.pop();
                         g_events_dropped_total.fetch_add(1, std::memory_order_relaxed);
                     }
                     g_event_queue.push({hdr.id, std::move(payload)});
                     g_event_cv.notify_one();
-                }
-                if (cb) {
-                    cb(hdr.id, payload.data(), static_cast<uint32_t>(payload.size()));
                 }
             }
         }
@@ -445,6 +558,56 @@ uint64_t GetOrphanCount(void) {
     return c ? c->orphan_count() : 0;
 }
 
+// Pipe names come from the environment, so restrict them to a single plain
+// component of the local \\.\pipe\ namespace.
+static bool valid_pipe_name(const char* name) {
+    if (!name) return false;
+    size_t len = std::strlen(name);
+    if (len == 0 || len > 64) return false;
+    for (size_t i = 0; i < len; ++i) {
+        const char c = name[i];
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+#if defined(_WIN32)
+static bool token_user_sid(HANDLE process, std::vector<unsigned char>& storage, PSID* sid) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
+    DWORD needed = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    if (needed == 0) {
+        CloseHandle(token);
+        return false;
+    }
+    storage.resize(needed);
+    const bool ok = GetTokenInformation(token, TokenUser, storage.data(), needed, &needed) != 0;
+    CloseHandle(token);
+    if (!ok) return false;
+    *sid = reinterpret_cast<TOKEN_USER*>(storage.data())->User.Sid;
+    return true;
+}
+
+// The pipe server must run as the same user as this DLL; otherwise a local
+// process could impersonate the EA and receive the handshake secret.
+static bool pipe_server_is_same_user(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    std::vector<unsigned char> server_storage;
+    std::vector<unsigned char> self_storage;
+    PSID server_sid = nullptr;
+    PSID self_sid = nullptr;
+    const bool same = token_user_sid(process, server_storage, &server_sid) &&
+                      token_user_sid(GetCurrentProcess(), self_storage, &self_sid) &&
+                      EqualSid(server_sid, self_sid) != 0;
+    CloseHandle(process);
+    return same;
+}
+#endif
+
 int Initialize(int64_t login, const char* password, const char* server) {
     std::lock_guard<std::mutex> init_lk(g_init_mu);
 
@@ -471,24 +634,28 @@ int Initialize(int64_t login, const char* password, const char* server) {
     DWORD env_len = GetEnvironmentVariableA("MT5_PIPE_NAME", pipe_name, sizeof(pipe_name));
     std::string pipe_path = "\\\\.\\pipe\\";
     if (env_len > 0 && env_len < sizeof(pipe_name)) {
+        if (!valid_pipe_name(pipe_name)) return 0;
         pipe_path += pipe_name;
-    } else {
+    } else if (env_len < sizeof(pipe_name)) {
         pipe_path += "mt5bridge";
+    } else {
+        // The value is too long to be a valid pipe name.
+        return 0;
     }
 
     HANDLE pipe = INVALID_HANDLE_VALUE;
 #if defined(_WIN32)
-    for (int i = 0; i < 60 && pipe == INVALID_HANDLE_VALUE; ++i) {
+    for (int i = 0; i < 10 && pipe == INVALID_HANDLE_VALUE; ++i) {
         pipe = CreateFileA(pipe_path.c_str(),
                            GENERIC_READ | GENERIC_WRITE,
                            0, nullptr, OPEN_EXISTING,
-                           SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+                           FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
             DWORD err = GetLastError();
             if (err == ERROR_PIPE_BUSY)
-                WaitNamedPipeA(pipe_path.c_str(), 500);
+                WaitNamedPipeA(pipe_path.c_str(), 200);
             else
-                Sleep(500);
+                Sleep(200);
         }
     }
     if (pipe == INVALID_HANDLE_VALUE) return 0;
@@ -496,19 +663,18 @@ int Initialize(int64_t login, const char* password, const char* server) {
     DWORD mode = PIPE_READMODE_BYTE;
     SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
 
-    // Verify pipe server process is not self
+    // Verify the pipe server is not this process and runs as the same user.
     ULONG srv_pid = 0;
     typedef BOOL (WINAPI *FnGetNamedPipeServerProcessId)(HANDLE, PULONG);
     HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    if (k32) {
-        FnGetNamedPipeServerProcessId fn_get_pid =
-            (FnGetNamedPipeServerProcessId)GetProcAddress(k32, "GetNamedPipeServerProcessId");
-        if (fn_get_pid && fn_get_pid(pipe, &srv_pid)) {
-            if (srv_pid != 0 && srv_pid == GetCurrentProcessId()) {
-                CloseHandle(pipe);
-                return 0;
-            }
-        }
+    FnGetNamedPipeServerProcessId fn_get_pid =
+        k32 ? (FnGetNamedPipeServerProcessId)GetProcAddress(k32, "GetNamedPipeServerProcessId")
+            : nullptr;
+    if (!fn_get_pid || !fn_get_pid(pipe, &srv_pid) || srv_pid == 0 ||
+        srv_pid == GetCurrentProcessId() || !pipe_server_is_same_user(srv_pid)) {
+        // Fail closed: an unverifiable owner could be a rogue local process.
+        CloseHandle(pipe);
+        return 0;
     }
 #endif
 
@@ -555,13 +721,15 @@ int Initialize(int64_t login, const char* password, const char* server) {
 }
 
 int Shutdown(void) {
-    g_stopping.store(true);
     auto c = current_conn();
     if (c && c->is_alive()) {
         int32_t st = 0;
         std::string data;
         c->request(CMD_SHUTDOWN, {}, st, data, 2);
+        g_stopping.store(true);
         c->kill();
+    } else {
+        g_stopping.store(true);
     }
     {
         std::lock_guard<std::mutex> lk(g_conn_mu);
@@ -586,7 +754,7 @@ int CopyRates(const char* symbol, int timeframe, int64_t from,
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_RATES, p.buf, st, data, 60);
+    Outcome out = c->request(CMD_RATES, p.buf, st, data, rates_timeout_sec());
     if (out != Outcome::RESPONDED || st < 0) return -1;
 
     int32_t filled = st;
@@ -600,20 +768,40 @@ int CopyRates(const char* symbol, int timeframe, int64_t from,
 }
 
 int AccountInfo(double* balance, double* equity,
-                double* margin,  double* free_margin) {
+                double* margin,  double* free_margin,
+                double* leverage, char* currency, int currency_len) {
     if (!balance || !equity || !margin || !free_margin) return 0;
     auto c = current_conn();
     if (!c || !c->is_alive()) return 0;
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_ACCOUNT, {}, st, data, 5);
+    Outcome out = c->request(CMD_ACCOUNT, {}, st, data, query_timeout_sec());
     if (out != Outcome::RESPONDED || st != 1 || data.size() < 32) return 0;
 
     std::memcpy(balance,      data.data(),      8);
     std::memcpy(equity,       data.data() +  8, 8);
     std::memcpy(margin,       data.data() + 16, 8);
     std::memcpy(free_margin,  data.data() + 24, 8);
+    // The leverage and the currency were added after the first four fields.
+    // An Expert Advisor that does not send them yet leaves the leverage
+    // unknown (0) and the currency empty.
+    if (leverage) {
+        *leverage = 0.0;
+        if (data.size() >= 40) {
+            std::memcpy(leverage, data.data() + 32, 8);
+        }
+    }
+    if (currency && currency_len > 0) {
+        currency[0] = '\0';
+        const size_t off = 40;
+        if (data.size() >= off + 1) {
+            size_t n = data.size() - off;
+            if (n > (size_t)(currency_len - 1)) n = (size_t)(currency_len - 1);
+            std::memcpy(currency, data.data() + off, n);
+            currency[n] = '\0';
+        }
+    }
     return 1;
 }
 
@@ -639,7 +827,7 @@ int OrderSend(const char* symbol, int type, double volume,
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_ORDER_SEND, p.buf, st, data, 20);
+    Outcome out = c->request(CMD_ORDER_SEND, p.buf, st, data, order_timeout_sec());
     switch (out) {
         case Outcome::NOT_CONNECTED:
             return MT5_ERR_PIPE_DISCONNECTED;
@@ -669,7 +857,7 @@ int OrderCloseWithMagic(uint64_t ticket, uint64_t magic, Mt5TradeResult* result)
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_ORDER_CLOSE, p.buf, st, data, 20);
+    Outcome out = c->request(CMD_ORDER_CLOSE, p.buf, st, data, order_timeout_sec());
     switch (out) {
         case Outcome::NOT_CONNECTED:
             return MT5_ERR_PIPE_DISCONNECTED;
@@ -693,6 +881,38 @@ int OrderClose(uint64_t ticket, Mt5TradeResult* result) {
     return OrderCloseWithMagic(ticket, 0, result);
 }
 
+int OrderCloseWithDeviation(uint64_t ticket, uint64_t magic, uint32_t deviation, double volume, Mt5TradeResult* result) {
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return MT5_ERR_PIPE_DISCONNECTED;
+
+    Packer p;
+    p.u64(ticket);
+    p.u64(magic);
+    p.u32(deviation);
+    p.f64(volume);
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_ORDER_CLOSE, p.buf, st, data, order_timeout_sec());
+    switch (out) {
+        case Outcome::NOT_CONNECTED:
+            return MT5_ERR_PIPE_DISCONNECTED;
+        case Outcome::SEND_FAILED:
+            return MT5_ERR_SEND_FAILED;
+        case Outcome::RESPONDED:
+            if (data.size() >= sizeof(Mt5TradeResult) && result) {
+                std::memcpy(result, data.data(), sizeof(Mt5TradeResult));
+            }
+            if (st == 1) {
+                return MT5_OK;
+            }
+            return (data.size() >= sizeof(Mt5TradeResult)) ? MT5_ERR_EA_REJECTED : MT5_ERR_GENERAL;
+        case Outcome::UNKNOWN:
+            break;
+    }
+    return MT5_ERR_UNKNOWN_EXECUTION;
+}
+
 int OrderModifyWithMagic(uint64_t ticket, uint64_t magic, uint8_t sl_mode, double sl, uint8_t tp_mode, double tp, Mt5TradeResult* result) {
     auto c = current_conn();
     if (!c || !c->is_alive()) return MT5_ERR_PIPE_DISCONNECTED;
@@ -707,7 +927,7 @@ int OrderModifyWithMagic(uint64_t ticket, uint64_t magic, uint8_t sl_mode, doubl
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_ORDER_MODIFY, p.buf, st, data, 20);
+    Outcome out = c->request(CMD_ORDER_MODIFY, p.buf, st, data, order_timeout_sec());
     switch (out) {
         case Outcome::NOT_CONNECTED:
             return MT5_ERR_PIPE_DISCONNECTED;
@@ -743,7 +963,7 @@ int PositionsGet(Mt5Position* buf, int buf_capacity, uint64_t magic_filter, cons
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_POSITIONS_GET, p.buf, st, data, 5);
+    Outcome out = c->request(CMD_POSITIONS_GET, p.buf, st, data, query_timeout_sec());
     if (out != Outcome::RESPONDED || st < 0) return -1;
 
     int32_t total_matching = st;
@@ -767,7 +987,7 @@ int OrdersGet(Mt5Order* buf, int buf_capacity, uint64_t magic_filter, const char
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_ORDERS_GET, p.buf, st, data, 5);
+    Outcome out = c->request(CMD_ORDERS_GET, p.buf, st, data, query_timeout_sec());
     if (out != Outcome::RESPONDED || st < 0) return -1;
 
     int32_t total_matching = st;
@@ -794,7 +1014,7 @@ int DealsGet(Mt5Deal* buf, int buf_capacity, int64_t from, int64_t to, uint64_t 
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_DEALS_GET, p.buf, st, data, 10);
+    Outcome out = c->request(CMD_DEALS_GET, p.buf, st, data, query_timeout_sec());
     if (out != Outcome::RESPONDED || st < 0) return -1;
 
     int32_t total_matching = st;
@@ -816,11 +1036,17 @@ int SymbolInfoFull(const char* symbol, Mt5SymInfo* info) {
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_SYM_INFO, p.buf, st, data, 5);
-    if (out != Outcome::RESPONDED || st != 1 || data.size() < sizeof(Mt5SymInfo))
-        return 0;
+    Outcome out = c->request(CMD_SYM_INFO, p.buf, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st != 1) return 0;
 
-    std::memcpy(info, data.data(), sizeof(Mt5SymInfo));
+    // The bid and the ask were added after the first eight fields. An
+    // Expert Advisor that does not send them yet leaves them at zero.
+    const size_t legacy_size = 60;
+    if (data.size() < legacy_size) return 0;
+
+    std::memset(info, 0, sizeof(Mt5SymInfo));
+    const size_t n = data.size() < sizeof(Mt5SymInfo) ? data.size() : sizeof(Mt5SymInfo);
+    std::memcpy(info, data.data(), n);
     return 1;
 }
 
@@ -834,7 +1060,7 @@ int SymbolInfoTick(const char* symbol, Mt5Tick* tick) {
 
     int32_t st = 0;
     std::string data;
-    Outcome out = c->request(CMD_SYM_TICK, p.buf, st, data, 5);
+    Outcome out = c->request(CMD_SYM_TICK, p.buf, st, data, query_timeout_sec());
     if (out != Outcome::RESPONDED || st != 1 || data.size() < sizeof(Mt5Tick))
         return 0;
 
@@ -913,6 +1139,34 @@ int UnsubscribeBook(const char* symbol) {
     int32_t st = 0;
     std::string data;
     Outcome out = c->request(CMD_UNSUBSCRIBE_BOOK, p.buf, st, data, 5);
+    return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
+}
+
+int SubscribeBars(const char* symbol, int timeframe) {
+    if (!symbol || !*symbol) return 0;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return 0;
+
+    Packer p;
+    p.str(symbol);
+    p.i32(timeframe);
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_SUBSCRIBE_BARS, p.buf, st, data, 5);
+    return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
+}
+
+int UnsubscribeBars(const char* symbol, int timeframe) {
+    if (!symbol || !*symbol) return 0;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return 0;
+
+    Packer p;
+    p.str(symbol);
+    p.i32(timeframe);
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_UNSUBSCRIBE_BARS, p.buf, st, data, 5);
     return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
 }
 

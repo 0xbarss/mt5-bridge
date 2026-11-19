@@ -3,9 +3,14 @@
 //! All structs are marked `#[repr(C, packed)]` to match the `#pragma pack(push, 1)`
 //! packing in the C/C++ DLL and MQL5 serialiser.
 
+use static_assertions::{assert_eq_size, const_assert_eq};
 use std::os::raw::{c_char, c_double, c_int};
 
-/// Wire format for symbol specification (60 bytes).
+/// Wire format for symbol specification (76 bytes).
+///
+/// Matches the C++ side, which asserts `sizeof(Mt5SymInfo) == 76` in
+/// `mt5_bridge.cpp`. Fields: seven `f64` price/lot fields, one `i32` digits,
+/// then `bid` and `ask`.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5SymInfo {
@@ -17,6 +22,10 @@ pub struct Mt5SymInfo {
     pub max_lot: f64,
     pub spread: f64,
     pub digits: i32,
+    /// The last bid the terminal reported.
+    pub bid: f64,
+    /// The last ask the terminal reported.
+    pub ask: f64,
 }
 
 /// Wire format for OHLCV bar rate (60 bytes).
@@ -297,6 +306,39 @@ impl Default for Mt5BookEvent {
     }
 }
 
+/// Asynchronous bar event pushed by the EA upon bar close (96 bytes, protocol v7+).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mt5BarEvent {
+    pub symbol: [u8; 32],
+    pub time: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: i64,
+    pub timeframe: i32,
+    pub spread: i32,
+    pub event_seq: u64,
+}
+
+impl Default for Mt5BarEvent {
+    fn default() -> Self {
+        Self {
+            symbol: [0u8; 32],
+            time: 0,
+            open: 0.0,
+            high: 0.0,
+            low: 0.0,
+            close: 0.0,
+            volume: 0,
+            timeframe: 0,
+            spread: 0,
+            event_seq: 0,
+        }
+    }
+}
+
 /// Packet kind on the wire (protocol v5+).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,10 +373,7 @@ pub const MT5_MAX_BARS_PER_FETCH: usize =
     (MT5_MAX_FRAME_BYTES - 64) / std::mem::size_of::<Mt5Rate>();
 
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
-//
-// v6: 16-byte PacketHdr with request_id echo, explicit event schema with
-//     deal_entry/deal_magic/event_seq, challenge-response auth, and robust multiplexing.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 pub const MT5_OK: i32 = 1;
 pub const MT5_ERR_GENERAL: i32 = 0;
@@ -346,19 +385,32 @@ pub const MT5_ERR_EA_REJECTED: i32 = -5;
 pub const MT5_ERR_ALREADY_INITIALIZED: i32 = -6;
 
 // Ensure struct memory layouts match C header at compile-time.
-const _: () = {
-    assert!(std::mem::size_of::<Mt5SymInfo>() == 60);
-    assert!(std::mem::size_of::<Mt5Rate>() == 60);
-    assert!(std::mem::size_of::<Mt5Tick>() == 44);
-    assert!(std::mem::size_of::<Mt5TradeResult>() == 44);
-    assert!(std::mem::size_of::<Mt5Position>() == 148);
-    assert!(std::mem::size_of::<Mt5Order>() == 140);
-    assert!(std::mem::size_of::<Mt5Deal>() == 152);
-    assert!(std::mem::size_of::<PacketHdr>() == 16);
-    assert!(std::mem::size_of::<Mt5TickEvent>() == 88);
-    assert!(std::mem::size_of::<Mt5TradeEvent>() == 176);
-    assert!(std::mem::size_of::<Mt5BookEvent>() == 72);
-};
+const_assert_eq!(std::mem::size_of::<Mt5SymInfo>(), 76);
+const_assert_eq!(std::mem::size_of::<Mt5Rate>(), 60);
+const_assert_eq!(std::mem::size_of::<Mt5Tick>(), 44);
+const_assert_eq!(std::mem::size_of::<Mt5TradeResult>(), 44);
+const_assert_eq!(std::mem::size_of::<Mt5Position>(), 148);
+const_assert_eq!(std::mem::size_of::<Mt5Order>(), 140);
+const_assert_eq!(std::mem::size_of::<Mt5Deal>(), 152);
+const_assert_eq!(std::mem::size_of::<PacketHdr>(), 16);
+const_assert_eq!(std::mem::size_of::<Mt5TickEvent>(), 88);
+const_assert_eq!(std::mem::size_of::<Mt5TradeEvent>(), 176);
+const_assert_eq!(std::mem::size_of::<Mt5BookEvent>(), 72);
+const_assert_eq!(std::mem::size_of::<Mt5BarEvent>(), 96);
+
+// Ensure field offsets match expected layout (validates packing).
+assert_eq_size!(Mt5SymInfo, [u8; 76]);
+assert_eq_size!(Mt5Rate, [u8; 60]);
+assert_eq_size!(Mt5Tick, [u8; 44]);
+assert_eq_size!(Mt5TradeResult, [u8; 44]);
+assert_eq_size!(Mt5Position, [u8; 148]);
+assert_eq_size!(Mt5Order, [u8; 140]);
+assert_eq_size!(Mt5Deal, [u8; 152]);
+assert_eq_size!(PacketHdr, [u8; 16]);
+assert_eq_size!(Mt5TickEvent, [u8; 88]);
+assert_eq_size!(Mt5TradeEvent, [u8; 176]);
+assert_eq_size!(Mt5BookEvent, [u8; 72]);
+assert_eq_size!(Mt5BarEvent, [u8; 96]);
 
 // Function pointer signatures for dynamic library loading.
 pub type FnInit = unsafe extern "C" fn(i64, *const c_char, *const c_char) -> c_int;
@@ -366,7 +418,15 @@ pub type FnShut = unsafe extern "C" fn() -> c_int;
 pub type FnIsConnected = unsafe extern "C" fn() -> c_int;
 pub type FnRates =
     unsafe extern "C" fn(*const c_char, c_int, i64, i64, *mut Mt5Rate, c_int) -> c_int;
-pub type FnAcct = unsafe extern "C" fn(*mut f64, *mut f64, *mut f64, *mut f64) -> c_int;
+pub type FnAcct = unsafe extern "C" fn(
+    *mut f64,
+    *mut f64,
+    *mut f64,
+    *mut f64,
+    *mut f64,
+    *mut c_char,
+    c_int,
+) -> c_int;
 pub type FnSend = unsafe extern "C" fn(
     *const c_char,
     c_int,
@@ -382,6 +442,8 @@ pub type FnSend = unsafe extern "C" fn(
 ) -> c_int;
 pub type FnClose = unsafe extern "C" fn(u64, *mut Mt5TradeResult) -> c_int;
 pub type FnCloseMagic = unsafe extern "C" fn(u64, u64, *mut Mt5TradeResult) -> c_int;
+pub type FnCloseDeviation =
+    unsafe extern "C" fn(u64, u64, u32, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnModify =
     unsafe extern "C" fn(u64, u8, c_double, u8, c_double, *mut Mt5TradeResult) -> c_int;
 pub type FnModifyMagic =
@@ -392,13 +454,15 @@ pub type FnPositions = unsafe extern "C" fn(*mut Mt5Position, c_int, u64, *const
 pub type FnOrders = unsafe extern "C" fn(*mut Mt5Order, c_int, u64, *const c_char) -> c_int;
 pub type FnDeals = unsafe extern "C" fn(*mut Mt5Deal, c_int, i64, i64, u64, *const c_char) -> c_int;
 
-// Protocol v6 subscription and event function signatures.
+// Protocol subscription and event function signatures.
 pub type FnSubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnUnsubscribeTicks = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnSubscribeTrade = unsafe extern "C" fn() -> c_int;
 pub type FnUnsubscribeTrade = unsafe extern "C" fn() -> c_int;
 pub type FnSubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnUnsubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
+pub type FnSubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+pub type FnUnsubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 pub type Mt5EventCallback = unsafe extern "C" fn(u16, *const u8, u32);
 pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_int;
 pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
@@ -427,4 +491,6 @@ pub enum ProtocolCmd {
     UnsubscribeTrade = 16,
     SubscribeBook = 17,
     UnsubscribeBook = 18,
+    SubscribeBars = 19,
+    UnsubscribeBars = 20,
 }

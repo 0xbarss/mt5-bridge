@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = env::var("MT5_SERVER").unwrap_or_default();
 
     println!(
-        "Connecting to MT5 bridge (login: {}, server: '{}')...",
+        "Connecting to MT5 bridge (login: {}, server: '{}', Protocol v7)...",
         login, server
     );
     let client = Arc::new(Mt5Client::connect(login, &password, &server)?);
@@ -29,12 +29,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("(Listening for completed candles; poll interval: 1s, timeout: 3s)");
 
-    let mut rx = stream_bars(client, symbol, timeframe, Duration::from_secs(1));
+    let mut rx = stream_bars(client, symbol, timeframe, Duration::from_secs(1), false);
 
     let mut count = 0;
     while count < 1 {
         match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
-            Ok(Some(bar)) => {
+            Ok(Some(Ok(bar))) => {
                 let dt = Utc.timestamp_opt(bar.time, 0).single().unwrap_or_default();
                 let trend = if bar.is_bullish() {
                     "BULLISH"
@@ -61,6 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Received {} closed bar. Exiting stream.", count);
                     break;
                 }
+            }
+            Ok(Some(Err(e))) => {
+                eprintln!("Bar stream error: {e}");
+                break;
             }
             Ok(None) => break,
             Err(_) => {

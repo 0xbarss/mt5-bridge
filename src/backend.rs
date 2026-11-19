@@ -11,7 +11,9 @@
 
 use crate::client::Mt5Client;
 use crate::error::{Mt5Error, Result};
-use crate::types::{Deal, Level, OrderRequest, Position, TradeResult, WorkingOrder};
+use crate::types::{
+    AccountInfo, Deal, Level, OrderRequest, Position, Rate, Timeframe, TradeResult, WorkingOrder,
+};
 use std::sync::Arc;
 
 /// Trading operations required by [`OrderManager`](crate::OrderManager).
@@ -23,6 +25,17 @@ pub trait TradingBackend {
 
     /// Close a position, verifying ownership by magic number.
     fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>;
+
+    /// Close an open market position with custom deviation and volume limits.
+    fn order_close_with_deviation(
+        &self,
+        ticket: u64,
+        magic: u64,
+        _deviation: u32,
+        _volume: f64,
+    ) -> Result<TradeResult> {
+        self.order_close_with_magic(ticket, magic)
+    }
 
     /// Close an open market position by ticket, verifying strategy magic number ownership.
     ///
@@ -65,6 +78,22 @@ pub trait TradingBackend {
     ) -> Result<Vec<Deal>> {
         Err(Mt5Error::UnsupportedFeature("DealsGet"))
     }
+
+    /// Account balance, equity, and margin information.
+    fn account_info(&self) -> Result<AccountInfo> {
+        Err(Mt5Error::UnsupportedFeature("AccountInfo"))
+    }
+
+    /// Fetch historical rates for a symbol and timeframe.
+    fn copy_rates(
+        &self,
+        _symbol: &str,
+        _timeframe: Timeframe,
+        _from: i64,
+        _to: i64,
+    ) -> Result<Vec<Rate>> {
+        Err(Mt5Error::UnsupportedFeature("CopyRates"))
+    }
 }
 
 impl TradingBackend for Mt5Client {
@@ -74,6 +103,16 @@ impl TradingBackend for Mt5Client {
 
     fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
         Mt5Client::order_close_with_magic(self, ticket, magic)
+    }
+
+    fn order_close_with_deviation(
+        &self,
+        ticket: u64,
+        magic: u64,
+        deviation: u32,
+        volume: f64,
+    ) -> Result<TradeResult> {
+        Mt5Client::order_close_with_deviation(self, ticket, magic, deviation, volume)
     }
 
     fn order_modify_with_magic(
@@ -111,6 +150,20 @@ impl TradingBackend for Mt5Client {
     ) -> Result<Vec<Deal>> {
         Mt5Client::deals_filtered(self, from, to, magic, symbol)
     }
+
+    fn account_info(&self) -> Result<AccountInfo> {
+        Mt5Client::account_info(self)
+    }
+
+    fn copy_rates(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Rate>> {
+        Mt5Client::copy_rates(self, symbol, timeframe, from, to)
+    }
 }
 
 // Ergonomics: keep `manager.submit_order(&arc_client, ..)` and `&&client` working now that the
@@ -122,6 +175,15 @@ impl<T: TradingBackend + ?Sized> TradingBackend for Arc<T> {
     fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
         (**self).order_close_with_magic(ticket, magic)
     }
+    fn order_close_with_deviation(
+        &self,
+        ticket: u64,
+        magic: u64,
+        deviation: u32,
+        volume: f64,
+    ) -> Result<TradeResult> {
+        (**self).order_close_with_deviation(ticket, magic, deviation, volume)
+    }
     fn order_modify_with_magic(
         &self,
         ticket: u64,
@@ -153,6 +215,18 @@ impl<T: TradingBackend + ?Sized> TradingBackend for Arc<T> {
         symbol: Option<&str>,
     ) -> Result<Vec<Deal>> {
         (**self).deals_filtered(from, to, magic, symbol)
+    }
+    fn account_info(&self) -> Result<AccountInfo> {
+        (**self).account_info()
+    }
+    fn copy_rates(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Rate>> {
+        (**self).copy_rates(symbol, timeframe, from, to)
     }
 }
 
@@ -163,6 +237,15 @@ impl<T: TradingBackend + ?Sized> TradingBackend for &T {
     fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult> {
         (**self).order_close_with_magic(ticket, magic)
     }
+    fn order_close_with_deviation(
+        &self,
+        ticket: u64,
+        magic: u64,
+        deviation: u32,
+        volume: f64,
+    ) -> Result<TradeResult> {
+        (**self).order_close_with_deviation(ticket, magic, deviation, volume)
+    }
     fn order_modify_with_magic(
         &self,
         ticket: u64,
@@ -194,5 +277,17 @@ impl<T: TradingBackend + ?Sized> TradingBackend for &T {
         symbol: Option<&str>,
     ) -> Result<Vec<Deal>> {
         (**self).deals_filtered(from, to, magic, symbol)
+    }
+    fn account_info(&self) -> Result<AccountInfo> {
+        (**self).account_info()
+    }
+    fn copy_rates(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Rate>> {
+        (**self).copy_rates(symbol, timeframe, from, to)
     }
 }

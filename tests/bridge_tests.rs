@@ -76,6 +76,8 @@ fn test_round_lot_edge_cases() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     // Below min_lot or invalid should return 0.0 to prevent risk inflation
@@ -100,6 +102,8 @@ fn test_is_valid_lot() {
         max_lot: 10.0,
         spread: 1.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     assert!(sym.is_valid_lot(0.01));
@@ -126,6 +130,8 @@ fn test_floor_and_ceil_lot() {
         max_lot: 10.0,
         spread: 1.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     // floor_lot never rounds up (preserves max risk constraints)
@@ -152,6 +158,8 @@ fn test_min_lot_offset_and_unbounded_max() {
         max_lot: 0.0, // unbounded broker max
         spread: 1.0,
         digits: 2,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     assert!(!sym_offset.is_min_lot_zero_aligned());
@@ -178,6 +186,8 @@ fn test_round_price() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
     assert_eq!(sym_5d.round_price(1.0854321), 1.08543);
     assert_eq!(sym_5d.round_price(1.085437), 1.08544);
@@ -192,6 +202,8 @@ fn test_round_price() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 3,
+        ask: 0.0,
+        bid: 0.0,
     };
     assert_eq!(sym_3d.round_price(154.1238), 154.124);
 
@@ -205,6 +217,8 @@ fn test_round_price() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 0,
+        ask: 0.0,
+        bid: 0.0,
     };
     assert_eq!(sym_0d.round_price(45123.6), 45124.0);
 }
@@ -222,6 +236,8 @@ fn test_point_value_scaling() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
     // 1-point move with 1 lot = (0.00001 / 0.00001) * 1.0 * 1.0 = $1.00
     assert!((eurusd.point_value(1.0) - 1.0).abs() < 1e-6);
@@ -239,6 +255,8 @@ fn test_point_value_scaling() {
         max_lot: 100.0,
         spread: 2.0,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
     // (0.00001 / 0.00005) * 5.0 * 1.0 = 0.2 * 5.0 = 1.0
     assert!((exotic.point_value(1.0) - 1.0).abs() < 1e-6);
@@ -254,6 +272,8 @@ fn test_point_value_scaling() {
         max_lot: 100.0,
         spread: 1.0,
         digits: 2,
+        ask: 0.0,
+        bid: 0.0,
     };
     assert!((zero_tick.point_value(1.0) - 2.0).abs() < 1e-6);
 }
@@ -387,6 +407,8 @@ fn test_order_request_validate_with_symbol() {
         max_lot: 100.0,
         spread: 1.2,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     // Valid request
@@ -479,6 +501,8 @@ fn test_account_info_helpers() {
         equity: 10500.0,
         margin: 500.0,
         free_margin: 10000.0,
+        leverage: 100.0,
+        currency: "USD".to_string(),
     };
     assert_eq!(acct.profit(), 500.0);
     assert_eq!(acct.margin_level(), Some(2100.0));
@@ -488,6 +512,8 @@ fn test_account_info_helpers() {
         equity: 10000.0,
         margin: 0.0,
         free_margin: 10000.0,
+        leverage: 100.0,
+        currency: "USD".to_string(),
     };
     assert_eq!(no_margin.margin_level(), None);
 
@@ -496,14 +522,15 @@ fn test_account_info_helpers() {
         equity: 10000.0,
         margin: -5.0,
         free_margin: 10000.0,
+        leverage: 100.0,
+        currency: "USD".to_string(),
     };
     assert_eq!(neg_margin.margin_level(), None);
 }
 
 #[test]
 fn test_protocol_version() {
-    // v6: 16-byte PacketHdr with request_id echo, explicit event schema, and robust multiplexing.
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
 }
 
 #[test]
@@ -969,12 +996,18 @@ fn test_all_wire_abi_layouts_and_sizes() {
     use mt5_bridge::ffi::*;
 
     // Compile-time & runtime ABI packing size assertions
-    assert_eq!(std::mem::size_of::<Mt5SymInfo>(), 60);
+    assert_eq!(std::mem::size_of::<Mt5SymInfo>(), 76);
     assert_eq!(std::mem::size_of::<Mt5Rate>(), 60);
     assert_eq!(std::mem::size_of::<Mt5Tick>(), 44);
     assert_eq!(std::mem::size_of::<Mt5TradeResult>(), 44);
     assert_eq!(std::mem::size_of::<Mt5Position>(), 148);
     assert_eq!(std::mem::size_of::<Mt5Order>(), 140);
+    assert_eq!(std::mem::size_of::<Mt5Deal>(), 152);
+    assert_eq!(std::mem::size_of::<PacketHdr>(), 16);
+    assert_eq!(std::mem::size_of::<Mt5TickEvent>(), 88);
+    assert_eq!(std::mem::size_of::<Mt5TradeEvent>(), 176);
+    assert_eq!(std::mem::size_of::<Mt5BookEvent>(), 72);
+    assert_eq!(std::mem::size_of::<Mt5BarEvent>(), 96);
 }
 
 #[test]
@@ -1112,6 +1145,8 @@ fn test_symbol_info_lot_and_point_helpers() {
         max_lot: 50.0,
         spread: 1.5,
         digits: 4,
+        ask: 0.0,
+        bid: 0.0,
     };
     assert_eq!(sym.lot_digits(), 2);
     assert!(sym.is_min_lot_zero_aligned());
@@ -1131,6 +1166,8 @@ fn test_order_request_stops_validation_with_symbol() {
         max_lot: 100.0,
         spread: 1.2,
         digits: 5,
+        ask: 0.0,
+        bid: 0.0,
     };
 
     // SL not aligned to tick size (0.00005)
@@ -1393,7 +1430,8 @@ async fn test_tick_subscription_latest_mode_auto_drop_lag() {
 
     // In Latest mode, recv() handles Lagged, updates dropped_ticks, and returns the freshest quote
     let next_tick = sub.recv().await.unwrap();
-    assert!(sub.dropped_ticks() > 0);
+    assert_eq!(next_tick.time_msc, 1710000100 * 1000);
+    assert_eq!(sub.dropped_ticks(), 99);
     assert!(next_tick.bid > 1.08100);
 }
 
@@ -1472,6 +1510,27 @@ async fn test_event_bus_trade_and_book_dispatch() {
     let rec_book = book_sub.recv().await.unwrap();
     assert_eq!(rec_book.symbol, "USDJPY");
     assert_eq!(rec_book.price, 155.250);
+}
+
+#[tokio::test]
+async fn test_event_bus_bar_dispatch() {
+    let bus = EventBus::new(64);
+    let mut bar_sub = bus.subscribe_bars("EURUSD", 1);
+
+    let bar = Bar {
+        time: 1710000000,
+        open: 1.0850,
+        high: 1.0860,
+        low: 1.0845,
+        close: 1.0855,
+        volume: 50.0,
+    };
+    bus.dispatch_bar("EURUSD", 1, bar);
+
+    let rec_bar = bar_sub.recv().await.unwrap();
+    assert_eq!(rec_bar.time, 1710000000);
+    assert_eq!(rec_bar.open, 1.0850);
+    assert_eq!(rec_bar.close, 1.0855);
 }
 
 #[test]

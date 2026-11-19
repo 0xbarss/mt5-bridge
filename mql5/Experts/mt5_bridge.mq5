@@ -64,6 +64,14 @@ bool  SetNamedPipeHandleState(long hPipe, uint &lpMode,
                               long lpMaxCollectionCount,
                               long lpCollectDataTimeout);
 long  LocalFree(long hMem);
+// Named event used to ask an already-running bridge instance to release the
+// pipe so a freshly started instance (e.g. from the headless startup config)
+// can take over with its new inputs.
+long  CreateEventW(long lpEventAttributes, int bManualReset,
+                   int bInitialState, string lpName);
+bool  SetEvent(long hEvent);
+bool  ResetEvent(long hEvent);
+uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #import
 
 //---- Constants
@@ -76,11 +84,12 @@ long  LocalFree(long hMem);
 #define PIPE_REJECT_REMOTE_CLIENTS 0x00000008
 // INVALID_HANDLE is a built-in MQL5 constant (-1); no redefinition needed.
 #define ERROR_BROKEN_PIPE       109
+#define WAIT_OBJECT_0           0
+#define TAKEOVER_POLL_MS        50
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
-// Wire protocol handshake version. v6: 16-byte PacketHdr with request_id, event sequence counter, and enriched schemas.
-// Must equal PROTOCOL_VERSION in src/ffi.rs and MT5_BRIDGE_PROTOCOL_VERSION in bridge_dll/mt5_bridge.h.
-#define PROTOCOL_VERSION        6
+// Wire protocol handshake version.
+#define PROTOCOL_VERSION        7
 #define WIRE_ID_LEN             13       // length of the hashed client-order-id token in comments
 
 //---- Packet kinds (protocol v5+)
@@ -127,23 +136,36 @@ long  LocalFree(long hMem);
 #define CMD_UNSUBSCRIBE_TRADE 16
 #define CMD_SUBSCRIBE_BOOK    17
 #define CMD_UNSUBSCRIBE_BOOK  18
+#define CMD_SUBSCRIBE_BARS    19
+#define CMD_UNSUBSCRIBE_BARS  20
+
+enum ENUM_SERVER_TIME_CONVENTION {
+    SERVER_TIME_FIXED = 0,
+    SERVER_TIME_NEW_YORK_DST = 1,
+    SERVER_TIME_EUROPE_DST = 2
+};
 
 //---- EA input
 input int    InpMagicNumber          = 20240101;    // Magic number for bridge orders
 input string InpPipeName             = "mt5bridge"; // Custom Named Pipe Name
 input string InpPipeSecret           = "";          // Shared secret for client authentication (required by default)
 input bool   InpRequireSecret        = true;        // Require non-empty InpPipeSecret on initialization (set false to opt out)
-input bool   InpEnforceMagicNumber   = false;       // Reject close/modify/send for magic not matching InpMagicNumber (false allows multi-strategy routing)
+input bool   InpEnforceMagicNumber   = true;       // Reject close/modify/send for magic not matching InpMagicNumber
 input string InpPipeSDDL             = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"; // SDDL security descriptor restricting access to owner, local system & admins
 input bool   InpConvertToUTC         = true;        // Convert history timestamps to UTC (set false for raw broker time)
-input int    InpTimerIntervalMs      = 5;           // Timer polling interval in milliseconds (default 5ms)
-input int    InpMaxRequestsPerTimer  = 32;          // Max pipe requests serviced per timer tick (prevents UI starvation)
-input uint   InpMaxTimerBudgetUs     = 2000;        // Max execution budget per timer tick in microseconds (2000us = 2ms)
+input ENUM_SERVER_TIME_CONVENTION InpServerTimeConvention = SERVER_TIME_NEW_YORK_DST; // Broker server clock convention when converting to UTC
+input int    InpServerUtcOffsetHours = 2;           // Fixed server UTC offset (-14..14), used with SERVER_TIME_FIXED
+input int    InpTimerIntervalMs      = 1;           // Timer polling interval in milliseconds (default 1ms on tuned VPS)
+input int    InpMaxRequestsPerTimer  = 64;          // Max pipe requests serviced per timer tick (prevents UI starvation)
+input uint   InpMaxTimerBudgetUs     = 5000;        // Max execution budget per timer tick in microseconds (5000us = 5ms)
 input bool   InpAutoSelectSymbols    = true;        // Automatically select queried/traded symbols into Market Watch
+input long   InpConfigGeneration     = 0;           // Monotonic config version; a higher value takes over an older running instance
+input int    InpTakeoverTimeoutMs    = 5000;        // Max wait for the existing instance to release the pipe (ms)
+input bool   InpCloseStaleCharts     = false;       // Close every other chart after taking over (headless: one chart only)
 input bool   InpEnableKillSwitch     = false;       // Emergency kill switch: immediately block all outgoing orders
 input bool   InpRequireLiveAck       = true;        // Require explicit acknowledgement when running on a live (real) account
 input bool   InpLiveAckAcknowledged  = false;       // Set true to acknowledge live account trading
-input double InpMaxVolumePerOrder    = 50.0;        // Max volume allowed for a single order (0 = unlimited)
+input double InpMaxVolumePerOrder    = 10.0;        // Max volume allowed for a single order (0 = unlimited)
 input uint   InpMaxDeviation         = 100;         // Max allowed slippage deviation in points (0 = unlimited)
 
 // Ensure symbol is available in Market Watch, respecting InpAutoSelectSymbols
@@ -171,9 +193,54 @@ ENUM_ORDER_TYPE_FILLING GetSymbolFillingMode(string sym) {
     return ORDER_FILLING_RETURN;
 }
 
+// Rounding direction for SnapToTick. Stops are snapped in the protective
+// direction so they are never closer to the market than requested.
+enum SnapDirection {
+    SNAP_NEAREST = 0,
+    SNAP_DOWN    = -1,
+    SNAP_UP      = 1,
+};
+
+// Snap a price level to the broker's tick grid.
+//
+// Rounding table (market below/above is implied by the level):
+//   buy  stop-loss   -> down   (a lower SL is never closer to the market)
+//   sell stop-loss   -> up     (a higher SL is never closer)
+//   sell take-profit -> down   (a lower TP is never closer)
+//   buy  take-profit -> up     (a higher TP is never closer)
+//   entry/limit price -> nearest (unchanged legacy behaviour)
+//
+// Computed stops (ATR trails, R-multiple ladders, breakout levels) are pure
+// floating-point values that frequently do not land exactly on a tick multiple.
+// Rejecting them outright can leave positions without a valid SL/TP, so levels
+// are snapped before tick-size validation and stops-level checks.
+double SnapToTick(const double value, const double tick_size, const int digits,
+                  const SnapDirection direction = SNAP_NEAREST) {
+    if (value <= 0.0) return value;
+    double snapped = value;
+    if (tick_size > 0.0) {
+        const double steps = value / tick_size;
+        if (direction == SNAP_DOWN)
+            snapped = MathFloor(steps) * tick_size;
+        else if (direction == SNAP_UP)
+            snapped = MathCeil(steps) * tick_size;
+        else
+            snapped = MathRound(steps) * tick_size;
+    }
+    return NormalizeDouble(snapped, digits);
+}
+
+// True for the order types whose stop-loss sits below the market.
+bool IsBuySideOrder(const ENUM_ORDER_TYPE type) {
+    return type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP;
+}
+
 //---- State
 long g_server  = INVALID_HANDLE;
 long g_client  = INVALID_HANDLE;
+long g_takeover_event = 0;   // Win32 event handle; 0 = not created
+uint g_stale_cleanup_at = 0; // GetTickCount() deadline for chart cleanup; 0 = not scheduled
+bool g_stale_charts_closed = false;
 bool g_running = false;
 bool g_authenticated = false;
 string g_pipe_path = "";
@@ -196,15 +263,23 @@ bool PipeReadExact(long h, uchar &out[], uint need) {
 
 bool PipeWriteExact(long h, const uchar &data[], uint len) {
     uint offset = 0;
+    ulong start_us = GetMicrosecondCount();
     while (offset < len) {
         uint chunk_len = len - offset;
         uchar chunk[];
         ArrayResize(chunk, chunk_len);
         ArrayCopy(chunk, data, 0, offset, chunk_len);
         uint written = 0;
-        if (!WriteFile(h, chunk, chunk_len, written, 0) || written == 0)
-            return false;
-        offset += written;
+        if (WriteFile(h, chunk, chunk_len, written, 0) && written > 0) {
+            offset += written;
+        } else {
+            // Buffer full or client not reading: time out after 1000ms (1,000,000 us) to avoid freezing chart thread
+            if (GetMicrosecondCount() - start_us > 1000000) {
+                Print("MT5Bridge: PipeWriteExact timed out (1000ms), pipe congested or client unresponsive");
+                return false;
+            }
+            Sleep(1);
+        }
     }
     return true;
 }
@@ -327,6 +402,20 @@ void PackI64(uchar &b[], long v) {
 }
 
 void PackU64(uchar &b[], ulong v) { PackI64(b, (long)v); }
+
+// The number of bytes reserved for the account currency in the account
+// response.
+#define ACCOUNT_CURRENCY_FIELD 32
+
+// Pack a NUL-padded, fixed-size (32 byte) string field.
+void PackFixedString32(uchar &data[], const string s) {
+    uchar str_bytes[32];
+    ArrayInitialize(str_bytes, 0);
+    StringToCharArray(s, str_bytes, 0, 31);
+    int cur_len = ArraySize(data);
+    ArrayResize(data, cur_len + 32);
+    ArrayCopy(data, str_bytes, cur_len, 0, 32);
+}
 
 void PackF64(uchar &b[], double v) {
     DoubleBytes db; db.v = v;
@@ -496,6 +585,138 @@ void HandleShutdown(long h) {
     // Client disconnect will be handled in the main loop.
 }
 
+bool g_server_time_warning_printed = false;
+
+bool IsNewYorkDst(datetime t) {
+    MqlDateTime dt;
+    TimeToStruct(t, dt);
+
+    bool is_dst = false;
+    if (dt.mon > 3 && dt.mon < 11) {
+        is_dst = true;
+    } else if (dt.mon == 3) {
+        int day_of_week_of_1st = (dt.day_of_week - (dt.day - 1) % 7 + 7) % 7;
+        int first_sun = (day_of_week_of_1st == 0) ? 1 : (8 - day_of_week_of_1st);
+        int second_sun = first_sun + 7;
+        if (dt.day > second_sun || (dt.day == second_sun && dt.hour >= 2)) {
+            is_dst = true;
+        }
+    } else if (dt.mon == 11) {
+        int day_of_week_of_1st = (dt.day_of_week - (dt.day - 1) % 7 + 7) % 7;
+        int first_sun = (day_of_week_of_1st == 0) ? 1 : (8 - day_of_week_of_1st);
+        if (dt.day < first_sun || (dt.day == first_sun && dt.hour < 2)) {
+            is_dst = true;
+        }
+    }
+    return is_dst;
+}
+
+int LastSunday(int year, int month) {
+    // First day of the next month; the last day of the current month is one
+    // day (86400 seconds) before it. This handles every month length and
+    // leap years without a days-in-month table.
+    int next_month = month + 1;
+    int next_year = year;
+    if (next_month > 12) {
+        next_month = 1;
+        next_year = year + 1;
+    }
+
+    MqlDateTime dt;
+    dt.year = next_year;
+    dt.mon = next_month;
+    dt.day = 1;
+    dt.hour = 0;
+    dt.min = 0;
+    dt.sec = 0;
+    datetime first_of_next = StructToTime(dt);
+    datetime last_of_current = first_of_next - 86400;
+
+    MqlDateTime last_dt;
+    TimeToStruct(last_of_current, last_dt);
+
+    // Go back to the previous Sunday (day_of_week: 0=Sunday, ..., 6=Saturday).
+    return last_dt.day - last_dt.day_of_week;
+}
+
+bool IsEuropeDst(datetime t) {
+    MqlDateTime dt;
+    TimeToStruct(t, dt);
+    if (dt.mon > 3 && dt.mon < 10) {
+        return true;
+    }
+    if (dt.mon < 3 || dt.mon > 10) {
+        return false;
+    }
+
+    int last_sunday = LastSunday(dt.year, dt.mon);
+    if (dt.mon == 3) {
+        return dt.day > last_sunday || (dt.day == last_sunday && dt.hour >= 2);
+    }
+    return dt.day < last_sunday || (dt.day == last_sunday && dt.hour < 3);
+}
+
+bool TryObservedServerUtcOffset(long &offset) {
+    offset = (long)TimeTradeServer() - (long)TimeGMT();
+    if (offset < -14 * 3600 || offset > 14 * 3600) {
+        return false;
+    }
+    long remainder = offset % 60;
+    if (remainder >= 30) offset += 60 - remainder;
+    else if (remainder <= -30) offset -= 60 + remainder;
+    else offset -= remainder;
+    return true;
+}
+
+long ExpectedServerUtcOffset(datetime t) {
+    if (InpServerTimeConvention == SERVER_TIME_FIXED) {
+        return (long)InpServerUtcOffsetHours * 3600;
+    }
+    if (InpServerTimeConvention == SERVER_TIME_EUROPE_DST) {
+        return (IsEuropeDst(t) ? 3 : 2) * 3600;
+    }
+    return (IsNewYorkDst(t) ? 3 : 2) * 3600;
+}
+
+string ServerTimeConventionName() {
+    if (InpServerTimeConvention == SERVER_TIME_FIXED) return "fixed";
+    if (InpServerTimeConvention == SERVER_TIME_EUROPE_DST) return "europe_dst";
+    return "new_york_dst";
+}
+
+// Computes server-to-UTC offset for a given timestamp and checks the configured
+// convention against the terminal's current observed server offset.
+long GetServerUtcOffset(datetime t) {
+    if (!InpConvertToUTC) return 0;
+
+    long observed = 0;
+    if (!TryObservedServerUtcOffset(observed)) {
+        if (!g_server_time_warning_printed) {
+            Print("MT5Bridge: unable to observe a valid server-to-UTC offset; UTC conversion is disabled for this value");
+            g_server_time_warning_printed = true;
+        }
+        return 0;
+    }
+
+    long expected_now = ExpectedServerUtcOffset(TimeTradeServer());
+    if (observed != expected_now) {
+        if (!g_server_time_warning_printed) {
+            Print("MT5Bridge: configured server-time convention disagrees with observed offset (expected ",
+                  expected_now, "s, observed ", observed,
+                  "s); using the observed offset until the EA is configured correctly");
+            g_server_time_warning_printed = true;
+        }
+        return observed;
+    }
+
+    return ExpectedServerUtcOffset(t);
+}
+
+datetime ConvertServerTimeToUTC(datetime t) {
+    long sec_diff = GetServerUtcOffset(t);
+    return (datetime)((long)t - sec_diff);
+}
+
 void HandleCopyRates(long h, const uchar &payload[], uint len) {
     int off = 0;
     string sym = "";
@@ -519,16 +740,9 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
         uchar e[1]; SendCount(h, 0, e, 0); return;
     }
 
-    long offset = 0;
-    if (InpConvertToUTC) {
-        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
-        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
-            offset = sec_diff;
-        }
-    }
     ENUM_TIMEFRAMES mtf     = (ENUM_TIMEFRAMES)tf;
-    datetime        dt_from = (datetime)(from + offset);
-    datetime        dt_to   = (datetime)(to + offset);
+    datetime        dt_from = (datetime)(from + GetServerUtcOffset((datetime)from));
+    datetime        dt_to   = (datetime)(to + GetServerUtcOffset((datetime)to));
 
     MqlRates rates[];
     ArraySetAsSeries(rates, false);
@@ -563,7 +777,7 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
     ArrayResize(data, send_bars * 60);
     for (int i = 0; i < send_bars; i++) {
         if (InpConvertToUTC) {
-            rates[i].time = (datetime)((long)rates[i].time - offset);
+            rates[i].time = ConvertServerTimeToUTC(rates[i].time);
         }
         uchar tmp[];
         StructToCharArray(rates[i], tmp);
@@ -577,12 +791,20 @@ void HandleAccount(long h) {
     double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
     double margin     = AccountInfoDouble(ACCOUNT_MARGIN);
     double free_margin= AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    // The account leverage: the bridge needs it to estimate the margin a
+    // position requires, and a configured value can be wrong (or stale).
+    double leverage   = (double)AccountInfoInteger(ACCOUNT_LEVERAGE);
+    // The deposit currency: the bridge books the P&L in it, and assuming
+    // "USD" is wrong for every other account.
+    string   currency = AccountInfoString(ACCOUNT_CURRENCY);
 
     uchar data[];
     PackF64(data, balance);
     PackF64(data, equity);
     PackF64(data, margin);
     PackF64(data, free_margin);
+    PackF64(data, leverage);
+    PackFixedString32(data, currency);
     SendOkData(h, data, (uint)ArraySize(data));
 }
 
@@ -646,6 +868,78 @@ int FindCachedOrderIndex(const string cid) {
     return -1;
 }
 
+// Recover an execution from terminal history when the in-memory cache was lost
+// (for example, the terminal restarted between the send and the client's retry).
+// The cid token is part of the order comment, which persists in account history,
+// so it still identifies the original execution after a restart.
+bool FindHistoricalExecution(const string cid, const string req_symbol, int req_otype,
+                             double req_volume, uint &retcode, ulong &deal, ulong &order,
+                             ulong &position, double &vol, double &price) {
+    if (StringLen(cid) == 0 || StringLen(req_symbol) == 0) return false;
+
+    datetime to = TimeCurrent() + 60;
+    datetime from = to - 86400 - 3600;
+    if (!HistorySelect(from, to)) return false;
+
+    int total = HistoryOrdersTotal();
+    for (int i = total - 1; i >= 0; i--) {
+        ulong ticket = HistoryOrderGetTicket(i);
+        if (ticket == 0) continue;
+
+        string cmt = HistoryOrderGetString(ticket, ORDER_COMMENT);
+        if (ExtractClientOrderId(cmt) != cid) continue;
+        if (HistoryOrderGetString(ticket, ORDER_SYMBOL) != req_symbol) continue;
+        if ((int)HistoryOrderGetInteger(ticket, ORDER_TYPE) != req_otype) continue;
+
+        double requested = HistoryOrderGetDouble(ticket, ORDER_VOLUME_INITIAL);
+        if (MathAbs(requested - req_volume) > 1e-9) continue;
+
+        int state = (int)HistoryOrderGetInteger(ticket, ORDER_STATE);
+        if (state == ORDER_STATE_PLACED) {
+            // The original pending order is still live. Returning its ticket is
+            // safer than placing a second order with the same idempotency key.
+            retcode = TRADE_RETCODE_PLACED;
+            deal = 0;
+            order = ticket;
+            position = ticket;
+            vol = 0.0;
+            price = 0.0;
+            return true;
+        }
+        if (state != ORDER_STATE_FILLED && state != ORDER_STATE_PARTIAL) continue;
+
+        double filled = 0.0;
+        double notional = 0.0;
+        ulong last_deal = 0;
+        ulong pos_id = 0;
+        int deals = HistoryDealsTotal();
+        for (int j = 0; j < deals; j++) {
+            ulong dticket = HistoryDealGetTicket(j);
+            if (dticket == 0) continue;
+            if ((ulong)HistoryDealGetInteger(dticket, DEAL_ORDER) != ticket) continue;
+
+            double dv = HistoryDealGetDouble(dticket, DEAL_VOLUME);
+            if (dv <= 0.0) continue;
+            filled += dv;
+            notional += dv * HistoryDealGetDouble(dticket, DEAL_PRICE);
+            last_deal = dticket;
+
+            ulong pid = (ulong)HistoryDealGetInteger(dticket, DEAL_POSITION_ID);
+            if (pid > 0) pos_id = pid;
+        }
+        if (filled <= 0.0 || last_deal == 0) continue;
+
+        retcode = TRADE_RETCODE_DONE;
+        deal = last_deal;
+        order = ticket;
+        position = (pos_id > 0) ? pos_id : ticket;
+        vol = filled;
+        price = notional / filled;
+        return true;
+    }
+    return false;
+}
+
 // Crockford base32 alphabet used by the Rust client's wire_id(): 0-9 and A-Z without I, L, O, U.
 bool IsWireTokenChar(const ushort c) {
     if (c >= '0' && c <= '9') return true;
@@ -699,6 +993,20 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     }
 
     int cache_idx = (StringLen(cid) > 0) ? FindCachedOrderIndex(cid) : -1;
+    if (cache_idx < 0 && StringLen(cid) > 0) {
+        uint hist_retcode = 0;
+        ulong hist_deal = 0, hist_order = 0, hist_position = 0;
+        double hist_volume = 0.0, hist_price = 0.0;
+        if (FindHistoricalExecution(cid, sym, otype, volume,
+                                    hist_retcode, hist_deal, hist_order, hist_position,
+                                    hist_volume, hist_price)) {
+            Print("MT5Bridge: recovered idempotent execution for key=", cid,
+                  " from terminal history (deal=", hist_deal, ", order=", hist_order, ")");
+            CacheOrderExecution(cid, sym, otype, volume, hist_retcode, hist_deal, hist_order,
+                                hist_position, hist_volume, hist_price);
+            cache_idx = FindCachedOrderIndex(cid);
+        }
+    }
     if (cache_idx >= 0) {
         // Defence in depth: only replay an execution recorded for the SAME request. If the key matches
         // but symbol/type/volume differ, replaying would hand this caller someone else's fill, so refuse.
@@ -817,6 +1125,16 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         return;
     }
 
+    // A stop loss is mandatory. sl == 0.0 is the "no stop" sentinel that MT5
+    // understands, so accepting it would place the order unprotected. The
+    // Rust side refuses such orders too; the EA enforces it as well so a
+    // malformed request from any other client cannot slip through.
+    if (sl <= 0.0) {
+        Print("MT5Bridge: refusing an order without a stop loss (sl=", DoubleToString(sl, 8), ")");
+        SendError(h);
+        return;
+    }
+
     ENUM_TRADE_REQUEST_ACTIONS action = TRADE_ACTION_DEAL;
     ENUM_ORDER_TYPE order_type = ORDER_TYPE_BUY;
     double req_price = price;
@@ -862,6 +1180,34 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
     if (tick_size <= 0.0) tick_size = point;
     long stops_lvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
     double min_stop_dist = (stops_lvl > 0 && point > 0.0) ? (stops_lvl * point) : 0.0;
+    int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+    // Snap computed SL/TP/pending price to the broker tick grid instead of rejecting.
+    // The Rust side derives stops with pure float math, so on instruments whose tick size
+    // is not 10^-digits (e.g. half-pip ticks on 5-digit symbols) unaligned values would be
+    // rejected and could leave positions without a stop; snapping drifts at most half a tick.
+    double snapped_p = SnapToTick(req_price, tick_size, sym_digits, SNAP_NEAREST);
+    if (req_price > 0.0 && MathAbs(snapped_p - req_price) > 1e-9) {
+        Print("MT5Bridge: order price ", DoubleToString(req_price, sym_digits),
+              " snapped to ", DoubleToString(snapped_p, sym_digits),
+              " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+        req_price = snapped_p;
+    }
+    const bool buy_side = IsBuySideOrder(order_type);
+    double snapped_sl = SnapToTick(sl, tick_size, sym_digits, buy_side ? SNAP_DOWN : SNAP_UP);
+    if (sl > 0.0 && MathAbs(snapped_sl - sl) > 1e-9) {
+        Print("MT5Bridge: SL ", DoubleToString(sl, sym_digits),
+              " snapped to ", DoubleToString(snapped_sl, sym_digits),
+              " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+        sl = snapped_sl;
+    }
+    double snapped_tp = SnapToTick(tp, tick_size, sym_digits, buy_side ? SNAP_UP : SNAP_DOWN);
+    if (tp > 0.0 && MathAbs(snapped_tp - tp) > 1e-9) {
+        Print("MT5Bridge: TP ", DoubleToString(tp, sym_digits),
+              " snapped to ", DoubleToString(snapped_tp, sym_digits),
+              " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+        tp = snapped_tp;
+    }
 
     // Check tick size alignment
     if (tick_size > 0.0) {
@@ -982,7 +1328,6 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         }
     }
 
-    int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
     double norm_price = NormalizeDouble(req_price, sym_digits);
     double norm_sl    = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
     double norm_tp    = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
@@ -1028,12 +1373,9 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         if (exec_price <= 0.0 && res.order > 0 && PositionSelectByTicket(res.order)) {
             exec_price = PositionGetDouble(POSITION_PRICE_OPEN);
         }
-        if (exec_price <= 0.0 && res.price > 0.0) {
-            exec_price = res.price;
-        }
-        if (exec_price <= 0.0) {
-            exec_price = req.price;
-        }
+        // A requested market quote is not evidence of an execution. Leave the
+        // price unset so the Rust side can reconcile the broker deal or fail
+        // closed instead of booking a fabricated fill.
     }
 
     ulong pos_ticket = 0;
@@ -1041,6 +1383,9 @@ void HandleOrderSend(long h, const uchar &payload[], uint len) {
         pos_ticket = HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
     }
     if (pos_ticket == 0 && res.order > 0 && PositionSelectByTicket(res.order)) {
+        pos_ticket = res.order;
+    }
+    if (pos_ticket == 0 && res.order > 0) {
         pos_ticket = res.order;
     }
     // Deliberately do NOT fall back to PositionSelect(sym): in hedging accounts, selecting
@@ -1080,6 +1425,16 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     ulong req_magic = 0;
     if ((uint)off + 8 <= len) {
         SafeUnpackU64(payload, off, len, req_magic);
+    }
+
+    uint req_deviation = 10;
+    if ((uint)off + 4 <= len) {
+        SafeUnpackU32(payload, off, len, req_deviation);
+    }
+
+    double req_volume = 0.0;
+    if ((uint)off + 8 <= len) {
+        SafeUnpackF64(payload, off, len, req_volume);
     }
 
     // Find position by ticket, or pending order to remove
@@ -1129,7 +1484,14 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
         }
 
         Print("MT5Bridge: position or order not found for ticket=", ticket);
-        SendError(h);
+        uchar not_found_data[];
+        PackU32(not_found_data, 10036); // TRADE_RETCODE_POSITION_CLOSED
+        PackU64(not_found_data, 0);
+        PackU64(not_found_data, 0);
+        PackU64(not_found_data, ticket);
+        PackF64(not_found_data, 0.0);
+        PackF64(not_found_data, 0.0);
+        SendResponse(h, -1, not_found_data, (uint)ArraySize(not_found_data));
         return;
     }
 
@@ -1151,6 +1513,9 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
 
     string  sym   = PositionGetString(POSITION_SYMBOL);
     double  vol   = PositionGetDouble(POSITION_VOLUME);
+    if (req_volume > 0.0 && req_volume <= vol) {
+        vol = req_volume;
+    }
     ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
     ENUM_ORDER_TYPE close_type = (ptype == POSITION_TYPE_BUY)
                                   ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
@@ -1162,7 +1527,7 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
     req.type     = close_type;
     req.price    = SymbolInfoDouble(sym, (close_type == ORDER_TYPE_BUY)
                                         ? SYMBOL_ASK : SYMBOL_BID);
-    req.deviation= 10;
+    req.deviation= (req_deviation > 0) ? req_deviation : 10;
     req.position = ticket;
     req.magic    = (pos_magic > 0) ? pos_magic : InpMagicNumber;
     req.comment  = "bridge_close";
@@ -1176,9 +1541,9 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
         if (res.deal > 0 && HistoryDealSelect(res.deal)) {
             exec_price = HistoryDealGetDouble(res.deal, DEAL_PRICE);
         }
-        if (exec_price <= 0.0) {
-            exec_price = req.price;
-        }
+        // Do not substitute the requested close quote for a missing fill price.
+        // The Rust executor will reconcile the closing deal or keep the
+        // position unresolved.
     }
 
     uchar data[];
@@ -1197,6 +1562,17 @@ void HandleOrderClose(long h, const uchar &payload[], uint len) {
         Print("MT5Bridge: OrderClose failed retcode=", res.retcode);
         SendResponse(h, -1, data, (uint)ArraySize(data));
     }
+}
+
+void SendModifyError(long h, uint retcode, ulong ticket, bool is_position) {
+    uchar data[];
+    PackU32(data, retcode);
+    PackU64(data, 0);
+    PackU64(data, (is_position ? 0 : ticket));
+    PackU64(data, (is_position ? ticket : 0));
+    PackF64(data, 0.0);
+    PackF64(data, 0.0);
+    SendResponse(h, -1, data, (uint)ArraySize(data));
 }
 
 void HandleOrderModify(long h, const uchar &payload[], uint len) {
@@ -1244,12 +1620,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         if (req_magic > 0 && pos_magic != (long)req_magic) {
             Print("MT5Bridge: rejected modify — position ticket ", ticket, " magic (", pos_magic,
                   ") does not match requested magic (", req_magic, ")");
-            SendError(h);
+            SendModifyError(h, 10013, ticket, true);
             return;
         } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — position ticket ", ticket, " magic (", pos_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
-            SendError(h);
+            SendModifyError(h, 10013, ticket, true);
             return;
         } else if (InpMagicNumber > 0 && pos_magic != InpMagicNumber) {
             Print("MT5Bridge: warning — modifying position ticket ", ticket, " magic (", pos_magic,
@@ -1269,54 +1645,56 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
         double cur_sl = PositionGetDouble(POSITION_SL);
         double cur_tp = PositionGetDouble(POSITION_TP);
+        const bool buy_side = (ptype == POSITION_TYPE_BUY);
 
         double target_sl = cur_sl;
         if (sl_mode == WIRE_LEVEL_CLEAR) {
             target_sl = 0.0;
         } else if (sl_mode == WIRE_LEVEL_SET) {
-            target_sl = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+            target_sl = (sl > 0.0)
+                ? SnapToTick(sl, tick_size, sym_digits, buy_side ? SNAP_DOWN : SNAP_UP)
+                : 0.0;
+            if (target_sl != sl) {
+                Print("MT5Bridge: modify SL ", DoubleToString(sl, sym_digits),
+                      " snapped to ", DoubleToString(target_sl, sym_digits),
+                      " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+            }
         }
 
         double target_tp = cur_tp;
         if (tp_mode == WIRE_LEVEL_CLEAR) {
             target_tp = 0.0;
         } else if (tp_mode == WIRE_LEVEL_SET) {
-            target_tp = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
-        }
-
-        if (tick_size > 0.0) {
-            if (target_sl > 0.0 && MathAbs(target_sl / tick_size - MathRound(target_sl / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify SL ", DoubleToString(target_sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
-                SendError(h);
-                return;
-            }
-            if (target_tp > 0.0 && MathAbs(target_tp / tick_size - MathRound(target_tp / tick_size)) > 1e-4) {
-                Print("MT5Bridge: modify TP ", DoubleToString(target_tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
-                SendError(h);
-                return;
+            target_tp = (tp > 0.0)
+                ? SnapToTick(tp, tick_size, sym_digits, buy_side ? SNAP_UP : SNAP_DOWN)
+                : 0.0;
+            if (target_tp != tp) {
+                Print("MT5Bridge: modify TP ", DoubleToString(tp, sym_digits),
+                      " snapped to ", DoubleToString(target_tp, sym_digits),
+                      " (tick size ", DoubleToString(tick_size, sym_digits), ")");
             }
         }
 
         if (ptype == POSITION_TYPE_BUY) {
             if (target_sl > 0.0 && (bid - target_sl) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify Buy SL ", DoubleToString(target_sl, 5), " violates stops level from bid ", DoubleToString(bid, 5));
-                SendError(h);
+                SendModifyError(h, 10016, ticket, true); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
             if (target_tp > 0.0 && (target_tp - bid) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify Buy TP ", DoubleToString(target_tp, 5), " violates stops level from bid ", DoubleToString(bid, 5));
-                SendError(h);
+                SendModifyError(h, 10016, ticket, true); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
         } else if (ptype == POSITION_TYPE_SELL) {
             if (target_sl > 0.0 && (target_sl - ask) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify Sell SL ", DoubleToString(target_sl, 5), " violates stops level from ask ", DoubleToString(ask, 5));
-                SendError(h);
+                SendModifyError(h, 10016, ticket, true); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
             if (target_tp > 0.0 && (ask - target_tp) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify Sell TP ", DoubleToString(target_tp, 5), " violates stops level from ask ", DoubleToString(ask, 5));
-                SendError(h);
+                SendModifyError(h, 10016, ticket, true); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
         }
@@ -1333,12 +1711,12 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         if (req_magic > 0 && ord_magic != (long)req_magic) {
             Print("MT5Bridge: rejected modify — pending order ticket ", ticket, " magic (", ord_magic,
                   ") does not match requested magic (", req_magic, ")");
-            SendError(h);
+            SendModifyError(h, 10013, ticket, false);
             return;
         } else if (InpEnforceMagicNumber && InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
             Print("MT5Bridge: rejected modify — pending order ticket ", ticket, " magic (", ord_magic,
                   ") does not match EA magic (", InpMagicNumber, ")");
-            SendError(h);
+            SendModifyError(h, 10013, ticket, false);
             return;
         } else if (InpMagicNumber > 0 && ord_magic != InpMagicNumber) {
             Print("MT5Bridge: warning — modifying pending order ticket ", ticket, " magic (", ord_magic,
@@ -1357,30 +1735,45 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         int sym_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
         double cur_sl = OrderGetDouble(ORDER_SL);
         double cur_tp = OrderGetDouble(ORDER_TP);
+        const bool buy_side = IsBuySideOrder(otype);
 
         double target_sl = cur_sl;
         if (sl_mode == WIRE_LEVEL_CLEAR) {
             target_sl = 0.0;
         } else if (sl_mode == WIRE_LEVEL_SET) {
-            target_sl = (sl > 0.0) ? NormalizeDouble(sl, sym_digits) : 0.0;
+            target_sl = (sl > 0.0)
+                ? SnapToTick(sl, tick_size, sym_digits, buy_side ? SNAP_DOWN : SNAP_UP)
+                : 0.0;
+            if (target_sl != sl) {
+                Print("MT5Bridge: modify pending SL ", DoubleToString(sl, sym_digits),
+                      " snapped to ", DoubleToString(target_sl, sym_digits),
+                      " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+            }
         }
 
         double target_tp = cur_tp;
         if (tp_mode == WIRE_LEVEL_CLEAR) {
             target_tp = 0.0;
         } else if (tp_mode == WIRE_LEVEL_SET) {
-            target_tp = (tp > 0.0) ? NormalizeDouble(tp, sym_digits) : 0.0;
+            target_tp = (tp > 0.0)
+                ? SnapToTick(tp, tick_size, sym_digits, buy_side ? SNAP_UP : SNAP_DOWN)
+                : 0.0;
+            if (target_tp != tp) {
+                Print("MT5Bridge: modify pending TP ", DoubleToString(tp, sym_digits),
+                      " snapped to ", DoubleToString(target_tp, sym_digits),
+                      " (tick size ", DoubleToString(tick_size, sym_digits), ")");
+            }
         }
 
         if (tick_size > 0.0) {
             if (target_sl > 0.0 && MathAbs(target_sl / tick_size - MathRound(target_sl / tick_size)) > 1e-4) {
                 Print("MT5Bridge: modify pending SL ", DoubleToString(target_sl, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
-                SendError(h);
+                SendModifyError(h, 10015, ticket, false); // TRADE_RETCODE_INVALID_PRICE
                 return;
             }
             if (target_tp > 0.0 && MathAbs(target_tp / tick_size - MathRound(target_tp / tick_size)) > 1e-4) {
                 Print("MT5Bridge: modify pending TP ", DoubleToString(target_tp, 5), " not aligned to tick size ", DoubleToString(tick_size, 5));
-                SendError(h);
+                SendModifyError(h, 10015, ticket, false); // TRADE_RETCODE_INVALID_PRICE
                 return;
             }
         }
@@ -1388,23 +1781,23 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         if (otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP) {
             if (target_sl > 0.0 && (ord_price - target_sl) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Buy SL violates stops level relative to price");
-                SendError(h);
+                SendModifyError(h, 10016, ticket, false); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
             if (target_tp > 0.0 && (target_tp - ord_price) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Buy TP violates stops level relative to price");
-                SendError(h);
+                SendModifyError(h, 10016, ticket, false); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
         } else if (otype == ORDER_TYPE_SELL_LIMIT || otype == ORDER_TYPE_SELL_STOP) {
             if (target_sl > 0.0 && (target_sl - ord_price) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Sell SL violates stops level relative to price");
-                SendError(h);
+                SendModifyError(h, 10016, ticket, false); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
             if (target_tp > 0.0 && (ord_price - target_tp) < min_dist - 1e-8) {
                 Print("MT5Bridge: modify pending Sell TP violates stops level relative to price");
-                SendError(h);
+                SendModifyError(h, 10016, ticket, false); // TRADE_RETCODE_INVALID_STOPS
                 return;
             }
         }
@@ -1412,7 +1805,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         req.action      = TRADE_ACTION_MODIFY;
         req.order       = ticket;
         req.symbol      = sym;
-        req.price       = NormalizeDouble(ord_price, sym_digits);
+        req.price       = SnapToTick(ord_price, tick_size, sym_digits);
         req.sl          = target_sl;
         req.tp          = target_tp;
         req.type_time   = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
@@ -1421,7 +1814,7 @@ void HandleOrderModify(long h, const uchar &payload[], uint len) {
         ok = OrderSend(req, res);
     } else {
         Print("MT5Bridge: ticket ", ticket, " not found for modify");
-        SendError(h);
+        SendModifyError(h, 10036, ticket, false); // TRADE_RETCODE_POSITION_CLOSED
         return;
     }
 
@@ -1472,10 +1865,15 @@ void HandleSymbolInfoFull(long h, const uchar &payload[], uint len) {
 
     MqlTick tick;
     double spread = 0.0;
-    if (SymbolInfoTick(sym, tick) && point > 0.0)
+    double bid = 0.0;
+    double ask = 0.0;
+    if (SymbolInfoTick(sym, tick) && point > 0.0) {
         spread = (tick.ask - tick.bid) / point;
+        bid = tick.bid;
+        ask = tick.ask;
+    }
 
-    // Serialise as packed wire format: 7×f64 + i32 = 60 bytes (matches Mt5SymInfo in mt5_bridge.h).
+    // Serialise as packed wire format: 7×f64 + i32 + 2×f64 = 76 bytes (matches Mt5SymInfo in mt5_bridge.h).
     uchar data[];
     PackF64(data, point);
     PackF64(data, tick_value);
@@ -1485,6 +1883,8 @@ void HandleSymbolInfoFull(long h, const uchar &payload[], uint len) {
     PackF64(data, max_lot);
     PackF64(data, spread);
     PackI32(data, digits);
+    PackF64(data, bid);
+    PackF64(data, ask);
     SendOkData(h, data, (uint)ArraySize(data));
 }
 
@@ -1502,13 +1902,7 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     MqlTick tick;
     if (!SymbolInfoTick(sym, tick)) { SendError(h); return; }
 
-    long offset_ms = 0;
-    if (InpConvertToUTC) {
-        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
-        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
-            offset_ms = sec_diff * 1000;
-        }
-    }
+    long offset_ms = GetServerUtcOffset((datetime)tick.time) * 1000;
     long tick_ms = (long)tick.time_msc;
     if (tick_ms <= 0) {
         tick_ms = (long)tick.time * 1000;
@@ -1524,15 +1918,6 @@ void HandleSymbolInfoTick(long h, const uchar &payload[], uint len) {
     PackU64(data, tick.volume);
     PackU32(data, tick.flags);
     SendOkData(h, data, (uint)ArraySize(data));
-}
-
-void PackFixedString32(uchar &data[], const string s) {
-    uchar str_bytes[32];
-    ArrayInitialize(str_bytes, 0);
-    StringToCharArray(s, str_bytes, 0, 31);
-    int cur_len = ArraySize(data);
-    ArrayResize(data, cur_len + 32);
-    ArrayCopy(data, str_bytes, cur_len, 0, 32);
 }
 
 void HandlePositionsGet(long h, const uchar &payload[], uint len) {
@@ -1565,6 +1950,7 @@ void HandlePositionsGet(long h, const uchar &payload[], uint len) {
         if (count >= max_items) continue;
 
         long pos_time     = PositionGetInteger(POSITION_TIME);
+        if (InpConvertToUTC) pos_time -= GetServerUtcOffset((datetime)pos_time);
         int pos_type      = (int)PositionGetInteger(POSITION_TYPE);
         double volume     = PositionGetDouble(POSITION_VOLUME);
         double price_open = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1625,6 +2011,7 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
         if (count >= max_items) continue;
 
         long ord_time     = OrderGetInteger(ORDER_TIME_SETUP);
+        if (InpConvertToUTC) ord_time -= GetServerUtcOffset((datetime)ord_time);
         int ord_type      = (int)OrderGetInteger(ORDER_TYPE);
         double vol_init   = OrderGetDouble(ORDER_VOLUME_INITIAL);
         double vol_curr   = OrderGetDouble(ORDER_VOLUME_CURRENT);
@@ -1677,15 +2064,10 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
     if (max_items <= 0) max_items = 1000;
     if (to_utc < from_utc) { SendError(h); return; }
 
-    long offset = 0;
-    if (InpConvertToUTC) {
-        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
-        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
-            offset = sec_diff;
-        }
-    }
+    long from_offset = GetServerUtcOffset((datetime)from_utc);
+    long to_offset   = GetServerUtcOffset((datetime)to_utc);
 
-    if (!HistorySelect((datetime)(from_utc + offset), (datetime)(to_utc + offset))) {
+    if (!HistorySelect((datetime)(from_utc + from_offset), (datetime)(to_utc + to_offset))) {
         Print("MT5Bridge: HistorySelect failed for deals query, error=", GetLastError());
         SendError(h);
         return;
@@ -1713,7 +2095,7 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
         if (count >= max_items) continue;
 
         long deal_time = HistoryDealGetInteger(ticket, DEAL_TIME);
-        if (InpConvertToUTC) deal_time -= offset;
+        if (InpConvertToUTC) deal_time -= GetServerUtcOffset((datetime)deal_time);
 
         PackU64(data, ticket);
         PackU64(data, (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER));
@@ -1858,6 +2240,119 @@ void HandleUnsubscribeBook(long h, const uchar &payload[], uint len) {
     SendOk(h);
 }
 
+struct BarSubscription {
+    string symbol;
+    int    timeframe;
+    bool   enabled;
+    long   last_bar_time;
+};
+
+BarSubscription g_bar_subscriptions[];
+
+void HandleSubscribeBars(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    int tf = 0;
+    if (!SafeUnpackI32(payload, off, len, tf)) {
+        SendError(h);
+        return;
+    }
+    if (!EnsureSymbolAvailable(sym)) {
+        SendError(h);
+        return;
+    }
+
+    int total = ArraySize(g_bar_subscriptions);
+    int idx = -1;
+    for (int i = 0; i < total; i++) {
+        if (g_bar_subscriptions[i].symbol == sym && g_bar_subscriptions[i].timeframe == tf) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        ArrayResize(g_bar_subscriptions, total + 1);
+        idx = total;
+        g_bar_subscriptions[idx].symbol        = sym;
+        g_bar_subscriptions[idx].timeframe     = tf;
+        datetime cur_time = iTime(sym, (ENUM_TIMEFRAMES)tf, 0);
+        g_bar_subscriptions[idx].last_bar_time = (long)cur_time;
+    }
+    g_bar_subscriptions[idx].enabled = true;
+    SendOk(h);
+    Print("MT5Bridge: subscribed to bars for '", sym, "' tf=", tf);
+}
+
+void HandleUnsubscribeBars(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    if (!SafeUnpackStr(payload, off, len, sym) || StringLen(sym) == 0) {
+        SendError(h);
+        return;
+    }
+    int tf = 0;
+    if (!SafeUnpackI32(payload, off, len, tf)) {
+        SendError(h);
+        return;
+    }
+    int total = ArraySize(g_bar_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (g_bar_subscriptions[i].symbol == sym && g_bar_subscriptions[i].timeframe == tf) {
+            g_bar_subscriptions[i].enabled = false;
+            break;
+        }
+    }
+    SendOk(h);
+    Print("MT5Bridge: unsubscribed from bars for '", sym, "' tf=", tf);
+}
+
+void CheckSubscribedBars() {
+    if (g_client == INVALID_HANDLE || !g_authenticated) return;
+    int total = ArraySize(g_bar_subscriptions);
+    for (int i = 0; i < total; i++) {
+        if (!g_bar_subscriptions[i].enabled) continue;
+        string sym = g_bar_subscriptions[i].symbol;
+        int tf = g_bar_subscriptions[i].timeframe;
+        datetime cur_time = iTime(sym, (ENUM_TIMEFRAMES)tf, 0);
+        if (cur_time == 0) continue;
+        if (g_bar_subscriptions[i].last_bar_time == 0) {
+            g_bar_subscriptions[i].last_bar_time = (long)cur_time;
+            continue;
+        }
+        if ((long)cur_time > g_bar_subscriptions[i].last_bar_time) {
+            MqlRates rates[];
+            ArraySetAsSeries(rates, true);
+            if (CopyRates(sym, (ENUM_TIMEFRAMES)tf, 1, 1, rates) == 1) {
+                datetime bar_time = rates[0].time;
+                if (InpConvertToUTC) bar_time = ConvertServerTimeToUTC(bar_time);
+
+                uchar payload[];
+                PackFixedString32(payload, sym);
+                PackI64(payload, (long)bar_time);
+                PackF64(payload, rates[0].open);
+                PackF64(payload, rates[0].high);
+                PackF64(payload, rates[0].low);
+                PackF64(payload, rates[0].close);
+                PackI64(payload, rates[0].tick_volume);
+                PackI32(payload, tf);
+                PackI32(payload, rates[0].spread);
+                PackU64(payload, ++g_event_seq);
+
+                if (!SendEvent(g_client, EVENT_BAR, payload, 96)) {
+                    ResetPipeServer("failed to write bar event to pipe");
+                    return;
+                }
+                FlushFileBuffers(g_client);
+            }
+            g_bar_subscriptions[i].last_bar_time = (long)cur_time;
+        }
+    }
+}
+
 // ── Event queues (bounded ring-buffers) ──────────────────────────────────────
 
 struct QueuedTickEvent {
@@ -1887,8 +2382,22 @@ void EnqueueTick(const string sym, const MqlTick &tick) {
                   "), dropped oldest tick (total dropped=", g_ticks_dropped_total, ")");
         }
     }
+    long tm = tick.time_msc;
+    if (tm == 0) {
+        tm = (long)tick.time * 1000;
+    }
+    if (InpConvertToUTC) {
+        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
+        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
+            long rem = sec_diff % 60;
+            if (rem >= 30) sec_diff += (60 - rem);
+            else if (rem <= -30) sec_diff -= (60 + rem);
+            else sec_diff -= rem;
+            tm -= sec_diff * 1000;
+        }
+    }
     g_tick_queue[g_tick_queue_head].symbol   = sym;
-    g_tick_queue[g_tick_queue_head].time_msc = tick.time_msc;
+    g_tick_queue[g_tick_queue_head].time_msc = tm;
     g_tick_queue[g_tick_queue_head].bid      = tick.bid;
     g_tick_queue[g_tick_queue_head].ask      = tick.ask;
     g_tick_queue[g_tick_queue_head].last     = tick.last;
@@ -2118,6 +2627,8 @@ bool DispatchRequest(long h) {
         case CMD_UNSUBSCRIBE_TRADE: HandleUnsubscribeTrade(h);                   break;
         case CMD_SUBSCRIBE_BOOK:    HandleSubscribeBook(h, payload, pay_len);    break;
         case CMD_UNSUBSCRIBE_BOOK:  HandleUnsubscribeBook(h, payload, pay_len);  break;
+        case CMD_SUBSCRIBE_BARS:    HandleSubscribeBars(h, payload, pay_len);    break;
+        case CMD_UNSUBSCRIBE_BARS:  HandleUnsubscribeBars(h, payload, pay_len);  break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);
@@ -2163,11 +2674,82 @@ long CreatePipeHandle() {
     return h;
 }
 
+// Name of the takeover event, scoped to this pipe so multiple terminals/accounts
+// using different pipe names do not interfere with each other.
+string TakeoverEventName() {
+    return "mt5bridge_takeover_" + InpPipeName;
+}
+
+// Terminal-wide record of the generation currently owning the pipe. MQL5 global
+// variables are visible to every EA in the terminal, so a newer instance can
+// compare its generation with the running one before requesting takeover.
+// Global-variable names allow only [A-Za-z0-9_] and are limited to 63 chars, so
+// sanitize and truncate the pipe name.
+string GenerationVarName() {
+    string out = "mt5bridge_gen_";
+    int n = StringLen(InpPipeName);
+    for (int i = 0; i < n && i < 40; i++) {
+        ushort c = StringGetCharacter(InpPipeName, i);
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            out += ShortToString(c);
+        else
+            out += "_";
+    }
+    return out;
+}
+
+// Close the pipe server/client handles exactly once. g_client aliases g_server
+// while a client is connected, so only the alias is cleared before g_server.
+void ReleasePipeServer() {
+    g_authenticated = false;
+    if (g_client != INVALID_HANDLE) {
+        DisconnectNamedPipe(g_client);
+        // Do not close g_client: g_client aliases g_server.
+        g_client = INVALID_HANDLE;
+    }
+    if (g_server != INVALID_HANDLE) {
+        CloseHandle(g_server);
+        g_server = INVALID_HANDLE;
+    }
+}
+
+// Close every chart except the one running this instance. Used by the headless
+// setup so repeated restarts/takeovers do not accumulate stale charts. Charts
+// are collected before closing because closing mutates the enumeration order.
+void CloseStaleCharts() {
+    long self = ChartID();
+    long ids[];
+    int n = 0;
+    for (long ch = ChartFirst(); ch >= 0; ch = ChartNext(ch)) {
+        if (ch == self) continue;
+        ArrayResize(ids, n + 1);
+        ids[n++] = ch;
+    }
+    for (int i = 0; i < n; i++) {
+        Print("MT5Bridge: closing stale chart ", ids[i]);
+        ChartClose(ids[i]);
+    }
+    g_stale_charts_closed = true;
+    Print("MT5Bridge: stale chart cleanup complete (closed ", n, " chart(s))");
+}
+
 // ── EA lifecycle ──────────────────────────────────────────────────────────────
 
 int OnInit() {
     if (InpRequireSecret && StringLen(InpPipeSecret) == 0) {
         Print("MT5Bridge: INIT_FAILED — InpRequireSecret is enabled but InpPipeSecret is empty! Set InpPipeSecret in EA inputs or set InpRequireSecret = false to opt out.");
+        return INIT_FAILED;
+    }
+
+    if (InpServerTimeConvention < SERVER_TIME_FIXED ||
+        InpServerTimeConvention > SERVER_TIME_EUROPE_DST) {
+        Print("MT5Bridge: INIT_FAILED — invalid InpServerTimeConvention");
+        return INIT_FAILED;
+    }
+    if (InpServerTimeConvention == SERVER_TIME_FIXED &&
+        (InpServerUtcOffsetHours < -14 || InpServerUtcOffsetHours > 14)) {
+        Print("MT5Bridge: INIT_FAILED — InpServerUtcOffsetHours must be between -14 and 14");
         return INIT_FAILED;
     }
 
@@ -2177,17 +2759,76 @@ int OnInit() {
         return INIT_FAILED;
     }
 
+    long observed_offset = 0;
+    if (TryObservedServerUtcOffset(observed_offset)) {
+        long expected_offset = ExpectedServerUtcOffset(TimeTradeServer());
+        Print("MT5Bridge: server-time observation convention=", ServerTimeConventionName(),
+              " expected_offset=", expected_offset, "s observed_offset=", observed_offset,
+              "s convert_to_utc=", (InpConvertToUTC ? "true" : "false"));
+        if (InpConvertToUTC && observed_offset != expected_offset) {
+            Print("MT5Bridge: WARNING — startup server-time offset differs from the configured convention");
+        }
+    } else {
+        Print("MT5Bridge: WARNING — startup server-time offset could not be observed; UTC conversion will use the fallback guard");
+    }
+
     g_pipe_path = "\\\\.\\pipe\\" + InpPipeName;
+    g_takeover_event = CreateEventW(0, 1 /* manual reset */, 0, TakeoverEventName());
+    if (g_takeover_event == 0)
+        Print("MT5Bridge: WARNING — could not create takeover event; existing-instance refresh disabled");
+
+    long my_gen = InpConfigGeneration;
+    long prev_gen = (long)GlobalVariableGet(GenerationVarName());
+    bool may_takeover = (my_gen > 0 && my_gen > prev_gen);
+
     g_server = CreatePipeHandle();
 
     if (g_server == INVALID_HANDLE) {
-        Print("MT5Bridge: CreateNamedPipe failed — check DLL imports are enabled and no other instance is running");
-        return INIT_FAILED;
+        if (may_takeover && g_takeover_event != 0) {
+            Print("MT5Bridge: existing instance detected (generation ", prev_gen,
+                  "); requesting takeover with generation ", my_gen);
+            SetEvent(g_takeover_event);
+
+            int timeout = (InpTakeoverTimeoutMs > 0) ? InpTakeoverTimeoutMs : 5000;
+            int waited = 0;
+            while (waited < timeout) {
+                Sleep(TAKEOVER_POLL_MS);
+                waited += TAKEOVER_POLL_MS;
+                g_server = CreatePipeHandle();
+                if (g_server != INVALID_HANDLE) break;
+            }
+            // Cancel a takeover that no live instance acknowledged, otherwise an
+            // instance that starts later could observe a stale signal.
+            ResetEvent(g_takeover_event);
+
+            if (g_server == INVALID_HANDLE) {
+                Print("MT5Bridge: takeover timed out after ", waited,
+                      "ms — existing instance did not release the pipe");
+                return INIT_FAILED;
+            }
+            Print("MT5Bridge: takeover complete after ", waited, "ms");
+        } else {
+            Print("MT5Bridge: CreateNamedPipe failed — another instance owns the pipe (generation ",
+                  prev_gen, "); this instance (generation ", my_gen,
+                  ") will not take over. Set InpConfigGeneration higher to refresh it.");
+            return INIT_FAILED;
+        }
     }
+
+    // Record this instance's generation so a later start can decide whether it
+    // is newer. Always write it (including 0) so a stale value cannot block a
+    // legitimate refresh.
+    GlobalVariableSet(GenerationVarName(), (double)my_gen);
 
     g_running = true;
     g_authenticated = false;
-    int timer_ms = (InpTimerIntervalMs > 0) ? InpTimerIntervalMs : 5;
+    // Give a concurrent takeover time to settle before removing other charts,
+    // so we never close a chart whose EA is still releasing the pipe.
+    if (InpCloseStaleCharts) {
+        g_stale_cleanup_at = GetTickCount() + 3000;
+        g_stale_charts_closed = false;
+    }
+    int timer_ms = (InpTimerIntervalMs > 0) ? InpTimerIntervalMs : 1;
     EventSetMillisecondTimer(timer_ms);
     Print("MT5Bridge: pipe server ready (timer=", timer_ms, "ms) — waiting for Rust client");
     return INIT_SUCCEEDED;
@@ -2208,15 +2849,11 @@ void OnDeinit(const int reason) {
     ArrayResize(g_book_subscriptions, 0);
     ArrayResize(g_tick_subscriptions, 0);
 
-    if (g_client != INVALID_HANDLE) {
-        DisconnectNamedPipe(g_client);
-        // Do not close g_client: g_client aliases g_server (g_client = g_server).
-        // Closing it here and closing g_server below would cause a Win32 double-close.
-        g_client = INVALID_HANDLE;
-    }
-    if (g_server != INVALID_HANDLE) {
-        CloseHandle(g_server);
-        g_server = INVALID_HANDLE;
+    ReleasePipeServer();
+
+    if (g_takeover_event != 0) {
+        CloseHandle(g_takeover_event);
+        g_takeover_event = 0;
     }
     Print("MT5Bridge: shutdown (reason=", reason, ")");
 }
@@ -2238,7 +2875,27 @@ void ResetPipeServer(const string reason) {
 }
 
 void OnTimer() {
+    // A freshly started instance (normally the one launched from the headless
+    // startup config) signals this event when it wants to take over. Release the
+    // pipe immediately so it can bind, then unload this stale instance.
+    if (g_takeover_event != 0 &&
+        WaitForSingleObject(g_takeover_event, 0) == WAIT_OBJECT_0) {
+        Print("MT5Bridge: takeover requested by a new instance — releasing pipe and refreshing");
+        g_running = false;
+        EventKillTimer();
+        ReleasePipeServer();
+        ExpertRemove();
+        return;
+    }
+
     if (!g_running || g_server == INVALID_HANDLE) return;
+
+    // Once this instance owns the pipe, remove leftover charts from earlier
+    // runs. The grace period lets a concurrent takeover finish first.
+    if (InpCloseStaleCharts && !g_stale_charts_closed &&
+        (int)(GetTickCount() - g_stale_cleanup_at) >= 0) {
+        CloseStaleCharts();
+    }
 
     // Poll for an incoming client connection without blocking the timer thread.
     if (g_client == INVALID_HANDLE) {
@@ -2247,7 +2904,7 @@ void OnTimer() {
         uint  peek_rd = 0, peek_av = 0, peek_lf = 0;
         if (PeekNamedPipe(g_server, peek_conn, 0, peek_rd, peek_av, peek_lf)) {
             g_client = g_server;
-            uint mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+            uint mode = PIPE_READMODE_BYTE | PIPE_NOWAIT;
             SetNamedPipeHandleState(g_client, mode, 0, 0);
             g_authenticated = false;
             Print("MT5Bridge: Rust client connected (unauthenticated)");
@@ -2302,6 +2959,9 @@ void OnTimer() {
 
     // 4. Flush queued trade events to pipe
     FlushTradeQueue();
+
+    // 5. Poll subscribed bars on timer
+    CheckSubscribedBars();
 }
 
 // Low-latency event-driven tick handler (protocol v5+ push model)
@@ -2321,6 +2981,9 @@ void OnTick() {
             break;
         }
     }
+
+    CheckSubscribedBars();
+    FlushTickQueue();
 }
 
 // Low-latency event-driven trade handler (protocol v6+ push model)
@@ -2369,11 +3032,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
         deal_position_id = trans.position;
     }
 
-    EnqueueTrade(trans.deal, trans.order, trans.position, (long)TimeCurrent(),
+    long trade_time = InpConvertToUTC ? (long)TimeGMT() : (long)TimeCurrent();
+    EnqueueTrade(trans.deal, trans.order, trans.position, trade_time,
                  wire_trans_type, (int)trans.order_type, trans.price,
                  trans.volume, trans.price_sl, trans.price_tp,
                  trans.symbol, cmt,
                  deal_entry, deal_type, deal_magic, deal_position_id, deal_reason);
+    FlushTradeQueue();
 }
 
 // Low-latency event-driven depth-of-market handler (protocol v6+ push model)

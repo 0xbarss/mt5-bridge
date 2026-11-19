@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- **Wire Protocol v7**:
+  - `Mt5SymInfo` layout expanded to 76 bytes; `Mt5BarEvent` layout is 96 bytes.
+  - `bid` and `ask` fields added to `Mt5SymInfo` and surfaced in `SymbolInfo`.
+  - Compile-time `static_assert` / `const _: ()` ABI assertions updated across C++, MQL5, and Rust.
+- **Bar Push Streaming**:
+  - `Mt5Client::subscribe_bars` / `unsubscribe_bars` for real-time closed-bar event delivery.
+  - `stream_bars` async stream with configurable lag-draining and backpressure.
+  - Typed `StreamError` with `LagDropped`, `ChannelClosed`, and `ParseError` variants.
+  - `bar_end_time` utility deriving bar boundary timestamps from `Timeframe`.
+- **Durable Write-Ahead Log**:
+  - `WalOrderStore` with binary `MT5WAL01` frame format, per-frame CRC32 checksums, and tail recovery.
+  - `WalConfig` with `sync_intent` write-discipline tuning and configurable `max_frame_bytes`.
+  - Snapshot compaction to prune resolved frames and bound journal growth.
+  - JSON migration path from legacy `JsonFileStore` intent records.
+- **Position Book**:
+  - `PositionBook` deal-level order attribution with magic-number filtering.
+  - `apply_trade_event` ingestion, weighted-average fill tracking, partial/full close handling.
+  - `net_quantity(symbol, direction)` and `broker_snapshot` reconciliation via `apply_snapshot`.
+  - `PositionTransition` enum with named struct variants for open, modify, partial-close, and full-close events.
+- **Session Supervisor & Gateway Actor**:
+  - `Mt5Session` with exponential backoff reconnection and configurable retry policy.
+  - `Mt5Gateway` with 3-tier priority scheduling (critical / normal / low) and tick conflation.
+- **Modular Source Layout**:
+  - `src/types.rs` split into 20 submodules under `src/types/`.
+  - `src/client.rs` split into 13 files under `src/client/`.
+  - `src/reconciliation/` modular subsystem with hardened `OrderManager`.
+- **Security Hardening**:
+  - Absolute DLL path validation and SHA-256 hash verification at load time.
+  - Pipe name regex enforcement preventing path-traversal pipe names.
+- **Headless Autostart Scripts**:
+  - `mql5/autostart/` — shell and PowerShell scripts for running the EA in headless mode.
+  - Config templates for unattended terminal launch.
+- **Examples & Benchmarks**:
+  - `examples/09_stream_bars_push.rs` — Protocol v7 real-time bar push subscription demo.
+  - `examples/10_wal_order_store.rs` — WAL intent, update, recovery, and compaction demo.
+  - `benches/latency_harness.rs` — p50/p90/p99/p99.9 latency distribution harness.
+  - `benches/mt5_extensive_benchmark.rs` — throughput and scalability benchmark.
+  - `benches/push_probe.rs` — push event latency, jitter, and fanout benchmark.
+- **New Integration Test Suites**:
+  - `tests/position_book_tests.rs` — 7 tests covering attribution, partial close, snapshot reconciliation, and state recovery.
+  - `tests/wal_journal_tests.rs` — 6 tests covering full lifecycle, crash recovery, compaction, and corruption rejection.
+  - `tests/pipe_mb1_concurrency.rs` — 3 tests covering pipe name validation, mutual exclusion, and high-concurrency stress.
+
+### Changed
+
+- `SymbolInfo` now exposes `bid` and `ask` from Protocol v7 `Mt5SymInfo`.
+- `PROTOCOL_VERSION` bumped to `7` across Rust (`src/constants.rs`), C++ (`mt5_bridge.h`), and MQL5 (`mt5_bridge.mq5`).
+- Examples `01`–`08` updated to display Protocol v7 fields where applicable.
+
 ## [0.2.0] - 2026-10-01
 
 ### Added

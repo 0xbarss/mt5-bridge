@@ -53,6 +53,7 @@ pub struct EventBus {
     ticks: Mutex<HashMap<String, broadcast::Sender<Tick>>>,
     trades: broadcast::Sender<TradeEvent>,
     books: Mutex<HashMap<String, broadcast::Sender<BookEvent>>>,
+    bars: Mutex<HashMap<(String, i32), broadcast::Sender<Bar>>>,
     buffer_capacity: usize,
 }
 
@@ -63,13 +64,17 @@ impl EventBus {
             ticks: Mutex::new(HashMap::new()),
             trades,
             books: Mutex::new(HashMap::new()),
+            bars: Mutex::new(HashMap::new()),
             buffer_capacity: buffer_capacity.max(64),
         }
     }
 
     /// Subscribe to real-time pushed ticks for a symbol.
     pub fn subscribe_ticks(&self, symbol: &str) -> broadcast::Receiver<Tick> {
-        let mut map = self.ticks.lock().unwrap();
+        let mut map = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sender = map.entry(symbol.to_string()).or_insert_with(|| {
             let (tx, _) = broadcast::channel(self.buffer_capacity);
             tx
@@ -84,7 +89,10 @@ impl EventBus {
 
     /// Subscribe to real-time pushed depth-of-market book events for a symbol.
     pub fn subscribe_book(&self, symbol: &str) -> broadcast::Receiver<BookEvent> {
-        let mut map = self.books.lock().unwrap();
+        let mut map = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sender = map.entry(symbol.to_string()).or_insert_with(|| {
             let (tx, _) = broadcast::channel(self.buffer_capacity);
             tx
@@ -92,9 +100,27 @@ impl EventBus {
         sender.subscribe()
     }
 
+    /// Subscribe to real-time pushed OHLCV bars for a symbol and timeframe.
+    pub fn subscribe_bars(&self, symbol: &str, timeframe: i32) -> broadcast::Receiver<Bar> {
+        let mut map = self
+            .bars
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = map
+            .entry((symbol.to_string(), timeframe))
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(self.buffer_capacity);
+                tx
+            });
+        sender.subscribe()
+    }
+
     /// Dispatch an incoming tick to all subscribers of that symbol.
     pub fn dispatch_tick(&self, tick: Tick) {
-        let map = self.ticks.lock().unwrap();
+        let map = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(tx) = map.get(&tick.symbol) {
             let _ = tx.send(tick);
         }
@@ -107,15 +133,34 @@ impl EventBus {
 
     /// Dispatch an incoming book depth event to all subscribers of that symbol.
     pub fn dispatch_book(&self, book: BookEvent) {
-        let map = self.books.lock().unwrap();
+        let map = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(tx) = map.get(&book.symbol) {
             let _ = tx.send(book);
         }
     }
 
+    /// Dispatch an incoming OHLCV bar event to all subscribers of that symbol and timeframe.
+    pub fn dispatch_bar(&self, symbol: &str, timeframe: i32, bar: Bar) {
+        let map = self
+            .bars
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(tx) = map.get(&(symbol.to_string(), timeframe)) {
+            let _ = tx.send(bar);
+        }
+    }
+
     /// Returns the symbols currently tracked in the tick subscription table.
     pub fn active_tick_symbols(&self) -> Vec<String> {
-        self.ticks.lock().unwrap().keys().cloned().collect()
+        self.ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -158,8 +203,8 @@ impl TickSubscription {
     /// Asynchronously await and receive the next tick from the push feed.
     ///
     /// Under `StreamMode::Latest`, if the consumer lags and intermediate quotes are dropped,
-    /// this method updates the drop counter, logs a warning, and yields the freshest quote
-    /// rather than returning an error.
+    /// this method updates the drop counter, logs a warning, and drains the remaining buffer
+    /// to yield the freshest available quote rather than returning stale retained quotes.
     ///
     /// Returns `None` if the sender was closed.
     pub async fn recv(&mut self) -> Option<Tick> {
@@ -176,6 +221,30 @@ impl TickSubscription {
                                 skipped,
                                 "Tick subscription lagged: dropped stale quotes to maintain low latency"
                             );
+                        }
+                        // Drain to the freshest quote in the buffer so lagging consumers
+                        // do not process old retained backlog.
+                        let mut latest = None;
+                        let mut drained: u64 = 0;
+                        loop {
+                            match self.rx.try_recv() {
+                                Ok(tick) => {
+                                    if latest.is_some() {
+                                        drained += 1;
+                                    }
+                                    latest = Some(tick);
+                                }
+                                Err(broadcast::error::TryRecvError::Lagged(more_skipped)) => {
+                                    self.dropped_ticks += more_skipped;
+                                    continue;
+                                }
+                                Err(broadcast::error::TryRecvError::Empty) => break,
+                                Err(broadcast::error::TryRecvError::Closed) => break,
+                            }
+                        }
+                        self.dropped_ticks += drained;
+                        if let Some(tick) = latest {
+                            return Some(tick);
                         }
                     } else {
                         warn!(
@@ -208,8 +277,8 @@ impl TickSubscription {
 
     /// Attempt to receive a tick without waiting.
     ///
-    /// In [`StreamMode::Latest`], if lag occurred, it automatically discards the stale ticks
-    /// and attempts to fetch the newest quote.
+    /// In [`StreamMode::Latest`], if lag occurred, it discards the stale ticks, drains to the
+    /// newest available quote, and returns it.
     /// In [`StreamMode::Lossless`], it returns [`broadcast::error::TryRecvError::Lagged`].
     pub fn try_recv(&mut self) -> Result<Tick, broadcast::error::TryRecvError> {
         match self.rx.try_recv() {
@@ -219,7 +288,30 @@ impl TickSubscription {
                 if self.mode == StreamMode::Lossless {
                     Err(broadcast::error::TryRecvError::Lagged(skipped))
                 } else {
-                    self.rx.try_recv()
+                    let mut latest = None;
+                    let mut drained: u64 = 0;
+                    loop {
+                        match self.rx.try_recv() {
+                            Ok(t) => {
+                                if latest.is_some() {
+                                    drained += 1;
+                                }
+                                latest = Some(t);
+                            }
+                            Err(broadcast::error::TryRecvError::Lagged(more)) => {
+                                self.dropped_ticks += more;
+                                continue;
+                            }
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(broadcast::error::TryRecvError::Closed) => break,
+                        }
+                    }
+                    self.dropped_ticks += drained;
+                    if let Some(t) = latest {
+                        Ok(t)
+                    } else {
+                        Err(broadcast::error::TryRecvError::Empty)
+                    }
                 }
             }
             Err(e) => Err(e),
@@ -240,10 +332,52 @@ impl TickSubscription {
 const DEFAULT_TICK_BUFFER: usize = 1024;
 const DEFAULT_BAR_BUFFER: usize = 256;
 
-const DUP_PRICE_THRESHOLD: f64 = 1e-9;
+use crate::constants::DUP_PRICE_THRESHOLD;
 
 /// Maximum consecutive poll errors allowed before a streaming task aborts and closes the channel.
 pub const MAX_CONSECUTIVE_STREAM_ERRORS: u32 = 10;
+
+/// Error reasons that cause a streaming task to terminate.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StreamError {
+    /// The upstream subscription closed or disconnected.
+    #[error("Stream closed by upstream feed")]
+    Closed,
+
+    /// Consumer lagged behind stream buffer.
+    #[error("Stream consumer lagged by {0} events")]
+    Lagged(u64),
+
+    /// Terminated after exceeding maximum consecutive polling errors.
+    #[error("Stream exceeded maximum consecutive errors ({count}): {last_error}")]
+    MaxConsecutiveErrors { count: u32, last_error: String },
+
+    /// Background polling task joined with error.
+    #[error("Stream task joined with error: {0}")]
+    TaskJoinError(String),
+}
+
+/// Calculates the closed (end) timestamp of a bar given its timeframe and open timestamp.
+pub fn bar_end_time(timeframe: Timeframe, open_time: i64) -> i64 {
+    if timeframe == Timeframe::MN1 {
+        if let Some(dt) = chrono::DateTime::from_timestamp(open_time, 0) {
+            use chrono::Datelike;
+            let year = dt.year();
+            let month = dt.month();
+            let (next_year, next_month) = if month == 12 {
+                (year + 1, 1)
+            } else {
+                (year, month + 1)
+            };
+            if let Some(next_dt) = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+            {
+                return next_dt.and_utc().timestamp();
+            }
+        }
+    }
+    open_time + timeframe.seconds()
+}
 
 /// Backpressure policy for stream buffer overflow.
 ///
@@ -288,8 +422,8 @@ enum Offer {
     ReceiverClosed,
 }
 
-fn offer_drop_newest(tx: &mpsc::Sender<Tick>, tick: Tick) -> Offer {
-    match tx.try_send(tick) {
+fn offer_drop_newest(tx: &mpsc::Sender<Result<Tick, StreamError>>, tick: Tick) -> Offer {
+    match tx.try_send(Ok(tick)) {
         Ok(()) => Offer::Delivered,
         Err(mpsc::error::TrySendError::Full(_)) => Offer::DroppedNewest,
         Err(mpsc::error::TrySendError::Closed(_)) => Offer::ReceiverClosed,
@@ -305,7 +439,7 @@ pub fn stream_ticks_with_config(
     client: Arc<Mt5Client>,
     symbol: &str,
     config: StreamConfig,
-) -> mpsc::Receiver<Tick> {
+) -> mpsc::Receiver<Result<Tick, StreamError>> {
     let (tx, rx) = mpsc::channel(config.buffer_size.max(16));
     let sym_owned = symbol.to_string();
 
@@ -335,15 +469,16 @@ pub fn stream_ticks_with_config(
                                 );
                             }
                         }
-                        Offer::ReceiverClosed => break,
+                        Offer::ReceiverClosed => return,
                     },
                     BackpressurePolicy::Block => {
-                        if tx_push.send(tick).await.is_err() {
-                            break;
+                        if tx_push.send(Ok(tick)).await.is_err() {
+                            return;
                         }
                     }
                 }
             }
+            let _ = tx_push.send(Err(StreamError::Closed)).await;
         });
         return rx;
     }
@@ -408,7 +543,7 @@ pub fn stream_ticks_with_config(
                                     }
                                 }
                                 BackpressurePolicy::Block => {
-                                    if tx.send(tick).await.is_err() {
+                                    if tx.send(Ok(tick)).await.is_err() {
                                         debug!(symbol = %sym_owned, "Tick stream receiver dropped; shutting down");
                                         break;
                                     }
@@ -432,11 +567,20 @@ pub fn stream_ticks_with_config(
                             consecutive_errors,
                             "Tick stream exceeded maximum consecutive errors; terminating stream"
                         );
+                        let _ = tx
+                            .send(Err(StreamError::MaxConsecutiveErrors {
+                                count: consecutive_errors,
+                                last_error: e.to_string(),
+                            }))
+                            .await;
                         break;
                     }
                 }
                 Err(e) => {
                     error!(symbol = %sym_owned, error = %e, "Tick stream task joined with error");
+                    let _ = tx
+                        .send(Err(StreamError::TaskJoinError(e.to_string())))
+                        .await;
                     break;
                 }
             }
@@ -455,7 +599,7 @@ pub fn stream_ticks(
     client: Arc<Mt5Client>,
     symbol: &str,
     poll_interval: Duration,
-) -> mpsc::Receiver<Tick> {
+) -> mpsc::Receiver<Result<Tick, StreamError>> {
     let config = StreamConfig {
         buffer_size: DEFAULT_TICK_BUFFER,
         poll_interval,
@@ -469,23 +613,21 @@ pub fn stream_ticks(
 /// Spawns a background Tokio task that monitors incoming bars and pushes each
 /// closed bar through a `mpsc::Receiver`.
 /// The background polling task terminates automatically when the receiver is dropped.
-///
-/// A bar is skipped if more than one bar closes within a single poll interval; the bar that was
-/// already closed at start-up is not emitted. See the
-/// [module docs](self#delivery-semantics--read-before-relying-on-a-stream).
 pub fn stream_bars(
     client: Arc<Mt5Client>,
     symbol: &str,
     timeframe: Timeframe,
     poll_interval: Duration,
-) -> mpsc::Receiver<Bar> {
+    include_incomplete: bool,
+) -> mpsc::Receiver<Result<Bar, StreamError>> {
     let (tx, rx) = mpsc::channel(DEFAULT_BAR_BUFFER);
     let sym_owned = symbol.to_string();
 
     tokio::spawn(async move {
         debug!(symbol = %sym_owned, timeframe = %timeframe, "Bar stream started");
 
-        let mut last_closed_bar_time: i64 = 0;
+        let mut last_closed_bar_time: Option<i64> = None;
+        let mut last_current: Option<Bar> = None;
         let mut consecutive_errors: u32 = 0;
 
         loop {
@@ -508,21 +650,43 @@ pub fn stream_bars(
             match rates_res {
                 Ok(Ok(rates)) => {
                     consecutive_errors = 0;
-                    // We need at least 2 bars:
-                    // rates[len - 1] is the currently forming unclosed bar.
-                    // rates[len - 2] is the most recently completed closed bar.
-                    if rates.len() >= 2 {
-                        let closed_rate = rates[rates.len() - 2];
-                        if closed_rate.time > last_closed_bar_time {
-                            if last_closed_bar_time == 0 {
-                                // Initialize on first fetch without emitting historical bar
-                                last_closed_bar_time = closed_rate.time;
-                            } else {
-                                last_closed_bar_time = closed_rate.time;
-                                let bar = Bar::from(closed_rate);
-                                if tx.send(bar).await.is_err() {
-                                    debug!(symbol = %sym_owned, "Bar stream receiver dropped; shutting down");
-                                    break;
+                    if !rates.is_empty() {
+                        if let Some(prev_closed_time) = last_closed_bar_time {
+                            for rate in &rates {
+                                if rate.time > prev_closed_time
+                                    && bar_end_time(timeframe, rate.time) <= now
+                                {
+                                    last_closed_bar_time = Some(rate.time);
+                                    last_current = None;
+                                    let bar = Bar::from(*rate);
+                                    if tx.send(Ok(bar)).await.is_err() {
+                                        debug!(symbol = %sym_owned, "Bar stream receiver dropped; shutting down");
+                                        return;
+                                    }
+                                }
+                            }
+                        } else {
+                            let newest_closed = rates
+                                .iter()
+                                .filter(|r| bar_end_time(timeframe, r.time) <= now)
+                                .map(|r| r.time)
+                                .max();
+                            if let Some(t) = newest_closed {
+                                last_closed_bar_time = Some(t);
+                            }
+                        }
+                    }
+
+                    if include_incomplete {
+                        if let Some(current_rate) = rates.last().copied() {
+                            if bar_end_time(timeframe, current_rate.time) > now {
+                                let current = Bar::from(current_rate);
+                                if last_current != Some(current) {
+                                    last_current = Some(current);
+                                    if tx.send(Ok(current)).await.is_err() {
+                                        debug!(symbol = %sym_owned, "Bar stream receiver dropped; shutting down");
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -543,11 +707,20 @@ pub fn stream_bars(
                             consecutive_errors,
                             "Bar stream exceeded maximum consecutive errors; terminating stream"
                         );
+                        let _ = tx
+                            .send(Err(StreamError::MaxConsecutiveErrors {
+                                count: consecutive_errors,
+                                last_error: e.to_string(),
+                            }))
+                            .await;
                         break;
                     }
                 }
                 Err(e) => {
                     error!(symbol = %sym_owned, error = %e, "Bar stream task joined with error");
+                    let _ = tx
+                        .send(Err(StreamError::TaskJoinError(e.to_string())))
+                        .await;
                     break;
                 }
             }
@@ -580,7 +753,7 @@ mod tests {
     /// consumer receives the OLDEST backlog first (not "latest value wins").
     #[test]
     fn drop_latest_discards_the_newest_tick_and_keeps_the_stale_backlog() {
-        let (tx, mut rx) = mpsc::channel::<Tick>(4);
+        let (tx, mut rx) = mpsc::channel::<Result<Tick, StreamError>>(4);
         for n in 1..=4 {
             assert_eq!(offer_drop_newest(&tx, tick(n)), Offer::Delivered);
         }
@@ -589,6 +762,7 @@ mod tests {
         assert_eq!(offer_drop_newest(&tx, tick(6)), Offer::DroppedNewest);
 
         let received: Vec<i64> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|r| r.ok())
             .map(|t| t.time_msc)
             .collect();
         assert_eq!(
@@ -599,12 +773,12 @@ mod tests {
 
         // once drained the feed resumes, leaving a gap (5, 6) as the only in-band signal
         assert_eq!(offer_drop_newest(&tx, tick(7)), Offer::Delivered);
-        assert_eq!(rx.try_recv().unwrap().time_msc, 7);
+        assert_eq!(rx.try_recv().unwrap().unwrap().time_msc, 7);
     }
 
     #[test]
     fn drop_latest_reports_a_closed_receiver() {
-        let (tx, rx) = mpsc::channel::<Tick>(4);
+        let (tx, rx) = mpsc::channel::<Result<Tick, StreamError>>(4);
         drop(rx);
         assert_eq!(offer_drop_newest(&tx, tick(1)), Offer::ReceiverClosed);
     }
@@ -615,5 +789,59 @@ mod tests {
         assert_eq!(c.backpressure, BackpressurePolicy::DropLatest);
         assert_eq!(c.buffer_size, 1024);
         assert_eq!(c.poll_interval, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn bar_end_time_calculates_correct_spans() {
+        let t0 = 1704067200; // 2024-01-01 00:00:00 UTC
+        assert_eq!(bar_end_time(Timeframe::M1, t0), t0 + 60);
+        assert_eq!(bar_end_time(Timeframe::M5, t0), t0 + 300);
+        assert_eq!(bar_end_time(Timeframe::H1, t0), t0 + 3600);
+        assert_eq!(bar_end_time(Timeframe::D1, t0), t0 + 86400);
+        assert_eq!(bar_end_time(Timeframe::W1, t0), t0 + 604800);
+
+        // MN1 in leap year 2024: Feb 1 to Mar 1 is 29 days
+        let feb_2024 = 1706745600; // 2024-02-01 00:00:00 UTC
+        let mar_2024 = 1709251200; // 2024-03-01 00:00:00 UTC
+        assert_eq!(bar_end_time(Timeframe::MN1, feb_2024), mar_2024);
+        assert_eq!(mar_2024 - feb_2024, 29 * 86400);
+
+        // MN1 Dec to Jan transition
+        let dec_2024 = 1733011200; // 2024-12-01 00:00:00 UTC
+        let jan_2025 = 1735689600; // 2025-01-01 00:00:00 UTC
+        assert_eq!(bar_end_time(Timeframe::MN1, dec_2024), jan_2025);
+        assert_eq!(jan_2025 - dec_2024, 31 * 86400);
+    }
+
+    #[tokio::test]
+    async fn tick_subscription_latest_mode_drains_to_freshest_on_lag() {
+        let bus = EventBus::new(64);
+        let rx = bus.subscribe_ticks("EURUSD");
+        let mut sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx);
+
+        // Send 100 ticks to overflow the 64-capacity channel
+        for i in 1..=100 {
+            bus.dispatch_tick(tick(i));
+        }
+
+        // recv() must yield the freshest quote (tick 100) and track all dropped ticks
+        let latest = sub.recv().await.expect("tick expected");
+        assert_eq!(latest.time_msc, 100);
+        assert_eq!(sub.dropped_ticks(), 99);
+    }
+
+    #[test]
+    fn tick_subscription_latest_mode_try_recv_drains_on_lag() {
+        let bus = EventBus::new(64);
+        let rx = bus.subscribe_ticks("EURUSD");
+        let mut sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx);
+
+        for i in 1..=100 {
+            bus.dispatch_tick(tick(i));
+        }
+
+        let latest = sub.try_recv().expect("tick expected");
+        assert_eq!(latest.time_msc, 100);
+        assert_eq!(sub.dropped_ticks(), 99);
     }
 }

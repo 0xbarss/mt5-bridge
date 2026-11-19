@@ -1,6 +1,6 @@
 [package]
 name = "mt5-bridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["0xbarss <https://github.com/0xbarss>"]
 description = "Fast, unofficial MetaTrader 5 API bridge and client for Rust (OHLCV, Account, Orders, Tick & Bar Streaming)"
@@ -19,6 +19,9 @@ serde_json = { version = "1.0", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.0", features = ["sync", "time", "rt", "macros"], optional = true }
 tracing = "0.1"
+static_assertions = "1.1"
+sha2 = "0.10"
+hex = "0.4"
 
 [features]
 default = ["async", "serde_json"]
@@ -30,4 +33,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "latency_harness"
+harness = false
+
+[[bench]]
+name = "mt5_extensive_benchmark"
+harness = false
+
+[[bench]]
+name = "push_probe"
 harness = false

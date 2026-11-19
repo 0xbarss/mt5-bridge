@@ -1,0 +1,50 @@
+; ============================================================================
+; MetaTrader 5 startup configuration for the mt5_bridge Expert Advisor.
+;
+; Copy this file to a private location (it contains the account password in
+; plain text) and launch the terminal with:
+;
+;   terminal64.exe /config:"C:\path\to\terminal.ini"
+;
+; or, on Linux/Wine:
+;
+;   ./launch_mt5.sh
+;
+; What this does:
+;   * logs the terminal in automatically ([Common])
+;   * pre-authorises algorithmic trading + DLL imports ([Experts])
+;   * opens a clean chart and attaches mt5_bridge to it ([StartUp])
+;   * loads the EA inputs from MQL5\Presets\mt5_bridge.set
+;
+; MT5 has no API to attach an EA to a chart at runtime, so an EA must still be
+; bound to a chart. This file makes that binding happen automatically at every
+; start, with no manual Navigator / drag-and-drop step.
+;
+; `ExpertParameters` is resolved relative to <Terminal_Data_Folder>\MQL5\Presets.
+; `Expert` is resolved relative to <Terminal_Data_Folder>\MQL5\Experts.
+; ============================================================================
+
+[Common]
+; Auto-login. Leave Login/Password/Server out to reuse the last saved account.
+Login=__LOGIN__
+Password=__PASSWORD__
+Server=__SERVER__
+KeepPrivate=1
+
+[Experts]
+; 1 = allow automated trading, 1 = allow DLL imports, 1 = enable EAs.
+AllowLiveTrading=1
+AllowDllImport=1
+Enabled=1
+; 0 = keep EAs running across account/profile changes.
+Account=0
+Profile=0
+
+[StartUp]
+; The EA executable: <data>\MQL5\Experts\mt5_bridge.ex5
+Expert=mt5_bridge
+; Inputs: <data>\MQL5\Presets\mt5_bridge.set
+ExpertParameters=mt5_bridge.set
+; Dedicated clean chart the EA runs on. Non-chart symbols are polled by OnTimer.
+Symbol=__SYMBOL__
+Period=__PERIOD__

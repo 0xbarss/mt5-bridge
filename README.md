@@ -126,7 +126,7 @@ The bridge operates across an Inter-Process Communication (IPC) boundary between
 
 1. **Local IPC Boundary**: The bridge uses Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
 2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected with an error unless preceded by a valid, authenticated `CMD_INIT` handshake.
-3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 5`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
+3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 7`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
 4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. `InpRequireSecret` is enabled by default (`true`), preventing the EA from starting without a secret configured (set `InpRequireSecret = false` to opt out). Provide the secret from Rust via [`Mt5Client::connect_with_secret`](#) or the `MT5_PIPE_SECRET` environment variable.
 5. **Explicit Pipe Security Descriptor (ACL)**: The named pipe is created with an explicit Win32 Security Descriptor (`InpPipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"`), restricting pipe access strictly to the owner user account, Local System, and Administrators, preventing unauthorized local users or cross-session processes from connecting.
 6. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.
@@ -277,15 +277,23 @@ In high-volatility market conditions (e.g. major news releases), quote or transa
 ## Key Features
 
 - **Account Overview**: Real-time balance, equity, margin, free margin, and floating profit/loss.
-- **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, and digits with in-memory caching.
+- **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, bid, ask, and digits with in-memory caching (Protocol v7: `bid`/`ask` from `Mt5SymInfo` 76B).
 - **Price & Lot Normalization**: Helpers to round prices to tick size and normalize lots to valid broker steps, with `is_valid_lot()` bounds checking against `NaN` and `Infinity`.
 - **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`). Includes chunking and retry loops to allow the broker server to synchronize deep history, plus `copy_rates_chunked_detailed()` reporting completeness.
-- **Real-Time Streaming**: Asynchronous tick streaming and completed (closed) bar streaming powered by Tokio channels with built-in deduplication and automatic cancellation.
+- **Real-Time Streaming**:
+  - Asynchronous tick streaming powered by Tokio channels with built-in deduplication and automatic cancellation.
+  - Closed-bar streaming via `stream_bars` with configurable lag-draining and backpressure.
+  - Bar push streaming via `subscribe_bars` / `unsubscribe_bars` for Protocol v7 real-time bar push events.
+- **Durable Write-Ahead Log**: `WalOrderStore` with binary `MT5WAL01` frame format, per-frame CRC32, tail crash recovery, snapshot compaction, and JSON migration from legacy stores.
+- **Position Book**: `PositionBook` with deal-level order attribution, weighted-average fill tracking, partial/full close transitions, magic-number filtering, and broker snapshot reconciliation.
+- **Session Supervisor & Gateway**: `Mt5Session` exponential-backoff reconnection supervisor; `Mt5Gateway` actor with 3-tier priority scheduling (critical / normal / low) and tick conflation.
 - **Order Execution**:
   - Instant market orders (`Buy` / `Sell`) with slippage tolerance and order filling flags.
   - Pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`) with expiration control.
   - Position closing by ticket.
   - Stop Loss and Take Profit modification with tick-aligned precision and retcode feedback.
+- **Security Hardening**: Absolute DLL path validation with SHA-256 hash verification; pipe name regex enforcement.
+- **Headless Autostart**: Shell and PowerShell scripts under `mql5/autostart/` for unattended terminal and EA launch.
 - **Multi-Terminal Ready**: Custom named pipe parameters allow running multiple MT5 terminals/accounts concurrently on the same machine.
 
 ---
@@ -300,11 +308,12 @@ mt5-bridge/
 ├── README.md                # Documentation (this file)
 │
 ├── mql5/
-│   └── Experts/
-│       └── mt5_bridge.mq5   # Expert Advisor source code (compiled to .ex5 in MetaEditor)
+│   ├── Experts/
+│   │   └── mt5_bridge.mq5   # Expert Advisor source code (compiled to .ex5 in MetaEditor)
+│   └── autostart/           # Headless autostart scripts for unattended terminal launch
 │
 ├── bridge_dll/              # C++ Named Pipe client DLL source & build scripts
-│   ├── mt5_bridge.h         # C header and packed struct definitions
+│   ├── mt5_bridge.h         # C header and packed struct definitions (Protocol v7)
 │   ├── mt5_bridge.cpp       # Pipe client implementation
 │   ├── CMakeLists.txt       # CMake build configuration
 │   ├── build.sh             # MinGW cross-compilation script (Linux -> Windows)
@@ -313,33 +322,45 @@ mt5-bridge/
 │
 ├── src/                     # Rust library crate
 │   ├── lib.rs               # Library entry point & re-exports
-│   ├── client.rs            # Safe Mt5Client implementation
+│   ├── constants.rs         # Protocol constants, magic numbers, version
+│   ├── sync.rs              # Shared atomic primitives and CLIENT_ACTIVE guard
+│   ├── client/              # Mt5Client modular subsystem (13 files)
+│   ├── types/               # Typed data structures split into 20 submodules
 │   ├── backend.rs           # TradingBackend trait, LiveMt5Backend & generic extensions
-│   ├── types.rs             # Typed data structures (Timeframe, Bar, Tick, etc.)
 │   ├── error.rs             # Typed error definitions & MT5 retcode translator
-│   ├── ffi.rs               # C FFI declarations and packed struct layouts
-│   ├── journal.rs           # Durable write-ahead order journaling (OrderStore, JsonFileStore)
-│   ├── reconciliation.rs    # OrderManager, SharedOrderManager & multi-pass reconciliation engine
-│   └── stream.rs            # Async Tokio tick, bar, trade & book depth streams
+│   ├── ffi.rs               # C FFI declarations and packed struct layouts (Protocol v7)
+│   ├── journal.rs           # WalOrderStore, MT5WAL01 binary format, CRC32, compaction
+│   ├── reconciliation/      # OrderManager, SharedOrderManager & multi-pass reconciliation
+│   └── stream.rs            # Async Tokio tick, bar push, trade & book depth streams
 │
-├── tests/                   # Comprehensive automated test suites (150+ tests)
+├── benches/                 # Criterion benchmark harnesses
+│   ├── latency_harness.rs   # p50/p90/p99/p99.9 latency distribution
+│   ├── mt5_extensive_benchmark.rs # Throughput and scalability
+│   └── push_probe.rs        # Push event latency, jitter, and fanout
+│
+├── tests/                   # Comprehensive automated test suites (200+ tests)
 │   ├── common/              # Shared test harness, mock backend & failure injectors
 │   ├── bridge_tests.rs      # Unit & data model tests (offline, CI-ready)
 │   ├── failure_injection.rs # Crash, disconnect, partial fill & idempotency matrix (55 tests)
 │   ├── live_integration.rs  # End-to-end live integration suite (requires running MT5)
-│   ├── protocol_consistency.rs # ABI wire layout & packed struct validation across Rust, C++, EA
-│   ├── protocol_fuzzing.rs  # Fuzz testing for binary deserialization & string inputs
-│   └── tick_arithmetic.rs   # Fixed-point tick arithmetic & decimal price rounding
+│   ├── pipe_mb1_concurrency.rs  # Pipe name validation, CLIENT_ACTIVE, and concurrency stress
+│   ├── position_book_tests.rs   # PositionBook attribution, fill, reconciliation, state recovery
+│   ├── protocol_consistency.rs  # ABI wire layout & packed struct validation across Rust, C++, EA
+│   ├── protocol_fuzzing.rs      # Fuzz testing for binary deserialization & string inputs
+│   ├── tick_arithmetic.rs       # Fixed-point tick arithmetic & decimal price rounding
+│   └── wal_journal_tests.rs     # WAL lifecycle, crash recovery, compaction, corruption rejection
 │
 └── examples/                # Runnable demonstration scripts
     ├── 01_account_info.rs   # Account balance, equity, margin, and margin level
-    ├── 02_symbol_info.rs    # Symbol specifications, lot rounding, and point value
+    ├── 02_symbol_info.rs    # Symbol specifications including Protocol v7 bid/ask
     ├── 03_fetch_rates.rs    # Historical OHLCV candles, raw rates, and bar metrics
     ├── 04_stream_ticks.rs   # Real-time live tick quote streaming
     ├── 05_order_send.rs     # Market orders, Stop Loss / Take Profit, and closing
     ├── 06_pending_order.rs  # Pending orders (BuyLimit) and order cancellation
     ├── 07_stream_bars.rs    # Real-time closed-bar streaming via Tokio channels
-    └── 08_chunked_history.rs# Deep history downloader with chunking & retry loops
+    ├── 08_chunked_history.rs# Deep history downloader with chunking & retry loops
+    ├── 09_stream_bars_push.rs # Protocol v7 real-time bar push subscription demo
+    └── 10_wal_order_store.rs  # WAL intent, update, recovery, and compaction demo
 ```
 
 ---
@@ -1413,7 +1434,7 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 
 | Command ID | Name | Description |
 | :---: | :--- | :--- |
-| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 5`) |
+| `1` | `CMD_INIT` | Handshake, authentication confirmation & protocol version (`PROTOCOL_VERSION = 7`) |
 | `2` | `CMD_SHUTDOWN` | Close named pipe and clean up |
 | `3` | `CMD_RATES` | Fetch historical OHLCV bars (`CopyRates`) clamped by buffer capacity |
 | `4` | `CMD_ACCOUNT` | Query balance, equity, margin, free margin |
@@ -1460,13 +1481,14 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 ### ABI Consistency & Wire Protocol Versioning
 
 The bridge enforces strict compile-time and runtime alignment across the C++ DLL, MQL5 EA, and Rust FFI:
-- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 5` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
+- **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 7` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
 - **Compile-Time ABI Assertions**: Struct byte layouts are validated via C++11 `static_assert` and Rust compile-time layout assertions:
   - `PacketHdr`: 12 bytes
   - `Mt5TickEvent`: 76 bytes
   - `Mt5TradeEvent`: 136 bytes
   - `Mt5BookEvent`: 64 bytes
-  - `Mt5SymInfo`: 60 bytes
+  - `Mt5SymInfo`: 76 bytes  *(Protocol v7: added `bid`/`ask`)*
+  - `Mt5BarEvent`: 96 bytes  *(Protocol v7)*
   - `Mt5Rate`: 60 bytes
   - `Mt5Tick`: 44 bytes
   - `Mt5TradeResult`: 44 bytes
@@ -1503,7 +1525,7 @@ cl /O2 /LD /DMT5_BRIDGE_EXPORTS mt5_bridge.cpp /link kernel32.lib /OUT:bin\mt5_b
 
 ## Testing & Quality Assurance
 
-The codebase includes an extensive automated test battery with over 150 tests across 6 dedicated test suites under [`tests/`](tests):
+The codebase includes an extensive automated test battery with over 200 tests across 10 dedicated test suites under [`tests/`](tests):
 
 ### 1. Offline Unit & Property Tests
 Comprehensive unit tests covering timeframe math, calendar intervals, lot rounding edge cases, valid lot checks with `NaN`/`Infinity` guards, price rounding, point value scaling, order builders, and trade status classifications:
@@ -1546,7 +1568,17 @@ Run the failure injection suite:
 cargo test --test failure_injection
 ```
 
-### 4. Live Integration Suite (Active MT5 Terminal)
+### 4. Position Book & WAL Integration Tests
+Offline integration suites exercising durable state without a live terminal:
+
+- **Position Book ([`tests/position_book_tests.rs`](tests/position_book_tests.rs))**: Multi-symbol attribution, weighted-average fill, partial/full close, `DealReason` roundtrip, SL/TP modification transitions, broker snapshot reconciliation, and Unknown→Open recovery.
+- **WAL Journal ([`tests/wal_journal_tests.rs`](tests/wal_journal_tests.rs))**: Full lifecycle and reopen, torn-tail crash recovery, compaction and pruning, mid-frame corruption rejection, position state persistence, and JSON migration.
+- **Pipe & Concurrency ([`tests/pipe_mb1_concurrency.rs`](tests/pipe_mb1_concurrency.rs))**: Pipe name validation stress, `CLIENT_ACTIVE` mutual exclusion, and `SharedOrderManager` high-concurrency stress.
+```bash
+cargo test --test position_book_tests --test wal_journal_tests --test pipe_mb1_concurrency
+```
+
+### 5. Live Integration Suite (Active MT5 Terminal)
 Tests executed directly against an active MetaTrader 5 terminal:
 ```bash
 # On Windows or via Wine:

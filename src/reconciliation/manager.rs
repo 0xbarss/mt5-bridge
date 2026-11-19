@@ -1,220 +1,21 @@
-//! High-level Order Manager and Reconciliation Engine.
-//!
-//! Provides:
-//! - Full order lifecycle tracking via [`OrderManager`].
-//! - Explicit order idempotency guarantees via client order IDs, with collision-safe identity
-//!   (see [`wire_id`]).
-//! - Post-disconnect and startup broker reconciliation via [`ReconciliationReport`] that
-//!   consults **positions, working orders and deal history**, compares attributes rather than
-//!   mere existence, and requires *repeated* absence before declaring an order unplaced.
-//! - Strict strategy ownership enforcement via magic numbers.
-//! - First-class handling of uncertain execution (`OrderState::Unknown`), including a
-//!   submission gate that stops naive retries while any outcome is unresolved.
-//! - Optional durable write-ahead journaling ([`OrderStore`]).
-//! - A thread-safe wrapper ([`SharedOrderManager`]) that structurally enforces the locking
-//!   discipline the idempotency guarantee depends on.
-//!
-//! # The core invariant
-//!
-//! ```text
-//! request outcome unknown  =>  do not retry  =>  reconcile  =>  determine broker state
-//! ```
-//!
-//! # Concurrency contract
-//!
-//! [`OrderManager`] has **no internal synchronization**: every mutating method takes
-//! `&mut self`. The idempotency guarantee ("a `client_order_id` reaches the broker at most
-//! once") holds only if *check → mark-submitting → transmit → record-outcome* happens
-//! atomically with respect to every other call on the same logical order book.
-//!
-//! * Single thread / single owner: nothing to do; the borrow checker enforces it.
-//! * Multiple threads: use [`SharedOrderManager`], which holds one lock across the entire
-//!   `submit_order` call. Do **not** hand-roll a `Mutex<OrderManager>` that is released
-//!   between the idempotency check and the network call, and do **not** run several
-//!   `OrderManager` instances for one logical strategy — either silently forfeits the
-//!   duplicate-submission protection. (`tests/failure_injection.rs` demonstrates both
-//!   failure modes.)
-
 use crate::backend::TradingBackend;
-use crate::error::{classify_retcode, Mt5Error, Result, RetcodeClass};
+use crate::error::{Mt5Error, Result};
 use crate::journal::OrderStore;
+use crate::reconciliation::classification::classify_send_error;
+use crate::reconciliation::state::{
+    BrokerSnapshot, LifecycleState, ReconciliationReport, SafetyPolicy, UnknownBlockScope,
+    DEAL_WINDOW_SLACK_SECS,
+};
 use crate::types::{
     comment_matches_client_order_id, parse_wire_id, wire_id, Deal, Level, OrderRequest, OrderState,
     OrderType, Position, RejectionEvidence, TrackedOrder, TradeEvent, TradeResult, WorkingOrder,
     MAX_CLIENT_ORDER_ID_BYTES,
 };
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
-
-/// Classify submission outcome to ensure only verifiably unplaced orders transition to Rejected.
-fn classify_send_error(err: &Mt5Error) -> (OrderState, Option<RejectionEvidence>, String) {
-    match err {
-        Mt5Error::TransmissionFailed(msg) => (
-            OrderState::Rejected,
-            Some(RejectionEvidence::NeverTransmitted),
-            msg.clone(),
-        ),
-        Mt5Error::PreflightRejected(msg) => (
-            OrderState::Rejected,
-            Some(RejectionEvidence::PreflightRejected),
-            msg.clone(),
-        ),
-        Mt5Error::OrderSendFailed {
-            retcode,
-            description,
-            ..
-        } => match classify_retcode(*retcode) {
-            RetcodeClass::DefinitivelyNotExecuted => (
-                OrderState::Rejected,
-                Some(RejectionEvidence::BrokerRetcode(*retcode as i32)),
-                format!("retcode {retcode}: {description}"),
-            ),
-            RetcodeClass::Ambiguous | RetcodeClass::Executed => (
-                OrderState::Unknown,
-                None,
-                format!("ambiguous retcode {retcode}: {description}"),
-            ),
-        },
-        Mt5Error::UnknownExecutionState { description, .. } => {
-            (OrderState::Unknown, None, description.clone())
-        }
-        other => (
-            OrderState::Unknown,
-            None,
-            format!("unverified transmission error: {other}"),
-        ),
-    }
-}
-
-/// Slack (seconds) added on both sides of the deal-history window fetched by
-/// [`OrderManager::reconcile`], to tolerate clock skew between this host and the broker.
-const DEAL_WINDOW_SLACK_SECS: i64 = 900;
-
-/// System operational and startup lifecycle states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LifecycleState {
-    /// System initialized, awaiting connection.
-    Starting,
-    /// Establishing connection to MT5 terminal/bridge.
-    Connecting,
-    /// Authenticating with bridge secret.
-    Authenticating,
-    /// Synchronizing symbol specifications and market data.
-    Syncing,
-    /// Reconciling open positions and orders against live broker state.
-    Reconciling,
-    /// Reconciled and ready to safely accept trading operations.
-    Ready,
-    /// Encountered communication failure, an unresolved unknown execution, or a mismatch
-    /// needing review.
-    Degraded,
-    /// Bridge shut down.
-    Stopped,
-}
-
-/// Which submissions are blocked while an order's execution outcome is unresolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum UnknownBlockScope {
-    /// Any unresolved order blocks every new submission from this strategy (default; safest —
-    /// after an ambiguous response the pipe is torn down anyway, and exposure is unknown).
-    Strategy,
-    /// An unresolved order blocks new submissions for the same symbol only.
-    Symbol,
-    /// Never block. A naive retry with a *new*
-    /// `client_order_id` can double exposure. Not recommended.
-    Disabled,
-}
-
-/// Safety knobs governing when an order's fate may be decided.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SafetyPolicy {
-    /// An `Unknown` order must be observed **absent** (no position, no working order, no
-    /// deal) in at least this many separate reconciliation passes before it is declared
-    /// rejected. MT5 state can become visible asynchronously after a reconnect, so a single
-    /// empty snapshot proves nothing. Minimum effective value is 1. Default: 3.
-    pub min_absent_observations: u32,
-    /// …and the first such observation must be at least this many seconds old. Default: 30.
-    pub min_absent_secs: i64,
-    /// If `true`, an order is never declared absent unless the pass included deal history
-    /// (an order can fill and its position close entirely between two polls, leaving neither
-    /// position nor working order behind). Default: `true`.
-    pub require_deal_history: bool,
-    /// Which submissions to block while any order is unresolved. Default: [`UnknownBlockScope::Strategy`].
-    pub unknown_block_scope: UnknownBlockScope,
-}
-
-impl Default for SafetyPolicy {
-    fn default() -> Self {
-        Self {
-            min_absent_observations: 3,
-            min_absent_secs: 30,
-            require_deal_history: true,
-            unknown_block_scope: UnknownBlockScope::Strategy,
-        }
-    }
-}
-
-/// Everything the broker reported at one instant, as input to a reconciliation pass.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct BrokerSnapshot {
-    pub positions: Vec<Position>,
-    pub pending_orders: Vec<WorkingOrder>,
-    /// Trade history covering the window of interest, or `None` if it could not be
-    /// obtained. `None` is *not* the same as an empty list: an empty list asserts "nothing
-    /// executed in this window".
-    pub deals: Option<Vec<Deal>>,
-}
-
-/// Comprehensive report produced by a reconciliation cycle.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ReconciliationReport {
-    /// All active open positions matching strategy magic number.
-    pub positions: Vec<Position>,
-    /// All working pending orders matching strategy magic number.
-    pub pending_orders: Vec<WorkingOrder>,
-    /// Orders that were resolved from `Unknown` or `Submitting` to a verified
-    /// `Reconciled` / `Accepted` / `PartiallyFilled` state with no attribute differences.
-    pub reconciled_orders: Vec<TrackedOrder>,
-    /// Tracked orders that were `Unknown` and are now **confirmed** absent from MT5 (repeatedly
-    /// observed, with deal history) and therefore `Rejected`.
-    pub absent_orders: Vec<TrackedOrder>,
-    /// Open positions found in MT5 that were not tracked by local memory.
-    pub foreign_positions: Vec<Position>,
-    /// UTC timestamp of the reconciliation pass.
-    pub timestamp: i64,
-    /// Orders that are **still `Unknown`** after this pass: not found anywhere yet but not
-    /// absent long enough / often enough to be declared unplaced, ambiguous, or lacking deal
-    /// history. They keep blocking new submissions. Reconcile again later.
-    #[serde(default)]
-    pub unresolved_orders: Vec<TrackedOrder>,
-    /// Orders that were found on the broker but whose volume, direction, protection, symbol or
-    /// magic differ from the request (state `Mismatched`; see [`TrackedOrder::mismatches`]).
-    #[serde(default)]
-    pub mismatched_orders: Vec<TrackedOrder>,
-    /// Whether this pass had deal history to consult.
-    #[serde(default)]
-    pub deal_history_available: bool,
-}
-
-impl ReconciliationReport {
-    /// Returns true if local and broker state agree completely: no confirmed-absent orders,
-    /// no foreign positions, nothing unresolved and nothing mismatched.
-    pub fn is_clean(&self) -> bool {
-        self.absent_orders.is_empty()
-            && self.foreign_positions.is_empty()
-            && self.unresolved_orders.is_empty()
-            && self.mismatched_orders.is_empty()
-    }
-
-    /// `true` if every previously uncertain order now has a definite outcome.
-    pub fn is_settled(&self) -> bool {
-        self.unresolved_orders.is_empty()
-    }
-}
 
 static ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -227,8 +28,8 @@ static ID_SEQ: AtomicU64 = AtomicU64::new(0);
 /// - Strategy ownership: enforces strategy magic number on all close, modify, and query actions.
 /// - An Unknown-execution submission gate and write-ahead journaling (see the module docs).
 ///
-/// See the [module-level concurrency contract](self#concurrency-contract): this type is
-/// single-owner; use [`SharedOrderManager`] to share it between threads.
+/// See the [module-level concurrency contract](crate::reconciliation#concurrency-contract): this type is
+/// single-owner; use [`SharedOrderManager`](crate::reconciliation::SharedOrderManager) to share it between threads.
 pub struct OrderManager {
     strategy_magic: u64,
     lifecycle: LifecycleState,
@@ -344,7 +145,7 @@ impl OrderManager {
     /// from concurrent threads. (A timestamp alone can repeat, and a repeated ID would be
     /// mistaken for an idempotent replay, silently dropping the second order.)
     pub fn generate_client_order_id() -> String {
-        let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let ts = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let seq = ID_SEQ.fetch_add(1, Ordering::Relaxed);
         format!("ord-{:x}-{:x}-{:x}", ts, std::process::id(), seq)
     }
@@ -405,6 +206,68 @@ impl OrderManager {
             Some(store) => store.save(&self.export_orders()),
             None => Ok(()),
         }
+    }
+
+    /// Journal pre-send order intent.
+    /// If the store is incremental, records only the intent with sync fsync;
+    /// otherwise falls back to a full snapshot via `persist()`.
+    pub fn persist_intent(&self, order: &TrackedOrder) -> Result<()> {
+        match &self.store {
+            Some(store) if store.is_incremental() => store.record_intent(order),
+            Some(_) => self.persist(),
+            None => Ok(()),
+        }
+    }
+
+    /// Journal an order update.
+    /// If the store is incremental, appends the update without full rewrite;
+    /// otherwise falls back to a full snapshot via `persist()`.
+    pub fn persist_update(&self, order: &TrackedOrder) -> Result<()> {
+        match &self.store {
+            Some(store) if store.is_incremental() => store.record_update(order),
+            Some(_) => self.persist(),
+            None => Ok(()),
+        }
+    }
+
+    /// Prunes terminal orders (Cancelled, Rejected, or Filled) older than `max_age_seconds`
+    /// from in-memory tracking and backing store.
+    ///
+    /// Returns the number of orders pruned.
+    pub fn prune_settled_orders(&mut self, max_age_seconds: i64) -> usize {
+        let now = Utc::now().timestamp();
+        let mut pruned_cids = Vec::new();
+
+        for (cid, order) in &self.orders {
+            let is_terminal = matches!(
+                order.state,
+                OrderState::Cancelled | OrderState::Rejected | OrderState::Filled
+            );
+            if is_terminal && (now - order.updated_at) >= max_age_seconds {
+                pruned_cids.push(cid.clone());
+            }
+        }
+
+        if pruned_cids.is_empty() {
+            return 0;
+        }
+
+        for cid in &pruned_cids {
+            if let Some(order) = self.orders.remove(cid) {
+                self.wire_index.remove(&order.wire_id);
+            }
+        }
+
+        let retained_cids: Vec<String> = self.orders.keys().cloned().collect();
+        if let Some(store) = &self.store {
+            if store.is_incremental() {
+                let _ = store.prune(&retained_cids);
+            } else {
+                let _ = store.save(&self.export_orders());
+            }
+        }
+
+        pruned_cids.len()
     }
 
     /// Validates strategy magic ownership and checks the idempotency guard for an order request.
@@ -536,7 +399,7 @@ impl OrderManager {
         let mut tracked = TrackedOrder::new(&req, &cid);
         tracked.mark_submitting();
         self.track_order(tracked.clone());
-        if let Err(e) = self.persist() {
+        if let Err(e) = self.persist_intent(&tracked) {
             // Not durable ⇒ not sent. Roll the in-memory record back so a retry is possible.
             self.orders.remove(&cid);
             self.wire_index.remove(&tracked.wire_id);
@@ -579,7 +442,7 @@ impl OrderManager {
                         tracked.state = OrderState::Rejected;
                         tracked.rejection = evidence;
                         tracked.error_message = Some(desc);
-                        tracked.updated_at = chrono::Utc::now().timestamp();
+                        tracked.updated_at = Utc::now().timestamp();
                         Err(e)
                     }
                     _ => Err(e),
@@ -588,149 +451,12 @@ impl OrderManager {
         };
 
         self.track_order(tracked.clone());
-        if let Err(e) = self.persist() {
+        if let Err(e) = self.persist_update(&tracked) {
             // The write-ahead record (Submitting → Unknown on restore) still protects us.
             error!(client_order_id = %cid, error = %e, "Failed to journal order outcome; durable state is stale but safe");
         }
 
         result.map(|()| tracked)
-    }
-
-    /// Explicitly retry an order that is **definitively** not on the broker.
-    ///
-    /// This is the only sanctioned way to re-attempt an intent after a failure. It refuses
-    /// unless `previous_client_order_id` is in a state that proves nothing was placed
-    /// (`Rejected` or `Cancelled`); in particular an order that is `Unknown`/`Submitting` must first be
-    /// resolved by [`reconcile`](Self::reconcile), and an order that is filled/working must
-    /// not be duplicated. The retry gets a fresh, traceable ID (`<previous>-r<N>`), preserving
-    /// idempotency for the new attempt. `req.symbol` and `req.order_type` must match the
-    /// original — this is a retry, not a new order.
-    pub fn retry_order<B: TradingBackend + ?Sized>(
-        &mut self,
-        client: &B,
-        previous_client_order_id: &str,
-        mut req: OrderRequest,
-    ) -> Result<TrackedOrder> {
-        let not_allowed = |reason: String| Mt5Error::RetryNotAllowed {
-            client_order_id: previous_client_order_id.to_string(),
-            reason,
-        };
-        let prev = self
-            .orders
-            .get(previous_client_order_id)
-            .ok_or_else(|| not_allowed("no such tracked order".to_string()))?;
-
-        match prev.state {
-            OrderState::Rejected | OrderState::Cancelled => {}
-            OrderState::Unknown | OrderState::Submitting | OrderState::Created => {
-                return Err(not_allowed(format!(
-                    "its broker-side outcome is unresolved ({:?}); reconcile until it is resolved before retrying",
-                    prev.state
-                )));
-            }
-            other => {
-                return Err(not_allowed(format!(
-                    "it is already {other:?} on the broker; retrying would duplicate exposure"
-                )));
-            }
-        }
-        if !prev.symbol.eq_ignore_ascii_case(&req.symbol) || prev.order_type != req.order_type {
-            return Err(not_allowed(
-                "retry must keep the original symbol and order type".to_string(),
-            ));
-        }
-
-        let prefix = format!("{previous_client_order_id}-r");
-        let attempt = self
-            .orders
-            .keys()
-            .filter(|k| k.starts_with(&prefix))
-            .count()
-            + 1;
-        let new_id = format!("{prefix}{attempt}");
-        if new_id.len() > MAX_CLIENT_ORDER_ID_BYTES {
-            return Err(not_allowed(format!(
-                "derived retry ID would exceed {MAX_CLIENT_ORDER_ID_BYTES} bytes; supply a shorter original ID"
-            )));
-        }
-        req.client_order_id = Some(new_id);
-        self.submit_order(client, req)
-    }
-
-    /// Operator acknowledgement of a `Mismatched` order: accept the broker-side reality
-    /// as the truth and move the order to `Reconciled` (or `Accepted` if nothing has filled).
-    pub fn acknowledge_mismatch(&mut self, client_order_id: &str) -> Result<TrackedOrder> {
-        let order = self.orders.get_mut(client_order_id).ok_or_else(|| {
-            Mt5Error::ReconciliationError(format!("no tracked order '{client_order_id}'"))
-        })?;
-        if order.state != OrderState::Mismatched {
-            return Err(Mt5Error::ReconciliationError(format!(
-                "order '{client_order_id}' is {:?}, not Mismatched",
-                order.state
-            )));
-        }
-        warn!(
-            client_order_id = %client_order_id,
-            mismatches = ?order.mismatches,
-            "Mismatch acknowledged by operator"
-        );
-        order.state = if order.filled_volume > 0.0 || order.position_ticket > 0 {
-            OrderState::Reconciled
-        } else {
-            OrderState::Accepted
-        };
-        order.mismatches.clear();
-        order.updated_at = chrono::Utc::now().timestamp();
-        let out = order.clone();
-        self.persist()?;
-        Ok(out)
-    }
-
-    /// Close an existing position owned by this strategy.
-    pub fn close_position<B: TradingBackend + ?Sized>(
-        &self,
-        client: &B,
-        ticket: u64,
-    ) -> Result<TradeResult> {
-        client.order_close_with_magic(ticket, self.strategy_magic)
-    }
-
-    /// Modify Stop Loss / Take Profit for a position or pending order owned by this strategy.
-    ///
-    /// On success the tracked order for that ticket (if any) has its requested protection
-    /// updated, so a later reconciliation does not flag the deliberate change as a mismatch.
-    pub fn modify_order<B: TradingBackend + ?Sized>(
-        &mut self,
-        client: &B,
-        ticket: u64,
-        stop_loss: Level,
-        take_profit: Level,
-    ) -> Result<TradeResult> {
-        let res =
-            client.order_modify_with_magic(ticket, self.strategy_magic, stop_loss, take_profit)?;
-        let mut touched = false;
-        for o in self.orders.values_mut() {
-            if o.position_ticket == ticket || o.order_ticket == ticket {
-                match stop_loss {
-                    Level::Set(v) => o.requested_stop_loss = v,
-                    Level::Clear => o.requested_stop_loss = 0.0,
-                    Level::Keep => {}
-                }
-                match take_profit {
-                    Level::Set(v) => o.requested_take_profit = v,
-                    Level::Clear => o.requested_take_profit = 0.0,
-                    Level::Keep => {}
-                }
-                o.updated_at = chrono::Utc::now().timestamp();
-                touched = true;
-            }
-        }
-        if touched {
-            if let Err(e) = self.persist() {
-                error!(ticket, error = %e, "Failed to journal SL/TP update");
-            }
-        }
-        Ok(res)
     }
 
     /// Reconcile local tracked orders against live MT5 positions, working orders and deal history.
@@ -750,7 +476,7 @@ impl OrderManager {
         client: &B,
     ) -> Result<ReconciliationReport> {
         self.lifecycle = LifecycleState::Reconciling;
-        let now = chrono::Utc::now().timestamp();
+        let now = Utc::now().timestamp();
 
         let snapshot = match self.fetch_snapshot(client, now) {
             Ok(s) => s,
@@ -840,7 +566,7 @@ impl OrderManager {
                 pending_orders: live_orders,
                 deals: None,
             },
-            chrono::Utc::now().timestamp(),
+            Utc::now().timestamp(),
         )
     }
 
@@ -857,7 +583,7 @@ impl OrderManager {
                 pending_orders: live_orders,
                 deals: Some(deals),
             },
-            chrono::Utc::now().timestamp(),
+            Utc::now().timestamp(),
         )
     }
 
@@ -1156,117 +882,239 @@ impl OrderManager {
             if let Some(ord) = self.orders.get_mut(&id) {
                 ord.update_from_trade_event(ev);
                 let cloned = ord.clone();
-                self.persist()?;
+                self.persist_update(&cloned)?;
                 return Ok(Some(cloned));
             }
         }
 
         Ok(None)
     }
-}
 
-/// Thread-safe handle to an [`OrderManager`] that **structurally** enforces the locking
-/// discipline the idempotency guarantee depends on.
-///
-/// Every operation holds a single mutex for its entire duration — for
-/// [`submit_order`](Self::submit_order) that means idempotency check, write-ahead record,
-/// broker call and outcome recording are one atomic step with respect to every other clone of
-/// this handle. Concurrent submissions of the same `client_order_id` therefore result in
-/// exactly one broker request; the others receive the existing tracked order.
-///
-/// Because the lock is held across the broker call, submissions are serialized. That matches
-/// the underlying DLL, which already serializes all pipe I/O behind one critical section.
-///
-/// Cloning is cheap (`Arc`). A poisoned lock (a panic while holding it) is recovered rather
-/// than propagated: state changes are simple map inserts, and the write-ahead `Submitting`
-/// record means an interrupted submission is resolved by reconciliation like any other crash.
-#[derive(Clone)]
-pub struct SharedOrderManager {
-    inner: Arc<Mutex<OrderManager>>,
-}
-
-impl SharedOrderManager {
-    pub fn new(manager: OrderManager) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(manager)),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, OrderManager> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Run `f` with exclusive access to the underlying manager.
-    pub fn with<R>(&self, f: impl FnOnce(&mut OrderManager) -> R) -> R {
-        f(&mut self.lock())
-    }
-
-    /// See [`OrderManager::submit_order`]. The lock is held for the whole call.
-    pub fn submit_order<B: TradingBackend + ?Sized>(
-        &self,
-        client: &B,
-        req: OrderRequest,
-    ) -> Result<TrackedOrder> {
-        self.lock().submit_order(client, req)
-    }
-
-    /// See [`OrderManager::retry_order`].
+    /// Explicitly retry an order that is **definitively** not on the broker.
+    ///
+    /// This is the only sanctioned way to re-attempt an intent after a failure. It refuses
+    /// unless `previous_client_order_id` is in a state that proves nothing was placed
+    /// (`Rejected` or `Cancelled`); in particular an order that is `Unknown`/`Submitting` must first be
+    /// resolved by [`reconcile`](Self::reconcile), and an order that is filled/working must
+    /// not be duplicated. The retry gets a fresh, traceable ID (`<previous>-r<N>`), preserving
+    /// idempotency for the new attempt. `req.symbol` and `req.order_type` must match the
+    /// original — this is a retry, not a new order.
     pub fn retry_order<B: TradingBackend + ?Sized>(
-        &self,
+        &mut self,
         client: &B,
         previous_client_order_id: &str,
-        req: OrderRequest,
+        mut req: OrderRequest,
     ) -> Result<TrackedOrder> {
-        self.lock()
-            .retry_order(client, previous_client_order_id, req)
+        let not_allowed = |reason: String| Mt5Error::RetryNotAllowed {
+            client_order_id: previous_client_order_id.to_string(),
+            reason,
+        };
+        let prev = self
+            .orders
+            .get(previous_client_order_id)
+            .ok_or_else(|| not_allowed("no such tracked order".to_string()))?;
+
+        match prev.state {
+            OrderState::Rejected | OrderState::Cancelled => {}
+            OrderState::Unknown | OrderState::Submitting | OrderState::Created => {
+                return Err(not_allowed(format!(
+                    "its broker-side outcome is unresolved ({:?}); reconcile until it is resolved before retrying",
+                    prev.state
+                )));
+            }
+            other => {
+                return Err(not_allowed(format!(
+                    "it is already {other:?} on the broker; retrying would duplicate exposure"
+                )));
+            }
+        }
+        if !prev.symbol.eq_ignore_ascii_case(&req.symbol) || prev.order_type != req.order_type {
+            return Err(not_allowed(
+                "retry must keep the original symbol and order type".to_string(),
+            ));
+        }
+
+        let prefix = format!("{previous_client_order_id}-r");
+        let attempt = self
+            .orders
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .count()
+            + 1;
+        let new_id = format!("{prefix}{attempt}");
+        if new_id.len() > MAX_CLIENT_ORDER_ID_BYTES {
+            return Err(not_allowed(format!(
+                "derived retry ID would exceed {MAX_CLIENT_ORDER_ID_BYTES} bytes; supply a shorter original ID"
+            )));
+        }
+        req.client_order_id = Some(new_id);
+        self.submit_order(client, req)
     }
 
-    /// See [`OrderManager::reconcile`].
-    pub fn reconcile<B: TradingBackend + ?Sized>(
-        &self,
-        client: &B,
-    ) -> Result<ReconciliationReport> {
-        self.lock().reconcile(client)
+    /// Operator acknowledgement of a `Mismatched` order: accept the broker-side reality
+    /// as the truth and move the order to `Reconciled` (or `Accepted` if nothing has filled).
+    pub fn acknowledge_mismatch(&mut self, client_order_id: &str) -> Result<TrackedOrder> {
+        let order = self.orders.get_mut(client_order_id).ok_or_else(|| {
+            Mt5Error::ReconciliationError(format!("no tracked order '{client_order_id}'"))
+        })?;
+        if order.state != OrderState::Mismatched {
+            return Err(Mt5Error::ReconciliationError(format!(
+                "order '{client_order_id}' is {:?}, not Mismatched",
+                order.state
+            )));
+        }
+        warn!(
+            client_order_id = %client_order_id,
+            mismatches = ?order.mismatches,
+            "Mismatch acknowledged by operator"
+        );
+        order.state = if order.filled_volume > 0.0 || order.position_ticket > 0 {
+            OrderState::Reconciled
+        } else {
+            OrderState::Accepted
+        };
+        order.mismatches.clear();
+        order.updated_at = chrono::Utc::now().timestamp();
+        let out = order.clone();
+        self.persist()?;
+        Ok(out)
     }
 
-    /// See [`OrderManager::close_position`].
+    /// Close an existing position owned by this strategy.
+    ///
+    /// If the close request fails ambiguously (e.g. pipe timeout or lost response),
+    /// the tracked order transitions to [`OrderState::Unknown`] and the manager lifecycle
+    /// degrades to [`LifecycleState::Degraded`] to prevent duplicate order activity
+    /// until reconciled against broker deals and open positions.
     pub fn close_position<B: TradingBackend + ?Sized>(
-        &self,
+        &mut self,
         client: &B,
         ticket: u64,
     ) -> Result<TradeResult> {
-        self.lock().close_position(client, ticket)
+        let outcome = client.order_close_with_magic(ticket, self.strategy_magic);
+        match outcome {
+            Ok(res) => {
+                let mut touched = false;
+                for o in self.orders.values_mut() {
+                    if o.position_ticket == ticket || o.order_ticket == ticket {
+                        o.state = OrderState::Cancelled;
+                        o.updated_at = chrono::Utc::now().timestamp();
+                        touched = true;
+                    }
+                }
+                if touched {
+                    for o in self.orders.values() {
+                        if o.position_ticket == ticket || o.order_ticket == ticket {
+                            if let Err(e) = self.persist_update(o) {
+                                error!(ticket, error = %e, "Failed to journal position close");
+                            }
+                        }
+                    }
+                }
+                Ok(res)
+            }
+            Err(e) => {
+                let (new_state, _evidence, desc) = classify_send_error(&e);
+                if new_state == OrderState::Unknown {
+                    let mut touched = false;
+                    for o in self.orders.values_mut() {
+                        if o.position_ticket == ticket || o.order_ticket == ticket {
+                            o.mark_unknown(&desc);
+                            touched = true;
+                        }
+                    }
+                    self.lifecycle = LifecycleState::Degraded;
+                    warn!(
+                        ticket,
+                        "close_position execution outcome is UNKNOWN; degraded lifecycle until reconciled"
+                    );
+                    if touched {
+                        for o in self.orders.values() {
+                            if o.position_ticket == ticket || o.order_ticket == ticket {
+                                if let Err(pe) = self.persist_update(o) {
+                                    error!(ticket, error = %pe, "Failed to journal unknown close state");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 
-    /// See [`OrderManager::modify_order`].
+    /// Modify Stop Loss / Take Profit for a position or pending order owned by this strategy.
+    ///
+    /// On success the tracked order for that ticket (if any) has its requested protection
+    /// updated, so a later reconciliation does not flag the deliberate change as a mismatch.
+    /// If the modify request fails with an ambiguous outcome, the order is marked
+    /// as [`OrderState::Unknown`] and the lifecycle degrades to [`LifecycleState::Degraded`].
     pub fn modify_order<B: TradingBackend + ?Sized>(
-        &self,
+        &mut self,
         client: &B,
         ticket: u64,
         stop_loss: Level,
         take_profit: Level,
     ) -> Result<TradeResult> {
-        self.lock()
-            .modify_order(client, ticket, stop_loss, take_profit)
-    }
-
-    /// Snapshot of one tracked order.
-    pub fn get_order(&self, client_order_id: &str) -> Option<TrackedOrder> {
-        self.lock().get_order(client_order_id).cloned()
-    }
-
-    /// Snapshot of all tracked orders.
-    pub fn export_orders(&self) -> Vec<TrackedOrder> {
-        self.lock().export_orders()
-    }
-
-    /// Current lifecycle state.
-    pub fn lifecycle(&self) -> LifecycleState {
-        self.lock().lifecycle()
-    }
-
-    /// Apply an asynchronous broker `TradeEvent` (protocol v5+ push model).
-    pub fn apply_trade_event(&self, ev: &TradeEvent) -> Result<Option<TrackedOrder>> {
-        self.lock().apply_trade_event(ev)
+        let outcome =
+            client.order_modify_with_magic(ticket, self.strategy_magic, stop_loss, take_profit);
+        match outcome {
+            Ok(res) => {
+                let mut touched = false;
+                for o in self.orders.values_mut() {
+                    if o.position_ticket == ticket || o.order_ticket == ticket {
+                        match stop_loss {
+                            Level::Set(v) => o.requested_stop_loss = v,
+                            Level::Clear => o.requested_stop_loss = 0.0,
+                            Level::Keep => {}
+                        }
+                        match take_profit {
+                            Level::Set(v) => o.requested_take_profit = v,
+                            Level::Clear => o.requested_take_profit = 0.0,
+                            Level::Keep => {}
+                        }
+                        o.updated_at = chrono::Utc::now().timestamp();
+                        touched = true;
+                    }
+                }
+                if touched {
+                    for o in self.orders.values() {
+                        if o.position_ticket == ticket || o.order_ticket == ticket {
+                            if let Err(e) = self.persist_update(o) {
+                                error!(ticket, error = %e, "Failed to journal SL/TP update");
+                            }
+                        }
+                    }
+                }
+                Ok(res)
+            }
+            Err(e) => {
+                let (new_state, _evidence, desc) = classify_send_error(&e);
+                if new_state == OrderState::Unknown {
+                    let mut touched = false;
+                    for o in self.orders.values_mut() {
+                        if o.position_ticket == ticket || o.order_ticket == ticket {
+                            o.mark_unknown(format!("modify_order ambiguous state: {desc}"));
+                            touched = true;
+                        }
+                    }
+                    self.lifecycle = LifecycleState::Degraded;
+                    warn!(
+                        ticket,
+                        "modify_order execution outcome is UNKNOWN; degraded lifecycle until reconciled"
+                    );
+                    if touched {
+                        for o in self.orders.values() {
+                            if o.position_ticket == ticket || o.order_ticket == ticket {
+                                if let Err(pe) = self.persist_update(o) {
+                                    error!(ticket, error = %pe, "Failed to journal unknown modify state");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 }

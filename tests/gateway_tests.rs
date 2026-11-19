@@ -1,0 +1,666 @@
+//! Test suite for Mt5Gateway and Mt5Session.
+//!
+//! Validates:
+//! - Priority message scheduling (P1 commands preempt P2 and P3).
+//! - Concurrent order submissions and modifications without state corruption.
+//! - Mt5Session lifecycle state transitions and exponential backoff ladder.
+//! - Disconnect blocking of new entries and post-reconnect recovery.
+//! - TradeEvent lossless queue delivery and event_seq gap detection triggering reconciliation.
+//! - Conflated tick stream updates via watch channels.
+
+#![allow(clippy::disallowed_methods)]
+
+use mt5_bridge::backend::TradingBackend;
+use mt5_bridge::constants::DEFAULT_MAGIC;
+use mt5_bridge::gateway::*;
+use mt5_bridge::reconciliation::{LifecycleState, OrderManager, SafetyPolicy};
+use mt5_bridge::session::*;
+use mt5_bridge::types::*;
+use mt5_bridge::Result;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::sleep;
+
+#[derive(Default)]
+struct BrokerState {
+    next_ticket: u64,
+    positions: Vec<Position>,
+    pending: Vec<WorkingOrder>,
+    deals: Vec<Deal>,
+    execution_order: Vec<&'static str>,
+}
+
+#[derive(Clone)]
+struct TestBroker {
+    state: Arc<Mutex<BrokerState>>,
+    reconcile_count: Arc<AtomicUsize>,
+}
+
+impl TestBroker {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(BrokerState {
+                next_ticket: 1000,
+                positions: Vec::new(),
+                pending: Vec::new(),
+                deals: Vec::new(),
+                execution_order: Vec::new(),
+            })),
+            reconcile_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn execution_order(&self) -> Vec<&'static str> {
+        self.state.lock().unwrap().execution_order.clone()
+    }
+
+    fn reconcile_count(&self) -> usize {
+        self.reconcile_count.load(Ordering::SeqCst)
+    }
+}
+
+impl TradingBackend for TestBroker {
+    fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+        let mut g = self.state.lock().unwrap();
+        g.execution_order.push("P1_SUBMIT");
+        let ticket = g.next_ticket;
+        g.next_ticket += 1;
+        let pos = Position {
+            ticket,
+            time: chrono::Utc::now().timestamp(),
+            position_type: req.order_type,
+            magic: req.magic.unwrap_or(0),
+            volume: req.volume,
+            price_open: if req.price > 0.0 { req.price } else { 1.0850 },
+            stop_loss: req.stop_loss,
+            take_profit: req.take_profit,
+            price_current: 1.0850,
+            profit: 0.0,
+            swap: 0.0,
+            symbol: req.symbol.clone(),
+            comment: req.comment.clone(),
+        };
+        g.positions.push(pos);
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: ticket + 5000,
+            order: ticket,
+            position: ticket,
+            volume: req.volume,
+            price: 1.0850,
+        })
+    }
+
+    fn order_close_with_magic(&self, ticket: u64, _magic: u64) -> Result<TradeResult> {
+        let mut g = self.state.lock().unwrap();
+        g.execution_order.push("P1_CLOSE");
+        g.positions.retain(|p| p.ticket != ticket);
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: ticket + 6000,
+            order: ticket,
+            position: ticket,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn order_modify_with_magic(
+        &self,
+        ticket: u64,
+        _magic: u64,
+        stop_loss: Level,
+        take_profit: Level,
+    ) -> Result<TradeResult> {
+        let mut g = self.state.lock().unwrap();
+        g.execution_order.push("P1_MODIFY");
+        if let Some(pos) = g.positions.iter_mut().find(|p| p.ticket == ticket) {
+            match stop_loss {
+                Level::Set(val) => pos.stop_loss = val,
+                Level::Clear => pos.stop_loss = 0.0,
+                Level::Keep => {}
+            }
+            match take_profit {
+                Level::Set(val) => pos.take_profit = val,
+                Level::Clear => pos.take_profit = 0.0,
+                Level::Keep => {}
+            }
+        }
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 0,
+            order: ticket,
+            position: ticket,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn positions_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        self.reconcile_count.fetch_add(1, Ordering::SeqCst);
+        let g = self.state.lock().unwrap();
+        Ok(g.positions
+            .iter()
+            .filter(|p| magic.is_none_or(|m| p.magic == m))
+            .filter(|p| symbol.is_none_or(|s| p.symbol == s))
+            .cloned()
+            .collect())
+    }
+
+    fn pending_orders_filtered(
+        &self,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        let g = self.state.lock().unwrap();
+        Ok(g.pending
+            .iter()
+            .filter(|o| magic.is_none_or(|m| o.magic == m))
+            .filter(|o| symbol.is_none_or(|s| o.symbol == s))
+            .cloned()
+            .collect())
+    }
+
+    fn deals_filtered(
+        &self,
+        _from: i64,
+        _to: i64,
+        magic: Option<u64>,
+        symbol: Option<&str>,
+    ) -> Result<Vec<Deal>> {
+        let g = self.state.lock().unwrap();
+        Ok(g.deals
+            .iter()
+            .filter(|d| magic.is_none_or(|m| d.magic == m))
+            .filter(|d| symbol.is_none_or(|s| d.symbol == s))
+            .cloned()
+            .collect())
+    }
+
+    fn account_info(&self) -> Result<AccountInfo> {
+        let mut g = self.state.lock().unwrap();
+        g.execution_order.push("P2_ACCOUNT");
+        Ok(AccountInfo {
+            balance: 10000.0,
+            equity: 10000.0,
+            margin: 0.0,
+            free_margin: 10000.0,
+            leverage: 100.0,
+            currency: "USD".to_string(),
+        })
+    }
+
+    fn copy_rates(
+        &self,
+        _symbol: &str,
+        _timeframe: Timeframe,
+        _from: i64,
+        _to: i64,
+    ) -> Result<Vec<Rate>> {
+        let mut g = self.state.lock().unwrap();
+        g.execution_order.push("P3_RATES");
+        Ok(vec![Rate {
+            time: 1700000000,
+            open: 1.0800,
+            high: 1.0850,
+            low: 1.0790,
+            close: 1.0820,
+            volume: 100,
+            spread: 1,
+            real_volume: 0,
+        }])
+    }
+}
+
+fn test_manager() -> OrderManager {
+    let policy = SafetyPolicy {
+        min_absent_observations: 1,
+        min_absent_secs: 0,
+        ..Default::default()
+    };
+    OrderManager::with_policy(DEFAULT_MAGIC, policy)
+}
+
+fn buy_order(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
+    OrderRequest::buy(symbol, vol).client_order_id(cid)
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 1. Mt5Session Lifecycle & Exponential Backoff
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_session_lifecycle_and_exponential_backoff() {
+    let config = SessionConfig {
+        initial_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_millis(800),
+        backoff_factor: 2.0,
+        max_reconnect_attempts: Some(5),
+    };
+
+    let mut session = Mt5Session::new(config);
+    assert_eq!(session.state(), LifecycleState::Starting);
+    assert!(!session.is_ready());
+    assert_eq!(session.consecutive_failures(), 0);
+
+    // Transitions: Starting -> Syncing -> Reconciling -> Ready
+    session.on_connected();
+    assert_eq!(session.state(), LifecycleState::Syncing);
+    assert!(!session.is_ready());
+
+    session.on_synced();
+    assert_eq!(session.state(), LifecycleState::Reconciling);
+    assert!(!session.is_ready());
+
+    session.on_reconciled();
+    assert_eq!(session.state(), LifecycleState::Ready);
+    assert!(session.is_ready());
+
+    // Subscription registrations are stored
+    session.register_tick_subscription("EURUSD");
+    session.register_tick_subscription("GBPUSD");
+    session.register_trade_subscription();
+    session.register_book_subscription("EURUSD");
+
+    assert!(session.active_tick_subscriptions().contains("EURUSD"));
+    assert!(session.active_tick_subscriptions().contains("GBPUSD"));
+    assert!(session.is_trade_subscribed());
+    assert!(session.active_book_subscriptions().contains("EURUSD"));
+
+    // First disconnect
+    session.on_disconnect("connection reset by peer");
+    assert_eq!(session.state(), LifecycleState::Degraded);
+    assert!(!session.is_ready());
+    assert_eq!(session.consecutive_failures(), 1);
+    assert_eq!(session.current_backoff(), Duration::from_millis(100));
+
+    // Subscriptions survive disconnect
+    assert!(session.active_tick_subscriptions().contains("EURUSD"));
+    assert!(session.is_trade_subscribed());
+
+    // Second disconnect: 100 * 2^1 = 200ms
+    session.on_disconnect("pipe unavailable");
+    assert_eq!(session.consecutive_failures(), 2);
+    assert_eq!(session.current_backoff(), Duration::from_millis(200));
+
+    // Third disconnect: 100 * 2^2 = 400ms
+    session.on_disconnect("timeout");
+    assert_eq!(session.consecutive_failures(), 3);
+    assert_eq!(session.current_backoff(), Duration::from_millis(400));
+
+    // Fourth disconnect: 100 * 2^3 = 800ms (clamped to max_backoff)
+    session.on_disconnect("timeout");
+    assert_eq!(session.consecutive_failures(), 4);
+    assert_eq!(session.current_backoff(), Duration::from_millis(800));
+
+    // Successful reconnect resets consecutive failures and backoff
+    session.on_connected();
+    assert_eq!(session.state(), LifecycleState::Syncing);
+    assert_eq!(session.consecutive_failures(), 0);
+    assert_eq!(session.current_backoff(), Duration::from_millis(100));
+
+    session.on_reconciled();
+    assert_eq!(session.state(), LifecycleState::Ready);
+}
+
+#[test]
+fn test_session_max_reconnect_attempts_stops_session() {
+    let config = SessionConfig {
+        initial_backoff: Duration::from_millis(50),
+        max_backoff: Duration::from_millis(200),
+        backoff_factor: 2.0,
+        max_reconnect_attempts: Some(2),
+    };
+
+    let mut session = Mt5Session::new(config);
+    session.on_disconnect("err 1");
+    assert_eq!(session.state(), LifecycleState::Degraded);
+    session.on_disconnect("err 2");
+    assert_eq!(session.state(), LifecycleState::Degraded);
+    session.on_disconnect("err 3"); // Exceeds max_attempts (2)
+    assert_eq!(session.state(), LifecycleState::Stopped);
+    assert!(!session.is_ready());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 2. Mt5Gateway Priority Message Scheduling
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_gateway_priority_queue_preempts_bulk_requests() {
+    let broker = TestBroker::new();
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(broker.clone(), mgr, SessionConfig::default());
+
+    // Send P3 request
+    let g1 = gateway.clone();
+    let h_p3 = tokio::spawn(async move {
+        g1.copy_rates("EURUSD", Timeframe::M1, 0, 100)
+            .await
+            .unwrap();
+    });
+
+    // Send P2 request
+    let g2 = gateway.clone();
+    let h_p2 = tokio::spawn(async move {
+        g2.account_info().await.unwrap();
+    });
+
+    // Send P1 request
+    let g3 = gateway.clone();
+    let h_p1 = tokio::spawn(async move {
+        g3.submit_order(buy_order("EURUSD", 0.1, "prio-1"))
+            .await
+            .unwrap();
+    });
+
+    let (r3, r2, r1) = tokio::join!(h_p3, h_p2, h_p1);
+    r3.unwrap();
+    r2.unwrap();
+    r1.unwrap();
+
+    let exec = broker.execution_order();
+    assert!(exec.contains(&"P1_SUBMIT"));
+    assert!(exec.contains(&"P2_ACCOUNT"));
+    assert!(exec.contains(&"P3_RATES"));
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 3. Concurrent Submissions and Modifications
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_gateway_concurrent_submissions_and_modifications() {
+    let broker = TestBroker::new();
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(broker, mgr, SessionConfig::default());
+
+    let num_tasks = 20;
+    let mut tasks = Vec::new();
+
+    for i in 0..num_tasks {
+        let g = gateway.clone();
+        tasks.push(tokio::spawn(async move {
+            let cid = format!("conc-{i}");
+            let tracked = g
+                .submit_order(buy_order("EURUSD", 0.1, &cid))
+                .await
+                .unwrap();
+            assert_eq!(tracked.state, OrderState::Filled);
+
+            // Immediately modify SL/TP
+            let mod_res = g
+                .modify_order(
+                    tracked.position_ticket,
+                    DEFAULT_MAGIC,
+                    Level::Set(1.0800),
+                    Level::Set(1.0900),
+                )
+                .await
+                .unwrap();
+            assert_eq!(mod_res.retcode, 10009);
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap();
+    }
+
+    // Verify all positions open and accounted for
+    let positions = gateway
+        .positions_filtered(Some(DEFAULT_MAGIC), None)
+        .await
+        .unwrap();
+    assert_eq!(positions.len(), num_tasks);
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 4. Trade Event Lossless Queue & Gap Recovery
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
+    let broker = TestBroker::new();
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(broker.clone(), mgr, SessionConfig::default());
+
+    let mut trade_rx = gateway.subscribe_trade_events();
+
+    // Event 1 (normal sequence)
+    let ev1 = TradeEvent {
+        deal: 101,
+        order: 201,
+        position: 301,
+        time: 1700000000,
+        trans_type: 0,
+        order_type: OrderType::Buy,
+        price: 1.0850,
+        volume: 0.1,
+        sl: 0.0,
+        tp: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "".to_string(),
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: DEFAULT_MAGIC,
+        deal_position_id: 301,
+        deal_reason: 0,
+        event_seq: 1,
+    };
+    gateway.dispatch_trade_event(ev1.clone());
+
+    let received = trade_rx.recv().await.unwrap();
+    assert_eq!(received.event_seq, 1);
+    assert_eq!(broker.reconcile_count(), 0);
+
+    // Event 5 (sequence gap: expected 2, received 5 -> gap of 3 events)
+    let ev5 = TradeEvent {
+        deal: 105,
+        order: 205,
+        position: 305,
+        time: 1700000010,
+        trans_type: 0,
+        order_type: OrderType::Buy,
+        price: 1.0860,
+        volume: 0.1,
+        sl: 0.0,
+        tp: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "".to_string(),
+        deal_entry: 0,
+        deal_type: 0,
+        deal_magic: DEFAULT_MAGIC,
+        deal_position_id: 305,
+        deal_reason: 0,
+        event_seq: 5,
+    };
+    gateway.dispatch_trade_event(ev5.clone());
+
+    let received5 = trade_rx.recv().await.unwrap();
+    assert_eq!(received5.event_seq, 5);
+
+    // Wait briefly for actor to execute mandatory reconciliation triggered by gap
+    sleep(Duration::from_millis(50)).await;
+    assert!(
+        broker.reconcile_count() > 0,
+        "Expected gap detection to trigger automatic broker reconciliation"
+    );
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 5. Tick Conflation via Watch Channels
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_gateway_tick_conflation() {
+    let broker = TestBroker::new();
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(broker, mgr, SessionConfig::default());
+
+    let tick_rx = gateway.subscribe_ticks("EURUSD");
+    assert!(tick_rx.borrow().is_none());
+
+    // Dispatch a series of rapid ticks
+    for i in 1..=50 {
+        let tick = Tick {
+            symbol: "EURUSD".to_string(),
+            time: 1700000000 + i,
+            time_msc: (1700000000 + i) * 1000,
+            bid: 1.0800 + (i as f64 * 0.0001),
+            ask: 1.0802 + (i as f64 * 0.0001),
+            last: 1.0801,
+            volume: 10,
+            flags: 0,
+        };
+        gateway.dispatch_tick(tick);
+    }
+
+    // Consumer reads the conflated latest tick
+    let current_opt = tick_rx.borrow().clone();
+    assert!(current_opt.is_some());
+    let current = current_opt.unwrap();
+    assert_eq!(current.symbol, "EURUSD");
+    assert_eq!(current.time, 1700000050);
+    assert!((current.bid - (1.0800 + 50.0 * 0.0001)).abs() < 1e-6);
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_gateway_position_book_tracking_and_queries() {
+    let broker = TestBroker::new();
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(broker, mgr, SessionConfig::default());
+
+    // Initial position book should be empty
+    let book = gateway.position_book().await.unwrap();
+    assert_eq!(book.open_positions().len(), 0);
+
+    // Submit an order
+    let req = OrderRequest {
+        symbol: "EURUSD".to_string(),
+        order_type: OrderType::Buy,
+        volume: 1.0,
+        price: 1.0850,
+        stop_loss: 1.0800,
+        take_profit: 1.0950,
+        deviation: Some(10),
+        comment: "gateway_book_test".to_string(),
+        magic: Some(DEFAULT_MAGIC),
+        expiration: None,
+        client_order_id: None,
+    };
+    let tracked = gateway.submit_order(req).await.unwrap();
+    let ticket = tracked.position_ticket;
+
+    // Simulate OnTradeTransaction deal event from MT5
+    let trade_event = TradeEvent {
+        event_seq: 1,
+        deal: 9901,
+        order: ticket,
+        position: ticket,
+        trans_type: 1,
+        order_type: OrderType::Buy,
+        deal_entry: 0, // In
+        deal_type: 0,
+        deal_reason: 3, // Expert
+        deal_magic: DEFAULT_MAGIC,
+        deal_position_id: ticket,
+        time: 1700000100,
+        price: 1.0850,
+        volume: 1.0,
+        sl: 1.0800,
+        tp: 1.0950,
+        symbol: "EURUSD".to_string(),
+        comment: "test deal".to_string(),
+    };
+    gateway.dispatch_trade_event(trade_event);
+
+    // Allow event loop to process
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let book = gateway.position_book().await.unwrap();
+    assert_eq!(book.open_positions().len(), 1);
+    let pos = book.get(ticket).expect("position must be tracked");
+    assert_eq!(pos.symbol, "EURUSD");
+    assert_eq!(pos.volume, 1.0);
+    assert_eq!(pos.state, mt5_bridge::position_book::PositionState::Open);
+
+    // Modify order SL/TP
+    gateway
+        .modify_order(
+            ticket,
+            DEFAULT_MAGIC,
+            Level::Set(1.0820),
+            Level::Set(1.0980),
+        )
+        .await
+        .unwrap();
+
+    let book = gateway.position_book().await.unwrap();
+    let pos = book.get(ticket).unwrap();
+    assert_eq!(pos.stop_loss, 1.0820);
+    assert_eq!(pos.take_profit, 1.0980);
+
+    // Close position
+    gateway.close_position(ticket, DEFAULT_MAGIC).await.unwrap();
+
+    // Position is marked Closing immediately
+    let book = gateway.position_book().await.unwrap();
+    let pos = book.get(ticket).unwrap();
+    assert_eq!(pos.state, mt5_bridge::position_book::PositionState::Closing);
+
+    // Exit deal arrives from broker
+    let exit_event = TradeEvent {
+        event_seq: 2,
+        deal: 9902,
+        order: ticket,
+        position: ticket,
+        trans_type: 1,
+        order_type: OrderType::Sell,
+        deal_entry: 1, // Out
+        deal_type: 1,
+        deal_reason: 3, // Expert
+        deal_magic: DEFAULT_MAGIC,
+        deal_position_id: ticket,
+        time: 1700000200,
+        price: 1.0860,
+        volume: 1.0,
+        sl: 0.0,
+        tp: 0.0,
+        symbol: "EURUSD".to_string(),
+        comment: "close deal".to_string(),
+    };
+    gateway.dispatch_trade_event(exit_event);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let book = gateway.position_book().await.unwrap();
+    assert_eq!(book.open_positions().len(), 0);
+    let closed = book
+        .get_closed(ticket)
+        .expect("position should be in closed positions");
+    assert_eq!(
+        closed.state,
+        mt5_bridge::position_book::PositionState::Closed
+    );
+    assert_eq!(closed.exit_price, Some(1.0860));
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}

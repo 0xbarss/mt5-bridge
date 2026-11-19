@@ -67,12 +67,15 @@ pub mod ffi;
 pub mod journal;
 pub mod position_book;
 pub mod reconciliation;
+pub mod session;
 pub mod sync;
 pub mod types;
 
 #[cfg(feature = "serde_json")]
 pub mod wal;
 
+#[cfg(feature = "async")]
+pub mod gateway;
 #[cfg(feature = "async")]
 pub mod stream;
 
@@ -81,6 +84,8 @@ pub use client::Mt5Client;
 pub use constants::*;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
+#[cfg(feature = "async")]
+pub use gateway::{Mt5Gateway, Mt5GatewayHandle, P1Command, P2Command, P3Command};
 pub use journal::OrderStore;
 #[cfg(feature = "serde_json")]
 pub use journal::{migrate_json_to_wal, wal_to_json, JsonFileStore, WalConfig, WalOrderStore};
@@ -92,6 +97,7 @@ pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderManager, ReconciliationReport, SafetyPolicy,
     SharedOrderManager, UnknownBlockScope,
 };
+pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;
 pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,

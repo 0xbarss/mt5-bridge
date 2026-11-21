@@ -77,7 +77,7 @@ impl SymbolInfo {
     /// Normalizes and clamps a lot size according to `lot_step`, `min_lot`, and `max_lot`.
     ///
     /// Handles both zero-offset and `min_lot`-offset lot step grids, cleans up
-    /// floating-point binary representation artifacts using [`lot_digits`],
+    /// floating-point binary representation artifacts using [`Self::lot_digits`],
     /// and prevents risk inflation by returning 0.0 if the lot is strictly below `min_lot`
     /// (with tolerance for floating-point underflow).
     pub fn round_lot(&self, lot: f64) -> f64 {
@@ -111,7 +111,7 @@ impl SymbolInfo {
 
     /// Floors a lot size down to the nearest valid step according to `lot_step`, `min_lot`, and `max_lot`.
     ///
-    /// Unlike [`round_lot`], `floor_lot` will **never round up**, ensuring that strict risk limits
+    /// Unlike [`Self::round_lot`], `floor_lot` will **never round up**, ensuring that strict risk limits
     /// (e.g. max dollar risk sizing) are never exceeded. Returns 0.0 if the floored volume is below `min_lot`.
     pub fn floor_lot(&self, lot: f64) -> f64 {
         if !lot.is_finite() || lot <= 0.0 || self.lot_step <= 0.0 {

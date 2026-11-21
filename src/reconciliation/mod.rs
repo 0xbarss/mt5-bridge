@@ -3,14 +3,14 @@
 //! Provides:
 //! - Full order lifecycle tracking via [`OrderManager`].
 //! - Explicit order idempotency guarantees via client order IDs, with collision-safe identity
-//!   (see [`wire_id`]).
+//!   (see [`crate::wire_id()`]).
 //! - Post-disconnect and startup broker reconciliation via [`ReconciliationReport`] that
 //!   consults **positions, working orders and deal history**, compares attributes rather than
 //!   mere existence, and requires *repeated* absence before declaring an order unplaced.
 //! - Strict strategy ownership enforcement via magic numbers.
 //! - First-class handling of uncertain execution (`OrderState::Unknown`), including a
 //!   submission gate that stops naive retries while any outcome is unresolved.
-//! - Optional durable write-ahead journaling ([`OrderStore`]).
+//! - Optional durable write-ahead journaling ([`crate::journal::OrderStore`]).
 //! - A thread-safe wrapper ([`SharedOrderManager`]) that structurally enforces the locking
 //!   discipline the idempotency guarantee depends on.
 //!

@@ -116,3 +116,6 @@ pub use stream::{
     bar_end_time, stream_bars, stream_ticks, stream_ticks_with_config, BackpressurePolicy,
     BookSubscription, EventBus, SequenceTracker, StreamConfig, StreamError, TickSubscription,
 };
+
+#[cfg(doctest)]
+doc_comment::doctest!("../README.md");

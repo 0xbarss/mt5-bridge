@@ -502,12 +502,16 @@ Instead of hardcoding credentials, the client can automatically read:
 
 *Custom DLL Path:*
 ```rust,no_run
+# use mt5_bridge::Mt5Client;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 let client = Mt5Client::connect_with_dll(
     "C:\\path\\to\\mt5_bridge.dll",
     12345678,
     "my_password",
     "MetaQuotes-Demo",
 )?;
+# Ok(())
+# }
 ```
 
 ---
@@ -515,6 +519,9 @@ let client = Mt5Client::connect_with_dll(
 ### 2. Fetching Account Information
 
 ```rust,no_run
+# use mt5_bridge::Mt5Client;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let client = Mt5Client::connect(0, "", "")?;
 let account = client.account_info()?;
 
 println!("Balance:      ${:.2}", account.balance);
@@ -528,6 +535,8 @@ if let Some(margin_level) = account.margin_level() {
 } else {
     println!("Margin Level: N/A (no margin currently in use)");
 }
+# Ok(())
+# }
 ```
 
 ---
@@ -535,6 +544,9 @@ if let Some(margin_level) = account.margin_level() {
 ### 3. Querying Symbol Specifications & Risk Helpers
 
 ```rust,no_run
+# use mt5_bridge::Mt5Client;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let client = Mt5Client::connect(0, "", "")?;
 let info = client.symbol_info("EURUSD")?;
 
 println!("Symbol:     {}", info.symbol);
@@ -561,6 +573,8 @@ println!("Normalized Price: {}", valid_price); // Prints 1.08543
 // Helper 4: Accurate multi-asset 1-point move value (scaled by point / tick_size)
 let p_val = info.point_value(valid_lot);
 println!("1-point move value: ${:.5}", p_val);
+# Ok(())
+# }
 ```
 
 ---
@@ -568,6 +582,9 @@ println!("1-point move value: ${:.5}", p_val);
 ### 4. Fetching Historical OHLCV Bars & Technical Metrics
 
 ```rust,no_run
+# use mt5_bridge::Mt5Client;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let client = Mt5Client::connect(0, "", "")?;
 use chrono::Utc;
 use mt5_bridge::Timeframe;
 
@@ -590,6 +607,8 @@ let raw_rates = client.copy_rates("EURUSD", Timeframe::M15, one_day_ago, now)?;
 if let Some(first) = raw_rates.first() {
     println!("First raw rate spread: {} points | Vol: {}", first.spread, first.volume);
 }
+# Ok(())
+# }
 ```
 
 ---
@@ -597,6 +616,9 @@ if let Some(first) = raw_rates.first() {
 ### 5. Downloading Deep Chunked History with Completeness
 
 ```rust,no_run
+# use mt5_bridge::Mt5Client;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let client = Mt5Client::connect(0, "", "")?;
 use chrono::Utc;
 use mt5_bridge::Timeframe;
 
@@ -618,6 +640,8 @@ if !history.is_complete() {
         eprintln!("Missing broker history between {} and {}", gap_start, gap_end);
     }
 }
+# Ok(())
+# }
 ```
 
 ---
@@ -665,7 +689,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Emits clean `Bar` instances whenever a candle closes:
 
 ```rust,no_run
-use mt5_bridge::{stream_bars, Timeframe};
+use mt5_bridge::{stream_bars, Mt5Client, Timeframe};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -674,9 +698,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Arc::new(Mt5Client::connect(12345678, "password", "Broker-Demo")?);
 
     // Listen for newly closed 1-minute bars
-    let mut rx = stream_bars(client, "EURUSD", Timeframe::M1, Duration::from_millis(500));
+    let mut rx = stream_bars(client, "EURUSD", Timeframe::M1, Duration::from_millis(500), false);
 
-    while let Some(bar) = rx.recv().await {
+    while let Some(Ok(bar)) = rx.recv().await {
         println!(
             "Closed Candle -> Time: {} | Open: {:.5} | Close: {:.5} | Range: {:.5} | Vol: {:.0}",
             bar.time, bar.open, bar.close, bar.range(), bar.volume
@@ -692,7 +716,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 8. Placing, Modifying & Closing Market Orders
 
 ```rust,no_run
-use mt5_bridge::{Mt5Client, OrderRequest, EA_DEFAULT_MAGIC};
+use mt5_bridge::{Level, Mt5Client, OrderRequest, EA_DEFAULT_MAGIC};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Mt5Client::connect(12345678, "password", "Broker-Demo")?;
@@ -729,7 +753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Modify Stop Loss (move SL closer to market with tick alignment)
     let new_sl = info.round_price(tick.bid - (150.0 * info.point));
-    let mod_res = client.order_modify(target_ticket, new_sl, tp)?;
+    let mod_res = client.order_modify(target_ticket, Level::Set(new_sl), Level::Set(tp))?;
     println!("Stop loss modified! Retcode: {} ({})", mod_res.retcode, mod_res.description());
 
     // 3. Close the position by position ticket ID using ergonomic close_position API:
@@ -801,14 +825,14 @@ fn place_trade(client: &Mt5Client, req: &OrderRequest) {
         Err(Mt5Error::OrderSendFailed { symbol, retcode, description }) => {
             eprintln!("Order rejected for {symbol}: retcode {retcode} ({description})");
         }
-        Err(Mt5Error::RatesLimitExceeded { requested, max }) => {
-            eprintln!("Request exceeded limit: {requested} bars > {max} maximum");
-        }
         Err(Mt5Error::SymbolInfoFailed(sym)) => {
             eprintln!("Symbol {sym} not found or not selected in Market Watch");
         }
+        Err(Mt5Error::Other(msg)) => {
+            eprintln!("Bridge error: {msg}");
+        }
         Err(e) => {
-            eprintln!("Bridge error: {e}");
+            eprintln!("Other error: {e}");
         }
     }
 
@@ -827,24 +851,28 @@ Inspect currently active open positions and pending orders directly from MT5:
 ```rust,no_run
 use mt5_bridge::Mt5Client;
 
-let client = Mt5Client::connect(0, "test", "")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Mt5Client::connect(0, "test", "")?;
 
-// Query all open positions (optionally filtered by magic number or symbol)
-let positions = client.positions_filtered(Some(998877), Some("EURUSD"))?;
-for pos in positions {
-    println!(
-        "Position #{} on {} | Volume: {:.2} | Open: {:.5} | Profit: ${:.2}",
-        pos.ticket, pos.symbol, pos.volume, pos.price_open, pos.profit
-    );
-}
+    // Query all open positions (optionally filtered by magic number or symbol)
+    let positions = client.positions_filtered(Some(998877), Some("EURUSD"))?;
+    for pos in positions {
+        println!(
+            "Position #{} on {} | Volume: {:.2} | Open: {:.5} | Profit: ${:.2}",
+            pos.ticket, pos.symbol, pos.volume, pos.price_open, pos.profit
+        );
+    }
 
-// Query all working pending orders
-let orders = client.pending_orders()?;
-for ord in orders {
-    println!(
-        "Working Order #{} | Type: {:?} | Volume: {:.2}/{:.2} | Price: {:.5}",
-        ord.ticket, ord.order_type, ord.volume_current, ord.volume_initial, ord.price_open
-    );
+    // Query all working pending orders
+    let orders = client.pending_orders()?;
+    for ord in orders {
+        println!(
+            "Working Order #{} | Type: {:?} | Volume: {:.2}/{:.2} | Price: {:.5}",
+            ord.ticket, ord.order_type, ord.volume_initial, ord.volume_current, ord.price_open
+        );
+    }
+
+    Ok(())
 }
 ```
 
@@ -858,39 +886,43 @@ For mission-critical production trading, [`OrderManager`](src/reconciliation/mod
 - **Broker State Reconciliation**: Automatically syncs local in-memory orders with live broker state after reconnects or startup.
 
 ```rust,no_run
-use mt5_bridge::{LifecycleState, OrderManager, OrderRequest};
+use mt5_bridge::{JsonFileStore, LifecycleState, Mt5Client, OrderManager, OrderRequest};
 
-let mut manager = OrderManager::try_new(998877)?; // Strategy Magic 998877
+fn example(client: &Mt5Client) -> Result<(), Box<dyn std::error::Error>> {
+    let mut manager = OrderManager::try_new(998877)?; // Strategy Magic 998877
 
-// Reconcile against live MT5 state on startup
-let report = manager.reconcile(&client)?;
-println!(
-    "Reconciliation complete (clean: {}). Active positions: {}, working orders: {}",
-    report.is_clean(),
-    report.positions.len(),
-    report.pending_orders.len()
-);
+    // Reconcile against live MT5 state on startup
+    let report = manager.reconcile(client)?;
+    println!(
+        "Reconciliation complete (clean: {}). Active positions: {}, working orders: {}",
+        report.is_clean(),
+        report.positions.len(),
+        report.pending_orders.len()
+    );
 
-// Configure write-ahead durable journal
-let store = JsonFileStore::new("orders_journal.json");
-let mut manager = OrderManager::with_store(998877, store)?;
+    // Configure write-ahead durable journal
+    let store = JsonFileStore::new("orders_journal.json");
+    let mut manager = OrderManager::with_store(998877, Box::new(store))?;
 
-// Reconcile against live MT5 state on startup (evaluates positions, working orders, and deal history)
-let report = manager.reconcile(&client)?;
-println!(
-    "Reconciliation complete (clean: {}). Active positions: {}, working orders: {}",
-    report.is_clean(),
-    report.positions.len(),
-    report.pending_orders.len()
-);
+    // Reconcile against live MT5 state on startup (evaluates positions, working orders, and deal history)
+    let report = manager.reconcile(client)?;
+    println!(
+        "Reconciliation complete (clean: {}). Active positions: {}, working orders: {}",
+        report.is_clean(),
+        report.positions.len(),
+        report.pending_orders.len()
+    );
 
-// Submit order with deterministic client order ID and write-ahead journaling
-let req = OrderRequest::buy("EURUSD", 0.1)
-    .client_order_id("strategy-alpha-001")
-    .comment("breakout");
+    // Submit order with deterministic client order ID and write-ahead journaling
+    let req = OrderRequest::buy("EURUSD", 0.1)
+        .client_order_id("strategy-alpha-001")
+        .comment("breakout");
 
-let tracked = manager.submit_order(&client, req)?;
-println!("Order status: {:?}, filled: {:.2}", tracked.state, tracked.filled_volume);
+    let tracked = manager.submit_order(client, req)?;
+    println!("Order status: {:?}, filled: {:.2}", tracked.state, tracked.filled_volume);
+
+    Ok(())
+}
 ```
 
 #### Durability & Crash Safety (`OrderStore` / `JsonFileStore`)
@@ -918,17 +950,20 @@ When a live position or working order matches on ticket or wire identity token, 
 - `OrderManager` is designed with single-ownership semantics (`&mut self`) for maximum single-threaded efficiency.
 - For multi-threaded applications, use [`SharedOrderManager`](src/reconciliation/mod.rs):
   ```rust,no_run
-  use mt5_bridge::{OrderManager, SharedOrderManager};
-  use std::sync::Arc;
+  use mt5_bridge::{Mt5Client, OrderManager, OrderRequest, SharedOrderManager};
 
-  let manager = OrderManager::try_new(998877)?;
-  let shared = SharedOrderManager::new(manager);
+  fn example(client: Mt5Client, req: OrderRequest) -> Result<(), Box<dyn std::error::Error>> {
+      let manager = OrderManager::try_new(998877)?;
+      let shared = SharedOrderManager::new(manager);
 
-  // Cloneable across threads: holds exclusive lock across idempotency check + write-ahead + broker execution
-  let handle = shared.clone();
-  std::thread::spawn(move || {
-      let _ = handle.submit_order(&client, req);
-  });
+      // Cloneable across threads: holds exclusive lock across idempotency check + write-ahead + broker execution
+      let handle = shared.clone();
+      std::thread::spawn(move || {
+          let _ = handle.submit_order(&client, req);
+      });
+
+      Ok(())
+  }
   ```
   This structurally guarantees that checking idempotency, journaling write-ahead, transmitting over the pipe, and recording the outcome happen atomically across concurrent threads.
 
@@ -936,6 +971,8 @@ When a live position or working order matches on ticket or wire identity token, 
 Rather than relying solely on periodic snapshot polling (which introduces latency and pipe overhead), [`OrderManager`](src/reconciliation/mod.rs) and [`SharedOrderManager`](src/reconciliation/mod.rs) directly consume live push trade notifications via [`apply_trade_event`](src/reconciliation/mod.rs):
 
 ```rust,no_run
+# use mt5_bridge::{Mt5Client, OrderManager};
+# async fn example(client: &Mt5Client, mut manager: OrderManager) -> Result<(), Box<dyn std::error::Error>> {
 // Subscribe to real-time broker trade events (Protocol v5+)
 let mut trade_sub = client.subscribe_trade()?;
 
@@ -946,6 +983,8 @@ tokio::spawn(async move {
         manager.apply_trade_event(&event);
     }
 });
+# Ok(())
+# }
 ```
 This enables sub-millisecond local state transitions for fills and closes while reserving full snapshot reconciliation ([`manager.reconcile(&client)`](src/reconciliation/mod.rs)) for startup, reconnects, or periodic drift verification.
 
@@ -1042,8 +1081,8 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | [`close_position`](src/client/mod.rs) | `pub fn close_position(&self, ticket: u64) -> Result<TradeResult>` | Semantic alias for closing an open market position by ticket ID. |
 | [`order_close_with_magic`](src/client/mod.rs) | `pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
 | [`close_position_with_magic`](src/client/mod.rs) | `pub fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
-| [`order_modify`](src/client/mod.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
-| [`order_modify_with_magic`](src/client/mod.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
+| [`order_modify`](src/client/mod.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: Level, take_profit: Level) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
+| [`order_modify_with_magic`](src/client/mod.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: Level, take_profit: Level) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
 | [`positions`](src/client/mod.rs) | `pub fn positions(&self) -> Result<Vec<Position>>` | Queries all active open positions in the terminal. |
 | [`positions_filtered`](src/client/mod.rs) | `pub fn positions_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Position>>` | Queries open positions matching optional magic number and/or symbol filters. |
 | [`pending_orders`](src/client/mod.rs) | `pub fn pending_orders(&self) -> Result<Vec<WorkingOrder>>` | Queries all active working pending orders in the terminal. |
@@ -1080,7 +1119,7 @@ Event-driven streaming directly fed from MT5's `OnTick()`, `OnBookEvent()`, `OnT
 | :--- | :--- | :--- |
 | [`stream_ticks`](src/stream.rs) | `pub fn stream_ticks(client: Arc<Mt5Client>, symbol: &str, poll_interval: Duration) -> mpsc::Receiver<Tick>` | Spawns a background task that polls for quotes via `symbol_tick()`, deduplicates identical ticks, and yields updated `Tick` values using default `DropLatest` backpressure. |
 | [`stream_ticks_with_config`](src/stream.rs) | `pub fn stream_ticks_with_config(client: Arc<Mt5Client>, symbol: &str, config: StreamConfig) -> mpsc::Receiver<Tick>` | Spawns a tick streaming task with explicit buffer size, polling interval, and backpressure policy (`DropLatest` or `Block`). |
-| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration) -> mpsc::Receiver<Bar>` | Emits completed (closed) `Bar` structures upon candle close. Skips forming bars and historical initial bars. Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). |
+| [`stream_bars`](src/stream.rs) | `pub fn stream_bars(client: Arc<Mt5Client>, symbol: &str, timeframe: Timeframe, poll_interval: Duration, include_incomplete: bool) -> mpsc::Receiver<Result<Bar, StreamError>>` | Emits completed (closed) `Bar` structures upon candle close (or incomplete bars if `include_incomplete` is true). Automatically applies extended lookback windows for calendar intervals (`W1`, `MN1`). |
 
 #### Stream Backpressure & Loss Semantics (`BackpressurePolicy`)
 The streaming pipeline offers two explicit backpressure policies:
@@ -1198,6 +1237,7 @@ pub struct HistoryResult {
 #### `OrderRequest`
 [`OrderRequest`](src/types/mod.rs) provides a fluent builder for trades:
 ```rust,no_run
+# use mt5_bridge::{OrderRequest, OrderType, EA_DEFAULT_MAGIC};
 // Instant Market Orders with custom deviation & magic
 let req = OrderRequest::buy("EURUSD", 0.1)
     .stop_loss(1.0800)
@@ -1337,27 +1377,31 @@ pub struct Deal {
 - **Strategy Ownership**: Strict magic number enforcement on all submissions, modifications, and closures.
 
 ```rust,no_run
-use mt5_bridge::{OrderManager, JsonFileStore, SafetyPolicy, OrderRequest, LifecycleState};
+use mt5_bridge::{JsonFileStore, Mt5Client, OrderManager, OrderRequest, SafetyPolicy};
 use std::path::PathBuf;
 
-// Initialize manager with magic number, durable journal, and safety policy
-let store = JsonFileStore::new(PathBuf::from("data/orders.json"))?;
-let mut manager = OrderManager::with_store(998877, store)?
-    .with_safety_policy(SafetyPolicy::default());
+fn example(client: &Mt5Client) -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize manager with magic number, durable journal, and safety policy
+    let store = JsonFileStore::new(PathBuf::from("data/orders.json"));
+    let mut manager = OrderManager::with_store(998877, Box::new(store))?;
+    manager.set_policy(SafetyPolicy::default());
 
-// Reconcile on startup against live MT5 positions, orders, and deal history
-let report = manager.reconcile(&client)?;
-if !report.is_clean() {
-    println!("Reconciliation detected {} unresolved orders, {} mismatches, {} foreign positions",
-        report.unresolved_orders.len(), report.mismatches.len(), report.foreign_positions.len());
+    // Reconcile on startup against live MT5 positions, orders, and deal history
+    let report = manager.reconcile(client)?;
+    if !report.is_clean() {
+        println!("Reconciliation detected {} unresolved orders, {} mismatches, {} foreign positions",
+            report.unresolved_orders.len(), report.mismatched_orders.len(), report.foreign_positions.len());
+    }
+
+    // Submit with durable write-ahead journaling and idempotency
+    let req = OrderRequest::buy("EURUSD", 0.5)
+        .client_order_id("strategy-A-001");
+
+    let tracked = manager.submit_order(client, req)?;
+    println!("Order state: {:?}, filled volume: {}", tracked.state, tracked.filled_volume);
+
+    Ok(())
 }
-
-// Submit with durable write-ahead journaling and idempotency
-let req = OrderRequest::buy("EURUSD", 0.5)
-    .client_order_id("strategy-A-001");
-
-let tracked = manager.submit_order(&client, req)?;
-println!("Order state: {:?}, filled volume: {}", tracked.state, tracked.filled_volume);
 ```
 
 ---
@@ -1371,10 +1415,10 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 | Variant | Description |
 | :--- | :--- |
 | `DllLoadError { path, source }` | Failed to load `mt5_bridge.dll` from specified path. |
+| `InvalidDllPath { path, reason }` | DLL path failed safety validation (e.g. non-canonical or relative). |
 | `SymbolNotFound { symbol, source }` | Required C ABI symbol missing in the loaded DLL. |
 | `InitFailed(status)` | Bridge handshake or named pipe connection failed. |
 | `CopyRatesFailed { symbol, status }` | Historical rates query failed in MT5. |
-| `RatesLimitExceeded { requested, max }` | Requested historical range exceeds maximum single-request limit (1,000,000 bars). |
 | `AccountInfoFailed(status)` | Failed to retrieve balance or equity. |
 | `SymbolInfoFailed(symbol)` | Unknown symbol or contract specifications unavailable. |
 | `SymbolTickFailed(symbol)` | Tick quote query failed. |
@@ -1382,7 +1426,7 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 | `OrderCloseFailed { ticket, retcode, description }` | Position closure or pending order cancellation rejected. |
 | `OrderModifyFailed { ticket, retcode, description }` | SL/TP modification rejected with MT5 retcode. |
 | `UnknownExecutionState { symbol, client_order_id, description }` | Communication lost after order was transmitted to MT5; reconciliation required. |
-| `TransmissionFailed { description }` | Order transmission to IPC pipe failed prior to broker submission (safe to retry). |
+| `TransmissionFailed(description)` | Order transmission to IPC pipe failed prior to broker submission (safe to retry). |
 | `OwnershipMismatch { ticket, expected_magic, actual_magic }` | Order or position magic number does not match strategy ownership. |
 | `PositionsFailed(status)` | Failed to query active open positions. |
 | `OrdersFailed(status)` | Failed to query working pending orders. |

@@ -24,36 +24,8 @@ impl Mt5Client {
     /// Validate that `path` is an absolute path to a regular file that is not
     /// stored in a world-writable directory, then canonicalize it so the loader
     /// never resolves it through the OS ambient DLL search order.
-    pub(crate) fn validate_dll_path(path: &Path) -> Result<PathBuf> {
-        if path.is_relative() {
-            return Err(Mt5Error::InvalidDllPath {
-                path: path.display().to_string(),
-                reason: "relative DLL paths are refused; set MT5_DLL_PATH to an absolute path"
-                    .to_string(),
-            });
-        }
-
-        let resolved = path.to_path_buf();
-
-        if !resolved.is_file() {
-            return Err(Mt5Error::InvalidDllPath {
-                path: resolved.display().to_string(),
-                reason: "DLL file not found".to_string(),
-            });
-        }
-
-        if let Some(parent) = resolved.parent() {
-            if crate::client::pipe::is_world_writable_dir(parent) {
-                return Err(Mt5Error::InvalidDllPath {
-                    path: resolved.display().to_string(),
-                    reason: format!(
-                        "DLL directory {parent:?} is world-writable; refusing to load the DLL"
-                    ),
-                });
-            }
-        }
-
-        Ok(resolved)
+    pub fn validate_dll_path(path: &Path) -> Result<PathBuf> {
+        crate::client::dll_path::validate_dll_path(path)
     }
 
     /// Verify the SHA-256 hash of the DLL against an expected value.

@@ -4,6 +4,7 @@
 
 use crate::client::client_impl::client::{Mt5Client, CLIENT_ACTIVE};
 use crate::client::pipe::validate_pipe_name;
+use crate::client::validate_dll_path;
 use crate::error::Mt5Error;
 use std::sync::atomic::Ordering;
 
@@ -146,4 +147,11 @@ fn pipe_name_validation_accepts_only_plain_names() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn public_validate_dll_path_reexport_works() {
+    let rel = std::path::Path::new("relative/path/to/dll.dll");
+    assert!(validate_dll_path(rel).is_err());
+    assert!(Mt5Client::validate_dll_path(rel).is_err());
 }

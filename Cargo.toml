@@ -23,6 +23,7 @@ tracing = "0.1"
 static_assertions = "1.1"
 sha2 = "0.10"
 hex = "0.4"
+dunce = "1.0"
 
 [features]
 default = ["async", "serde_json", "wal"]

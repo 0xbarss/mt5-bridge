@@ -1,18 +1,4 @@
 use crate::error::Result;
-use std::path::{Path, PathBuf};
-
-pub fn validate_dll_path(path: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| crate::error::Mt5Error::Other(format!("cannot resolve DLL path: {e}")))?;
-    if !canonical.is_file() {
-        return Err(crate::error::Mt5Error::Other(format!(
-            "DLL path does not point to a file: {}",
-            path.display()
-        )));
-    }
-    Ok(canonical)
-}
 
 pub fn validate_pipe_name(name: &str) -> Result<()> {
     if name.is_empty() {
@@ -45,21 +31,4 @@ pub fn validate_pipe_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn is_world_writable_dir(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    match dir.metadata() {
-        Ok(md) => {
-            let mode = md.permissions().mode() & 0o777;
-            mode & 0o002 != 0
-        }
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn is_world_writable_dir(_dir: &Path) -> bool {
-    false
 }

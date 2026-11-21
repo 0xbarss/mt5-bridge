@@ -114,6 +114,19 @@ impl Mt5Client {
         end: i64,
         chunk_bars: usize,
     ) -> Result<HistoryResult> {
+        self.copy_rates_chunked_cancellable(symbol, timeframe, start, end, chunk_bars, None)
+    }
+
+    /// Robust, chunked historical data downloader with cancellation token support.
+    pub fn copy_rates_chunked_cancellable(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        start: i64,
+        end: i64,
+        chunk_bars: usize,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<HistoryResult> {
         if start > end {
             return Err(Mt5Error::InvalidTimeRange { start, end });
         }
@@ -131,6 +144,19 @@ impl Mt5Client {
         let mut current_start = start;
 
         while current_start <= end {
+            if let Some(cancel_token) = cancel {
+                if cancel_token.load(std::sync::atomic::Ordering::Relaxed) {
+                    all_rates.sort_by_key(|r| r.time);
+                    all_rates.dedup_by_key(|r| r.time);
+                    return Ok(HistoryResult {
+                        rates: all_rates,
+                        complete: false,
+                        missing_ranges,
+                        cancelled: true,
+                    });
+                }
+            }
+
             let current_end = current_start.saturating_add(chunk_duration).min(end);
             let max_bars = ((current_end - current_start) / tf_secs + 20) as usize;
 
@@ -222,6 +248,7 @@ impl Mt5Client {
             rates: all_rates,
             complete,
             missing_ranges,
+            cancelled: false,
         })
     }
 

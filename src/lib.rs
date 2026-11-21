@@ -85,7 +85,9 @@ pub use constants::*;
 pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
 #[cfg(feature = "async")]
-pub use gateway::{Mt5Gateway, Mt5GatewayHandle, P1Command, P2Command, P3Command};
+pub use gateway::{
+    BlockingExecutor, GatewayConfig, Mt5Gateway, Mt5GatewayHandle, P1Command, P2Command, P3Command,
+};
 pub use journal::OrderStore;
 #[cfg(feature = "serde_json")]
 pub use journal::{migrate_json_to_wal, wal_to_json, JsonFileStore, WalConfig, WalOrderStore};

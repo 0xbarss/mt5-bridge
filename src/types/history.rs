@@ -10,12 +10,15 @@ pub struct HistoryResult {
     pub complete: bool,
     /// Time ranges `(start, end)` that failed or were missing from broker history.
     pub missing_ranges: Vec<(i64, i64)>,
+    /// Whether the historical data download was cancelled before completion.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 impl HistoryResult {
-    /// Returns `true` if all requested chunks were retrieved with zero missing ranges.
+    /// Returns `true` if all requested chunks were retrieved with zero missing ranges and no cancellation.
     #[inline]
     pub fn is_complete(&self) -> bool {
-        self.complete && self.missing_ranges.is_empty()
+        self.complete && !self.cancelled && self.missing_ranges.is_empty()
     }
 }

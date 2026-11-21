@@ -122,6 +122,9 @@ pub enum Mt5Error {
     #[error("Thread task join error: {0}")]
     JoinError(String),
 
+    #[error("Operation '{operation}' exceeded its deadline")]
+    Timeout { operation: String },
+
     #[error(
         "Order rejected by preflight validation or EA risk gate before transmission to broker: {0}"
     )]

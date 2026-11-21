@@ -41,6 +41,11 @@ impl SharedOrderManager {
         f(&mut self.lock())
     }
 
+    /// Strategy magic number owned by the underlying order manager.
+    pub fn strategy_magic(&self) -> u64 {
+        self.lock().strategy_magic()
+    }
+
     /// See [`OrderManager::submit_order`]. The lock is held for the whole call.
     pub fn submit_order<B: TradingBackend + ?Sized>(
         &self,

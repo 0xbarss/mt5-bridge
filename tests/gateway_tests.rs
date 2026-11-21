@@ -664,3 +664,286 @@ async fn test_gateway_position_book_tracking_and_queries() {
     gateway.shutdown();
     let _ = join_handle.await;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 8. Bounded Blocking Executor and Actor Responsiveness
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[derive(Clone)]
+struct SlowBackend {
+    p3_sleep: Duration,
+    p2_sleep: Duration,
+    p3_started: Arc<tokio::sync::Notify>,
+    p1_completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TradingBackend for SlowBackend {
+    fn order_send(&self, _req: &OrderRequest) -> Result<TradeResult> {
+        self.p1_completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 12345,
+            order: 67890,
+            position: 67890,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn order_close_with_magic(&self, _ticket: u64, _magic: u64) -> Result<TradeResult> {
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 12345,
+            order: 67890,
+            position: 67890,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn order_modify_with_magic(
+        &self,
+        _ticket: u64,
+        _magic: u64,
+        _stop_loss: Level,
+        _take_profit: Level,
+    ) -> Result<TradeResult> {
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 12345,
+            order: 67890,
+            position: 67890,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn positions_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        Ok(vec![])
+    }
+
+    fn pending_orders_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        Ok(vec![])
+    }
+
+    fn account_info(&self) -> Result<AccountInfo> {
+        if !self.p2_sleep.is_zero() {
+            std::thread::sleep(self.p2_sleep);
+        }
+        Ok(AccountInfo {
+            balance: 10000.0,
+            equity: 10000.0,
+            margin: 0.0,
+            free_margin: 10000.0,
+            leverage: 100.0,
+            currency: "USD".to_string(),
+        })
+    }
+
+    fn copy_rates(
+        &self,
+        _symbol: &str,
+        _timeframe: Timeframe,
+        _from: i64,
+        _to: i64,
+    ) -> Result<Vec<Rate>> {
+        self.p3_started.notify_one();
+        std::thread::sleep(self.p3_sleep);
+        Ok(vec![Rate {
+            time: 1700000000,
+            open: 1.08,
+            high: 1.09,
+            low: 1.07,
+            close: 1.085,
+            volume: 100,
+            spread: 1,
+            real_volume: 100,
+        }])
+    }
+
+    fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<HistoryResult> {
+        self.p3_started.notify_one();
+        let mut rates = Vec::new();
+        let chunk_count = 10;
+        let sleep_per_chunk = self.p3_sleep / (chunk_count as u32);
+        for i in 0..chunk_count {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(HistoryResult {
+                    rates,
+                    complete: false,
+                    missing_ranges: vec![],
+                    cancelled: true,
+                });
+            }
+            std::thread::sleep(sleep_per_chunk);
+            rates.push(Rate {
+                time: from + (i as i64 * 60),
+                open: 1.08,
+                high: 1.09,
+                low: 1.07,
+                close: 1.085,
+                volume: 100,
+                spread: 1,
+                real_volume: 100,
+            });
+        }
+        let _ = (symbol, timeframe, to);
+        Ok(HistoryResult {
+            rates,
+            complete: true,
+            missing_ranges: vec![],
+            cancelled: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_slow_p3_does_not_block_p1_submission() {
+    let p3_started = Arc::new(tokio::sync::Notify::new());
+    let p1_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let backend = SlowBackend {
+        p3_sleep: Duration::from_secs(2),
+        p2_sleep: Duration::ZERO,
+        p3_started: Arc::clone(&p3_started),
+        p1_completed: Arc::clone(&p1_completed),
+    };
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(backend, mgr, SessionConfig::default());
+
+    let g_p3 = gateway.clone();
+    let h_p3 = tokio::spawn(async move { g_p3.copy_rates("EURUSD", Timeframe::M1, 0, 100).await });
+
+    // Wait until P3 has actually started executing in the blocking thread
+    p3_started.notified().await;
+
+    // Submit P1 while P3 is sleeping
+    let t0 = std::time::Instant::now();
+    let res = gateway
+        .submit_order(buy_order("EURUSD", 0.1, "p1-fast"))
+        .await;
+    let elapsed = t0.elapsed();
+
+    assert!(res.is_ok(), "P1 submit should succeed");
+    assert!(p1_completed.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "P1 must complete without waiting for P3 sleep (took {elapsed:?})"
+    );
+
+    let _ = h_p3.await;
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_actor_remains_responsive_to_ping_during_p3() {
+    let p3_started = Arc::new(tokio::sync::Notify::new());
+    let backend = SlowBackend {
+        p3_sleep: Duration::from_secs(1),
+        p2_sleep: Duration::ZERO,
+        p3_started: Arc::clone(&p3_started),
+        p1_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(backend, mgr, SessionConfig::default());
+
+    let g_p3 = gateway.clone();
+    let h_p3 = tokio::spawn(async move { g_p3.copy_rates("EURUSD", Timeframe::M1, 0, 100).await });
+
+    p3_started.notified().await;
+
+    let t0 = std::time::Instant::now();
+    let ping_res = gateway.ping().await;
+    let elapsed = t0.elapsed();
+
+    assert!(ping_res.is_ok(), "Ping should succeed");
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "Ping took {elapsed:?}, should be instantaneous"
+    );
+
+    let _ = h_p3.await;
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_p2_timeout_returns_error() {
+    let backend = SlowBackend {
+        p3_sleep: Duration::ZERO,
+        p2_sleep: Duration::from_millis(300),
+        p3_started: Arc::new(tokio::sync::Notify::new()),
+        p1_completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let mgr = test_manager();
+    let config = GatewayConfig {
+        p2_timeout: Duration::from_millis(50),
+        ..Default::default()
+    };
+    let (gateway, join_handle) = Mt5Gateway::spawn_with_config(backend, mgr, config);
+
+    let res = gateway.account_info().await;
+    match res {
+        Err(mt5_bridge::Mt5Error::Timeout { operation }) => {
+            assert_eq!(operation, "p2_account_info");
+        }
+        other => panic!("Expected Mt5Error::Timeout, got {other:?}"),
+    }
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_cancelled_p3_returns_partial_data_and_does_not_block_p1() {
+    let p3_started = Arc::new(tokio::sync::Notify::new());
+    let p1_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let backend = SlowBackend {
+        p3_sleep: Duration::from_millis(1500),
+        p2_sleep: Duration::ZERO,
+        p3_started: Arc::clone(&p3_started),
+        p1_completed: Arc::clone(&p1_completed),
+    };
+    let mgr = test_manager();
+    let (gateway, join_handle) = Mt5Gateway::spawn(backend, mgr, SessionConfig::default());
+
+    let g_p3 = gateway.clone();
+    let h_p3 = tokio::spawn(async move { g_p3.copy_rates("EURUSD", Timeframe::M1, 0, 100).await });
+
+    p3_started.notified().await;
+    // Allow at least one chunk to be generated
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // P1 arrival triggers cancellation of P3
+    let p1_res = gateway
+        .submit_order(buy_order("EURUSD", 0.1, "p1-cancel-p3"))
+        .await;
+    assert!(p1_res.is_ok());
+
+    let p3_res = h_p3.await.unwrap().unwrap();
+    assert!(p3_res.cancelled, "P3 should be marked as cancelled");
+    assert!(
+        !p3_res.rates.is_empty(),
+        "P3 should return partial rates collected before cancellation"
+    );
+    assert!(!p3_res.is_complete());
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}

@@ -21,7 +21,7 @@ fn temp_wal_path(name: &str) -> PathBuf {
 fn test_wal_full_lifecycle_and_reopen() {
     let path = temp_wal_path("lifecycle");
 
-    // Phase 1: Create store, persist intents and updates
+    // Step 1: Create store, persist intents and updates
     {
         let store =
             WalOrderStore::open_with_config(&path, WalConfig::default()).expect("create wal store");
@@ -51,7 +51,7 @@ fn test_wal_full_lifecycle_and_reopen() {
         store.flush().expect("flush store");
     }
 
-    // Phase 2: Reopen store from disk and verify recovery
+    // Step 2: Reopen store from disk and verify recovery
     {
         let reopen = WalOrderStore::open(&path).expect("reopen wal store");
         let orders = reopen.load().expect("load orders");
@@ -83,7 +83,7 @@ fn test_wal_full_lifecycle_and_reopen() {
 fn test_wal_torn_tail_crash_recovery() {
     let path = temp_wal_path("torn_tail");
 
-    // Phase 1: Write two valid orders
+    // Step 1: Write two valid orders
     {
         let store = WalOrderStore::open(&path).expect("create wal store");
         let req1 = OrderRequest::buy("EURUSD", 0.10);
@@ -96,7 +96,7 @@ fn test_wal_torn_tail_crash_recovery() {
         store.flush().expect("flush");
     }
 
-    // Phase 2: Corrupt file by appending partial / torn bytes (simulating sudden power loss during write)
+    // Step 2: Corrupt file by appending partial / torn bytes (simulating sudden power loss during write)
     {
         let mut file = OpenOptions::new()
             .append(true)
@@ -107,7 +107,7 @@ fn test_wal_torn_tail_crash_recovery() {
         file.sync_all().expect("sync");
     }
 
-    // Phase 3: Reopen - store must detect torn tail, truncate to last valid frame, and load valid orders
+    // Step 3: Reopen - store must detect torn tail, truncate to last valid frame, and load valid orders
     {
         let store = WalOrderStore::open(&path).expect("reopen should recover from torn tail");
         let orders = store.load().expect("load recovered orders");
@@ -124,7 +124,7 @@ fn test_wal_torn_tail_crash_recovery() {
         store.flush().expect("flush");
     }
 
-    // Phase 4: Verify 3 orders now present
+    // Step 4: Verify 3 orders now present
     {
         let store = WalOrderStore::open(&path).expect("reopen 2");
         let orders = store.load().expect("load orders 2");
@@ -141,7 +141,7 @@ fn test_wal_torn_tail_crash_recovery() {
 fn test_wal_snapshot_compaction_pruning() {
     let path = temp_wal_path("prune");
 
-    // Phase 1: Write 50 intent and update records
+    // Step 1: Write 50 intent and update records
     {
         let store = WalOrderStore::open(&path).expect("create wal store");
         for i in 0..50 {
@@ -163,7 +163,7 @@ fn test_wal_snapshot_compaction_pruning() {
         store.prune(&keep).expect("prune store");
     }
 
-    // Phase 2: Reopen and verify compaction kept only active orders
+    // Step 2: Reopen and verify compaction kept only active orders
     {
         let store = WalOrderStore::open(&path).expect("reopen pruned");
         let orders_after = store.load().expect("load pruned");

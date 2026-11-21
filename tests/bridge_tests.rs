@@ -438,6 +438,7 @@ fn test_history_result_completeness() {
         rates: vec![],
         complete: true,
         missing_ranges: vec![],
+        cancelled: false,
     };
     assert!(complete_res.complete);
     assert!(complete_res.is_complete());
@@ -447,6 +448,7 @@ fn test_history_result_completeness() {
         rates: vec![],
         complete: false,
         missing_ranges: vec![(1700000000, 1700010000)],
+        cancelled: false,
     };
     assert!(!partial_res.complete);
     assert!(!partial_res.is_complete());

@@ -12,7 +12,8 @@
 use crate::client::Mt5Client;
 use crate::error::{Mt5Error, Result};
 use crate::types::{
-    AccountInfo, Deal, Level, OrderRequest, Position, Rate, Timeframe, TradeResult, WorkingOrder,
+    AccountInfo, Deal, HistoryResult, Level, OrderRequest, Position, Rate, Timeframe, TradeResult,
+    WorkingOrder,
 };
 use std::sync::Arc;
 
@@ -94,6 +95,29 @@ pub trait TradingBackend {
     ) -> Result<Vec<Rate>> {
         Err(Mt5Error::UnsupportedFeature("CopyRates"))
     }
+
+    /// Chunked historical-rate download with cooperative cancellation.
+    ///
+    /// Implementations should check `cancel` between chunks and return a partial
+    /// [`HistoryResult`] with `cancelled: true` when set. The default delegates to
+    /// [`copy_rates`](Self::copy_rates) and ignores the cancel token.
+    fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<HistoryResult> {
+        let _ = cancel;
+        let rates = self.copy_rates(symbol, timeframe, from, to)?;
+        Ok(HistoryResult {
+            rates,
+            complete: true,
+            missing_ranges: vec![],
+            cancelled: false,
+        })
+    }
 }
 
 impl TradingBackend for Mt5Client {
@@ -164,6 +188,25 @@ impl TradingBackend for Mt5Client {
     ) -> Result<Vec<Rate>> {
         Mt5Client::copy_rates(self, symbol, timeframe, from, to)
     }
+
+    fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<HistoryResult> {
+        Mt5Client::copy_rates_chunked_cancellable(
+            self,
+            symbol,
+            timeframe,
+            from,
+            to,
+            2000,
+            Some(cancel),
+        )
+    }
 }
 
 // Ergonomics: keep `manager.submit_order(&arc_client, ..)` and `&&client` working now that the
@@ -228,6 +271,17 @@ impl<T: TradingBackend + ?Sized> TradingBackend for Arc<T> {
     ) -> Result<Vec<Rate>> {
         (**self).copy_rates(symbol, timeframe, from, to)
     }
+
+    fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<HistoryResult> {
+        (**self).copy_rates_chunked(symbol, timeframe, from, to, cancel)
+    }
 }
 
 impl<T: TradingBackend + ?Sized> TradingBackend for &T {
@@ -289,5 +343,16 @@ impl<T: TradingBackend + ?Sized> TradingBackend for &T {
         to: i64,
     ) -> Result<Vec<Rate>> {
         (**self).copy_rates(symbol, timeframe, from, to)
+    }
+
+    fn copy_rates_chunked(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        from: i64,
+        to: i64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<HistoryResult> {
+        (**self).copy_rates_chunked(symbol, timeframe, from, to, cancel)
     }
 }

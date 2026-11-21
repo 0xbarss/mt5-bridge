@@ -7,7 +7,7 @@
 //! sizes, and the client-order-id wire token format.
 
 use mt5_bridge::ffi::*;
-use mt5_bridge::{wire_id, WIRE_ID_LEN};
+use mt5_bridge::{wire_id, BookEvent, WIRE_ID_LEN};
 use std::fs;
 
 fn read(rel: &str) -> String {
@@ -307,4 +307,47 @@ fn dll_deals_request_layout_matches_the_ea_handler() {
         packs.windows(2).all(|w| w[0] < w[1]),
         "EA packs Mt5Deal fields in the wrong order: {packs:?}"
     );
+}
+
+#[test]
+fn book_event_timestamp_uses_server_time_msc_not_uptime() {
+    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let book_fn = ea
+        .split("void OnBookEvent(")
+        .nth(1)
+        .expect("void OnBookEvent must be present in EA");
+    let book_body = book_fn
+        .split("\n}\n")
+        .next()
+        .expect("end of OnBookEvent function body");
+
+    assert!(
+        book_body.contains("ServerTimeMsc()"),
+        "OnBookEvent must use ServerTimeMsc() for timestamp"
+    );
+    assert!(
+        !book_body.contains("GetMicrosecondCount"),
+        "OnBookEvent must not use GetMicrosecondCount uptime for timestamp"
+    );
+}
+
+#[test]
+fn synthetic_book_event_with_epoch_ms_round_trips() {
+    let mut sym = [0u8; 32];
+    sym[..6].copy_from_slice(b"EURUSD");
+    let raw = Mt5BookEvent {
+        symbol: sym,
+        time_msc: 1_710_000_200_789,
+        book_type: 1,
+        _pad: 0,
+        price: 1.08530,
+        volume: 100.0,
+        event_seq: 42,
+    };
+    let event = BookEvent::from_raw(raw);
+    assert_eq!(event.symbol, "EURUSD");
+    assert_eq!(event.time_msc, 1_710_000_200_789);
+    assert!(event.is_buy);
+    assert_eq!(event.price, 1.08530);
+    assert_eq!(event.volume, 100.0);
 }

@@ -93,6 +93,10 @@ pub struct BookEvent {
 
 impl BookEvent {
     pub fn from_raw(raw: Mt5BookEvent) -> Self {
+        let time_msc = raw.time_msc;
+        if time_msc > 0 && time_msc < 1_000_000_000_000 {
+            tracing::warn!(time_msc, "book event timestamp is not epoch milliseconds");
+        }
         let sym_len = raw
             .symbol
             .iter()
@@ -103,7 +107,7 @@ impl BookEvent {
             .to_string();
         Self {
             symbol,
-            time_msc: raw.time_msc,
+            time_msc,
             is_buy: raw.book_type == 1,
             price: raw.price,
             volume: raw.volume,
@@ -166,4 +170,47 @@ pub enum RejectionEvidence {
     ///
     /// The note records the operator's justification.
     OperatorResolved { note: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn book_event_round_trip() {
+        let mut sym = [0u8; 32];
+        sym[..6].copy_from_slice(b"GBPUSD");
+        let raw = Mt5BookEvent {
+            symbol: sym,
+            time_msc: 1_710_000_500_123,
+            book_type: 2,
+            _pad: 0,
+            price: 1.27500,
+            volume: 50.0,
+            event_seq: 101,
+        };
+        let event = BookEvent::from_raw(raw);
+        assert_eq!(event.symbol, "GBPUSD");
+        assert_eq!(event.time_msc, 1_710_000_500_123);
+        assert!(!event.is_buy);
+        assert_eq!(event.price, 1.27500);
+        assert_eq!(event.volume, 50.0);
+    }
+
+    #[test]
+    fn book_event_handles_uptime_timestamp_without_panic() {
+        let mut sym = [0u8; 32];
+        sym[..6].copy_from_slice(b"EURUSD");
+        let raw = Mt5BookEvent {
+            symbol: sym,
+            time_msc: 123_456,
+            book_type: 1,
+            _pad: 0,
+            price: 1.08500,
+            volume: 10.0,
+            event_seq: 1,
+        };
+        let event = BookEvent::from_raw(raw);
+        assert_eq!(event.time_msc, 123_456);
+    }
 }

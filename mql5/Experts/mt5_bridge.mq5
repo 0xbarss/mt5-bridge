@@ -718,6 +718,22 @@ datetime ConvertServerTimeToUTC(datetime t) {
     return (datetime)((long)t - sec_diff);
 }
 
+// Current server time in epoch milliseconds, normalized to UTC when InpConvertToUTC is enabled.
+long ServerTimeMsc() {
+    long sec = (long)TimeTradeServer();
+    if (InpConvertToUTC) {
+        long diff = (long)TimeTradeServer() - (long)TimeGMT();
+        if (diff >= -14 * 3600 && diff <= 14 * 3600) {
+            long rem = diff % 60;
+            if (rem >= 30) diff += (60 - rem);
+            else if (rem <= -30) diff -= (60 + rem);
+            else diff -= rem;
+            sec -= diff;
+        }
+    }
+    return sec * 1000;
+}
+
 void HandleCopyRates(long h, const uchar &payload[], uint len) {
     int off = 0;
     string sym = "";
@@ -2329,7 +2345,11 @@ void CheckSubscribedBars() {
             ArraySetAsSeries(rates, true);
             if (CopyRates(sym, (ENUM_TIMEFRAMES)tf, 1, 1, rates) == 1) {
                 datetime bar_time = rates[0].time;
-                if (InpConvertToUTC) bar_time = ConvertServerTimeToUTC(bar_time);
+                if (bar_time == 0) {
+                    bar_time = (datetime)(ServerTimeMsc() / 1000);
+                } else if (InpConvertToUTC) {
+                    bar_time = ConvertServerTimeToUTC(bar_time);
+                }
 
                 uchar payload[];
                 PackFixedString32(payload, sym);
@@ -2387,15 +2407,10 @@ void EnqueueTick(const string sym, const MqlTick &tick) {
     if (tm == 0) {
         tm = (long)tick.time * 1000;
     }
-    if (InpConvertToUTC) {
-        long sec_diff = (long)TimeTradeServer() - (long)TimeGMT();
-        if (sec_diff >= -14 * 3600 && sec_diff <= 14 * 3600) {
-            long rem = sec_diff % 60;
-            if (rem >= 30) sec_diff += (60 - rem);
-            else if (rem <= -30) sec_diff -= (60 + rem);
-            else sec_diff -= rem;
-            tm -= sec_diff * 1000;
-        }
+    if (tm == 0) {
+        tm = ServerTimeMsc();
+    } else if (InpConvertToUTC) {
+        tm -= ((long)TimeTradeServer() * 1000 - ServerTimeMsc());
     }
     g_tick_queue[g_tick_queue_head].symbol   = sym;
     g_tick_queue[g_tick_queue_head].time_msc = tm;
@@ -3068,7 +3083,7 @@ void OnBookEvent(const string &symbol) {
     MqlBookInfo book[];
     if (MarketBookGet(symbol, book)) {
         int book_count = ArraySize(book);
-        long now_msc = (long)GetMicrosecondCount() / 1000;
+        long now_msc = ServerTimeMsc();
         for (int i = 0; i < book_count; i++) {
             uchar payload[];
             PackFixedString32(payload, symbol);

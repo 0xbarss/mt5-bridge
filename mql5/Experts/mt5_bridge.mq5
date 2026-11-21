@@ -138,6 +138,7 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #define CMD_UNSUBSCRIBE_BOOK  18
 #define CMD_SUBSCRIBE_BARS    19
 #define CMD_UNSUBSCRIBE_BARS  20
+#define CMD_PING              21
 
 enum ENUM_SERVER_TIME_CONVENTION {
     SERVER_TIME_FIXED = 0,
@@ -2576,6 +2577,15 @@ void FlushTradeQueue() {
     }
 }
 
+void HandlePing(long h) {
+    long server_time = (long)TimeCurrent();
+    uint proto = PROTOCOL_VERSION;
+    uchar data[];
+    PackI64(data, server_time);
+    PackU32(data, proto);
+    SendOkData(h, data, (uint)ArraySize(data));
+}
+
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
@@ -2629,6 +2639,7 @@ bool DispatchRequest(long h) {
         case CMD_UNSUBSCRIBE_BOOK:  HandleUnsubscribeBook(h, payload, pay_len);  break;
         case CMD_SUBSCRIBE_BARS:    HandleSubscribeBars(h, payload, pay_len);    break;
         case CMD_UNSUBSCRIBE_BARS:  HandleUnsubscribeBars(h, payload, pay_len);  break;
+        case CMD_PING:              HandlePing(h);                               break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

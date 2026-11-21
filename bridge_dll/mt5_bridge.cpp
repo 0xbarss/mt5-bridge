@@ -112,6 +112,7 @@ enum Cmd : uint32_t {
     CMD_UNSUBSCRIBE_BOOK  = 18,
     CMD_SUBSCRIBE_BARS    = 19,
     CMD_UNSUBSCRIBE_BARS  = 20,
+    CMD_PING              = 21,
 };
 
 /* ── Request deadlines ──────────────────────────────────────────────────────
@@ -1200,6 +1201,24 @@ int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_
         std::memcpy(out_buf, ev.data.data(), n);
     }
     if (out_len) *out_len = n;
+    return 1;
+}
+
+MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol) {
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return 0;
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_PING, {}, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st != 1 || data.size() < 12) return 0;
+
+    if (server_time_secs) {
+        std::memcpy(server_time_secs, data.data(), 8);
+    }
+    if (protocol) {
+        std::memcpy(protocol, data.data() + 8, 4);
+    }
     return 1;
 }
 

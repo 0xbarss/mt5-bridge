@@ -30,6 +30,7 @@ impl Mt5Client {
             )));
         }
         let rx = self.event_bus.subscribe_ticks(symbol.trim());
+        self.register_tick_subscription(symbol.trim());
         Ok(crate::stream::TickSubscription::new(
             symbol.trim(),
             mode,
@@ -49,6 +50,7 @@ impl Mt5Client {
                 "UnsubscribeTicks failed for {symbol} (status={ret})"
             )));
         }
+        self.unregister_tick_subscription(symbol.trim());
         Ok(())
     }
 
@@ -63,6 +65,7 @@ impl Mt5Client {
                 "SubscribeTrade failed (status={ret})"
             )));
         }
+        self.register_trade_subscription();
         Ok(self.event_bus.subscribe_trade())
     }
 
@@ -77,6 +80,7 @@ impl Mt5Client {
                 "UnsubscribeTrade failed (status={ret})"
             )));
         }
+        self.unregister_trade_subscription();
         Ok(())
     }
 
@@ -95,6 +99,7 @@ impl Mt5Client {
                 "SubscribeBook failed for {symbol} (status={ret})"
             )));
         }
+        self.register_book_subscription(symbol.trim());
         Ok(self.event_bus.subscribe_book(symbol.trim()))
     }
 
@@ -110,6 +115,7 @@ impl Mt5Client {
                 "UnsubscribeBook failed for {symbol} (status={ret})"
             )));
         }
+        self.unregister_book_subscription(symbol.trim());
         Ok(())
     }
 
@@ -130,6 +136,7 @@ impl Mt5Client {
                 "SubscribeBars failed for {symbol} tf={tf_raw} (status={ret})"
             )));
         }
+        self.register_bars_subscription(symbol.trim(), timeframe);
         Ok(self.event_bus.subscribe_bars(symbol.trim(), tf_raw))
     }
 
@@ -146,6 +153,7 @@ impl Mt5Client {
                 "UnsubscribeBars failed for {symbol} tf={tf_raw} (status={ret})"
             )));
         }
+        self.unregister_bars_subscription(symbol.trim(), timeframe);
         Ok(())
     }
 

@@ -117,6 +117,7 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
+            fn_ping,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -236,6 +237,8 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_ping: Option<FnPing> = lib.get::<FnPing>(b"Ping\0").map(|s| *s).ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -252,6 +255,7 @@ impl Mt5Client {
                 fn_positions,
                 fn_orders,
                 fn_deals,
+                fn_ping,
             )
         };
 
@@ -334,11 +338,14 @@ impl Mt5Client {
         let event_bus = Arc::new(crate::stream::EventBus::new(2048));
         #[cfg(feature = "async")]
         let event_loop_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        #[cfg(feature = "async")]
+        let (disconnect_tx, _) = tokio::sync::broadcast::channel(16);
 
         #[cfg(feature = "async")]
         let event_pump_handle = if let Some(poll_fn) = fn_poll_event {
             let running = Arc::clone(&event_loop_running);
             let bus = Arc::clone(&event_bus);
+            let dis_tx = disconnect_tx.clone();
             std::thread::Builder::new()
                 .name("mt5-event-pump".to_string())
                 .spawn(move || {
@@ -355,7 +362,9 @@ impl Mt5Client {
                                 100,
                             )
                         };
-                        if res == 1 && out_len > 0 {
+                        if res < 0 {
+                            let _ = dis_tx.send(());
+                        } else if res == 1 && out_len > 0 {
                             match event_type {
                                 1 if out_len >= std::mem::size_of::<Mt5TickEvent>() as u32 => {
                                     let raw: Mt5TickEvent = unsafe {
@@ -409,6 +418,7 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
+            fn_ping,
             #[cfg(feature = "async")]
             fn_subscribe_ticks,
             #[cfg(feature = "async")]
@@ -436,6 +446,11 @@ impl Mt5Client {
             #[cfg(feature = "async")]
             event_pump_handle,
             is_shutdown: std::sync::atomic::AtomicBool::new(false),
+            session: Arc::new(Mutex::new(crate::session::Mt5Session::new(
+                crate::session::SessionConfig::default(),
+            ))),
+            #[cfg(feature = "async")]
+            disconnect_tx,
         };
 
         let pwd_c = CString::new(password)?;

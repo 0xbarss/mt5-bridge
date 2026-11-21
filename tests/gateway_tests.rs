@@ -16,7 +16,7 @@ use mt5_bridge::gateway::*;
 use mt5_bridge::reconciliation::{LifecycleState, OrderManager, SafetyPolicy};
 use mt5_bridge::session::*;
 use mt5_bridge::types::*;
-use mt5_bridge::Result;
+use mt5_bridge::{Mt5Error, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -437,6 +437,10 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
 
     let mut trade_rx = gateway.subscribe_trade_events();
 
+    gateway.wait_ready(Duration::from_secs(1)).await.unwrap();
+    let initial_reconcile = broker.reconcile_count();
+    assert_eq!(initial_reconcile, 1);
+
     // Event 1 (normal sequence)
     let ev1 = TradeEvent {
         deal: 101,
@@ -462,7 +466,7 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
 
     let received = trade_rx.recv().await.unwrap();
     assert_eq!(received.event_seq, 1);
-    assert_eq!(broker.reconcile_count(), 0);
+    assert_eq!(broker.reconcile_count(), initial_reconcile);
 
     // Event 5 (sequence gap: expected 2, received 5 -> gap of 3 events)
     let ev5 = TradeEvent {
@@ -946,4 +950,334 @@ async fn test_cancelled_p3_returns_partial_data_and_does_not_block_p1() {
 
     gateway.shutdown();
     let _ = join_handle.await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. Supervised Session Lifecycle, Reconnect, and Subscription Replay
+// ═════════════════════════════════════════════════════════════════════════════
+
+struct FlakyConnector {
+    attempts: Arc<AtomicUsize>,
+    broker: TestBroker,
+}
+
+impl FlakyConnector {
+    fn new(broker: TestBroker) -> (Self, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                attempts: Arc::clone(&attempts),
+                broker,
+            },
+            attempts,
+        )
+    }
+}
+
+impl Connector<TestBroker> for FlakyConnector {
+    fn connect(&self) -> Result<TestBroker> {
+        std::thread::sleep(Duration::from_millis(15));
+        let count = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if count < 2 {
+            Err(Mt5Error::TransmissionFailed("connect timeout".to_string()))
+        } else {
+            Ok(self.broker.clone())
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_flaky_connector_retries_and_transitions_through_lifecycle() {
+    let broker = TestBroker::new();
+    let (connector, attempts) = FlakyConnector::new(broker);
+    let mgr = test_manager();
+    let config = SessionConfig {
+        initial_backoff: Duration::from_millis(30),
+        max_backoff: Duration::from_millis(100),
+        backoff_factor: 2.0,
+        max_reconnect_attempts: Some(5),
+    };
+
+    let (gateway, join_handle) = Mt5Gateway::spawn_supervised(connector, mgr, config);
+
+    let mut state_rx = gateway.state_stream();
+    let mut recorded_states = Vec::new();
+    recorded_states.push(*state_rx.borrow());
+
+    let state_collector = tokio::spawn(async move {
+        while state_rx.changed().await.is_ok() {
+            let state = *state_rx.borrow();
+            recorded_states.push(state);
+            if state == LifecycleState::Ready {
+                break;
+            }
+        }
+        recorded_states
+    });
+
+    gateway
+        .wait_ready(Duration::from_secs(5))
+        .await
+        .expect("Gateway should eventually reach Ready state");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert!(gateway.is_ready());
+
+    let states = state_collector.await.unwrap();
+    assert!(states.contains(&LifecycleState::Connecting));
+    assert!(states.contains(&LifecycleState::Degraded));
+    assert!(states.contains(&LifecycleState::Syncing));
+    assert!(states.contains(&LifecycleState::Reconciling));
+    assert_eq!(*states.last().unwrap(), LifecycleState::Ready);
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_p1_submissions_rejected_while_not_ready() {
+    struct AlwaysFailingConnector;
+    impl Connector<TestBroker> for AlwaysFailingConnector {
+        fn connect(&self) -> Result<TestBroker> {
+            Err(Mt5Error::TransmissionFailed("refused".to_string()))
+        }
+    }
+
+    let mgr = test_manager();
+    let config = SessionConfig {
+        initial_backoff: Duration::from_millis(50),
+        max_backoff: Duration::from_millis(100),
+        backoff_factor: 2.0,
+        max_reconnect_attempts: Some(10),
+    };
+
+    let (gateway, join_handle) = Mt5Gateway::spawn_supervised(AlwaysFailingConnector, mgr, config);
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!gateway.is_ready());
+
+    let res = gateway
+        .submit_order(buy_order("EURUSD", 0.1, "not-ready-order"))
+        .await;
+
+    match res {
+        Err(Mt5Error::PreflightRejected(msg)) => {
+            assert!(
+                msg.contains("not ready"),
+                "Expected rejection message to state not ready, got: {msg}"
+            );
+        }
+        other => panic!("Expected PreflightRejected error, got: {other:?}"),
+    }
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[derive(Clone)]
+struct DisconnectingBroker {
+    requests_before_disconnect: Arc<AtomicUsize>,
+    subscription_replays: Arc<AtomicUsize>,
+    _state: Arc<Mutex<BrokerState>>,
+}
+
+impl DisconnectingBroker {
+    fn new(
+        requests_before_disconnect: Arc<AtomicUsize>,
+        subscription_replays: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            requests_before_disconnect,
+            subscription_replays,
+            _state: Arc::new(Mutex::new(BrokerState::default())),
+        }
+    }
+}
+
+impl TradingBackend for DisconnectingBroker {
+    fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+        let remaining = self.requests_before_disconnect.load(Ordering::SeqCst);
+        if remaining == 0 {
+            return Err(Mt5Error::PipeDisconnected);
+        }
+        self.requests_before_disconnect
+            .fetch_sub(1, Ordering::SeqCst);
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 1,
+            order: 1,
+            position: 1,
+            volume: req.volume,
+            price: 1.0850,
+        })
+    }
+
+    fn order_close_with_magic(&self, _ticket: u64, _magic: u64) -> Result<TradeResult> {
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 1,
+            order: 1,
+            position: 1,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn order_modify_with_magic(
+        &self,
+        _ticket: u64,
+        _magic: u64,
+        _stop_loss: Level,
+        _take_profit: Level,
+    ) -> Result<TradeResult> {
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 1,
+            order: 1,
+            position: 1,
+            volume: 0.1,
+            price: 1.0850,
+        })
+    }
+
+    fn positions_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        let remaining = self.requests_before_disconnect.load(Ordering::SeqCst);
+        if remaining == 0 {
+            return Err(Mt5Error::PipeDisconnected);
+        }
+        Ok(Vec::new())
+    }
+
+    fn pending_orders_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        Ok(Vec::new())
+    }
+
+    fn account_info(&self) -> Result<AccountInfo> {
+        let remaining = self.requests_before_disconnect.load(Ordering::SeqCst);
+        if remaining == 0 {
+            return Err(Mt5Error::PipeDisconnected);
+        }
+        self.requests_before_disconnect
+            .fetch_sub(1, Ordering::SeqCst);
+        Ok(AccountInfo {
+            balance: 10000.0,
+            equity: 10000.0,
+            margin: 0.0,
+            free_margin: 10000.0,
+            leverage: 100.0,
+            currency: "USD".to_string(),
+        })
+    }
+
+    fn subscribe_ticks(&self, _symbol: &str) -> Result<()> {
+        self.subscription_replays.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn subscribe_trade(&self) -> Result<()> {
+        self.subscription_replays.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+struct ReconnectingConnector {
+    connect_count: Arc<AtomicUsize>,
+    requests_before_disconnect: Arc<AtomicUsize>,
+    subscription_replays: Arc<AtomicUsize>,
+}
+
+impl Connector<DisconnectingBroker> for ReconnectingConnector {
+    fn connect(&self) -> Result<DisconnectingBroker> {
+        self.connect_count.fetch_add(1, Ordering::SeqCst);
+        self.requests_before_disconnect.store(2, Ordering::SeqCst);
+        Ok(DisconnectingBroker::new(
+            Arc::clone(&self.requests_before_disconnect),
+            Arc::clone(&self.subscription_replays),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn test_backend_disconnect_triggers_backoff_reconnect_and_subscription_replay() {
+    let connect_count = Arc::new(AtomicUsize::new(0));
+    let requests_before_disconnect = Arc::new(AtomicUsize::new(2));
+    let subscription_replays = Arc::new(AtomicUsize::new(0));
+
+    let connector = ReconnectingConnector {
+        connect_count: Arc::clone(&connect_count),
+        requests_before_disconnect: Arc::clone(&requests_before_disconnect),
+        subscription_replays: Arc::clone(&subscription_replays),
+    };
+
+    let mgr = test_manager();
+    let config = SessionConfig {
+        initial_backoff: Duration::from_millis(50),
+        max_backoff: Duration::from_millis(200),
+        backoff_factor: 2.0,
+        max_reconnect_attempts: Some(5),
+    };
+
+    let (gateway, join_handle) = Mt5Gateway::spawn_supervised(connector, mgr, config);
+
+    gateway
+        .wait_ready(Duration::from_secs(3))
+        .await
+        .expect("Gateway should reach Ready initially");
+    assert_eq!(connect_count.load(Ordering::SeqCst), 1);
+
+    gateway.register_tick_subscription("EURUSD");
+    gateway.register_trade_subscription();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(subscription_replays.load(Ordering::SeqCst), 2);
+
+    let _ = gateway.account_info().await;
+    let _ = gateway.account_info().await;
+
+    let res = gateway.account_info().await;
+    assert!(res.is_err());
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    gateway
+        .wait_ready(Duration::from_secs(3))
+        .await
+        .expect("Gateway should recover and reach Ready after disconnect");
+
+    assert!(connect_count.load(Ordering::SeqCst) >= 2);
+    assert!(
+        subscription_replays.load(Ordering::SeqCst) >= 4,
+        "Subscriptions must be replayed upon reconnection"
+    );
+
+    gateway.shutdown();
+    let _ = join_handle.await;
+}
+
+#[tokio::test]
+async fn test_session_state_stream_and_wait_ready_standalone() {
+    let session = Mt5Session::new(SessionConfig::default());
+    assert_eq!(session.state(), LifecycleState::Starting);
+
+    let wait_handle =
+        tokio::spawn(async move { session.wait_ready(Duration::from_millis(20)).await });
+
+    let res = wait_handle.await.unwrap();
+    assert!(matches!(res, Err(Mt5Error::Timeout { .. })));
+
+    let mut session2 = Mt5Session::new(SessionConfig::default());
+    session2.on_connected();
+    session2.on_synced();
+    session2.on_reconciled();
+    assert!(session2.is_ready());
+
+    let res2 = session2.wait_ready(Duration::from_millis(50)).await;
+    assert!(res2.is_ok());
 }

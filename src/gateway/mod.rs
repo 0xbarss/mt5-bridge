@@ -16,8 +16,58 @@ pub mod executor;
 pub use actor::{Mt5Gateway, Mt5GatewayHandle, P1Command, P2Command, P3Command};
 pub use executor::BlockingExecutor;
 
+use crate::backend::TradingBackend;
+use crate::error::{Mt5Error, Result};
 use crate::session::SessionConfig;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Abstraction for connecting and health-checking trading backends with automatic lifecycle supervision.
+pub trait Connector<B: TradingBackend + Send + Sync + 'static>: Send + Sync + 'static {
+    /// Establish a fresh connection to the trading backend.
+    fn connect(&self) -> Result<B>;
+
+    /// Check connection health of an active backend instance.
+    fn health_check(&self, backend: &B) -> Result<()> {
+        backend.account_info().map(|_| ())
+    }
+}
+
+/// One-shot connector wrapping a pre-connected backend. Subsequent reconnect attempts fail.
+pub struct FixedConnector<B> {
+    backend: Mutex<Option<B>>,
+}
+
+impl<B> FixedConnector<B> {
+    /// Create a new one-shot connector.
+    pub fn new(backend: B) -> Self {
+        Self {
+            backend: Mutex::new(Some(backend)),
+        }
+    }
+}
+
+impl<B: TradingBackend + Send + Sync + 'static> Connector<B> for FixedConnector<B> {
+    fn connect(&self) -> Result<B> {
+        self.backend
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .ok_or_else(|| {
+                Mt5Error::PreflightRejected("one-shot backend cannot reconnect".to_string())
+            })
+    }
+}
+
+impl<B, F> Connector<B> for F
+where
+    B: TradingBackend + Send + Sync + 'static,
+    F: Fn() -> Result<B> + Send + Sync + 'static,
+{
+    fn connect(&self) -> Result<B> {
+        (self)()
+    }
+}
 
 /// Configuration options for the MT5 Gateway actor and its blocking executor.
 #[derive(Debug, Clone)]

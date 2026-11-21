@@ -1,3 +1,4 @@
+use crate::error::{Mt5Error, Result};
 use crate::ffi::*;
 use crate::types::*;
 use std::collections::HashMap;
@@ -30,6 +31,7 @@ pub struct Mt5Client {
     pub(crate) fn_positions: Option<FnPositions>,
     pub(crate) fn_orders: Option<FnOrders>,
     pub(crate) fn_deals: Option<FnDeals>,
+    pub(crate) fn_ping: Option<FnPing>,
     #[cfg(feature = "async")]
     pub(crate) fn_subscribe_ticks: Option<FnSubscribeTicks>,
     #[cfg(feature = "async")]
@@ -57,6 +59,9 @@ pub struct Mt5Client {
     #[cfg(feature = "async")]
     pub(crate) event_pump_handle: Option<std::thread::JoinHandle<()>>,
     pub(crate) is_shutdown: std::sync::atomic::AtomicBool,
+    pub(crate) session: Arc<Mutex<crate::session::Mt5Session>>,
+    #[cfg(feature = "async")]
+    pub(crate) disconnect_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 // Safety: Mt5Client is safe to send and share across threads.
@@ -87,5 +92,102 @@ impl Drop for ActiveGuard {
         if self.armed {
             CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+}
+
+impl Mt5Client {
+    /// Session tracking connectivity, subscriptions, and reconciliation state.
+    pub fn session(&self) -> Arc<Mutex<crate::session::Mt5Session>> {
+        Arc::clone(&self.session)
+    }
+
+    /// Register a symbol tick subscription to be preserved across reconnects.
+    pub fn register_tick_subscription(&self, symbol: &str) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .register_tick_subscription(symbol);
+    }
+
+    /// Unregister a symbol tick subscription.
+    pub fn unregister_tick_subscription(&self, symbol: &str) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unregister_tick_subscription(symbol);
+    }
+
+    /// Register trade event subscription to be preserved across reconnects.
+    pub fn register_trade_subscription(&self) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .register_trade_subscription();
+    }
+
+    /// Unregister trade event subscription.
+    pub fn unregister_trade_subscription(&self) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unregister_trade_subscription();
+    }
+
+    /// Register depth-of-market book subscription.
+    pub fn register_book_subscription(&self, symbol: &str) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .register_book_subscription(symbol);
+    }
+
+    /// Unregister depth-of-market book subscription.
+    pub fn unregister_book_subscription(&self, symbol: &str) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unregister_book_subscription(symbol);
+    }
+
+    /// Register closed-bar subscription.
+    pub fn register_bars_subscription(&self, symbol: &str, timeframe: Timeframe) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .register_bars_subscription(symbol, timeframe);
+    }
+
+    /// Unregister closed-bar subscription.
+    pub fn unregister_bars_subscription(&self, symbol: &str, timeframe: Timeframe) {
+        self.session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unregister_bars_subscription(symbol, timeframe);
+    }
+
+    /// Send a heartbeat ping to MT5 and return the server timestamp and negotiated protocol.
+    pub fn ping(&self) -> Result<PingResult> {
+        if let Some(fn_ping) = self.fn_ping {
+            let mut server_time: i64 = 0;
+            let mut protocol: u32 = 0;
+            let ret = unsafe { fn_ping(&mut server_time, &mut protocol) };
+            if ret == 1 {
+                return Ok(PingResult {
+                    server_time_secs: server_time,
+                    protocol,
+                });
+            }
+            return Err(Mt5Error::PipeDisconnected);
+        }
+        self.account_info().map(|_| PingResult {
+            server_time_secs: chrono::Utc::now().timestamp(),
+            protocol: crate::ffi::PROTOCOL_VERSION,
+        })
+    }
+
+    /// Subscribe to connection disconnect notifications.
+    #[cfg(feature = "async")]
+    pub fn subscribe_disconnect(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.disconnect_tx.subscribe()
     }
 }

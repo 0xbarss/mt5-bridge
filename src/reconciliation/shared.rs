@@ -46,6 +46,11 @@ impl SharedOrderManager {
         self.lock().strategy_magic()
     }
 
+    /// Set current operational lifecycle state.
+    pub fn set_lifecycle(&self, state: LifecycleState) {
+        self.lock().set_lifecycle(state);
+    }
+
     /// See [`OrderManager::submit_order`]. The lock is held for the whole call.
     pub fn submit_order<B: TradingBackend + ?Sized>(
         &self,

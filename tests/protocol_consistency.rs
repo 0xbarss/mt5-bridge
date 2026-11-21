@@ -94,6 +94,7 @@ fn command_ids_agree_across_rust_dll_and_ea() {
         ("CMD_UNSUBSCRIBE_BOOK", ProtocolCmd::UnsubscribeBook),
         ("CMD_SUBSCRIBE_BARS", ProtocolCmd::SubscribeBars),
         ("CMD_UNSUBSCRIBE_BARS", ProtocolCmd::UnsubscribeBars),
+        ("CMD_PING", ProtocolCmd::Ping),
     ];
     for (name, cmd) in table {
         assert_eq!(cpp_enum(&cpp, name), cmd as u64, "DLL {name}");

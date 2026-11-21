@@ -7,9 +7,14 @@
 //! - Automatic tracking and restoration of symbol tick, book, and trade event subscriptions upon reconnection.
 //! - Mandatory broker state reconciliation before unlocking order submissions.
 
+#[cfg(feature = "async")]
+use crate::error::{Mt5Error, Result};
 use crate::reconciliation::LifecycleState;
+use crate::types::Timeframe;
 use std::collections::HashSet;
 use std::time::Duration;
+#[cfg(feature = "async")]
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 /// Configuration governing session reconnection, backoff, and health checks.
@@ -46,12 +51,17 @@ pub struct Mt5Session {
     subscribed_ticks: HashSet<String>,
     subscribed_trades: bool,
     subscribed_books: HashSet<String>,
+    subscribed_bars: HashSet<(String, Timeframe)>,
+    #[cfg(feature = "async")]
+    state_tx: watch::Sender<LifecycleState>,
 }
 
 impl Mt5Session {
     /// Create a new session initialized in the `Starting` state.
     pub fn new(config: SessionConfig) -> Self {
         let initial_backoff = config.initial_backoff;
+        #[cfg(feature = "async")]
+        let (state_tx, _) = watch::channel(LifecycleState::Starting);
         Self {
             state: LifecycleState::Starting,
             config,
@@ -60,12 +70,47 @@ impl Mt5Session {
             subscribed_ticks: HashSet::new(),
             subscribed_trades: false,
             subscribed_books: HashSet::new(),
+            subscribed_bars: HashSet::new(),
+            #[cfg(feature = "async")]
+            state_tx,
         }
+    }
+
+    #[inline]
+    fn notify_state(&self, _new_state: LifecycleState) {
+        #[cfg(feature = "async")]
+        let _ = self.state_tx.send_replace(_new_state);
     }
 
     /// Current operational lifecycle state.
     pub fn state(&self) -> LifecycleState {
         self.state
+    }
+
+    /// Subscribe to changes in the lifecycle state stream.
+    #[cfg(feature = "async")]
+    pub fn state_stream(&self) -> watch::Receiver<LifecycleState> {
+        self.state_tx.subscribe()
+    }
+
+    /// Wait until the session transitions to `LifecycleState::Ready`, timing out after `timeout`.
+    #[cfg(feature = "async")]
+    pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
+        tokio::time::timeout(timeout, async {
+            let mut rx = self.state_tx.subscribe();
+            loop {
+                if *rx.borrow() == LifecycleState::Ready {
+                    return Ok(());
+                }
+                rx.changed()
+                    .await
+                    .map_err(|_| Mt5Error::ChannelDisconnected)?;
+            }
+        })
+        .await
+        .map_err(|_| Mt5Error::Timeout {
+            operation: "wait_ready".to_string(),
+        })?
     }
 
     /// Whether the session is reconciled and ready to safely accept trade operations.
@@ -92,6 +137,7 @@ impl Mt5Session {
                 "Mt5Session state transition"
             );
             self.state = new_state;
+            self.notify_state(new_state);
         }
     }
 
@@ -110,6 +156,7 @@ impl Mt5Session {
                     "Max reconnection attempts exceeded; stopping session"
                 );
                 self.state = LifecycleState::Stopped;
+                self.notify_state(LifecycleState::Stopped);
                 return;
             }
         }
@@ -119,6 +166,8 @@ impl Mt5Session {
         let multiplier = self.config.backoff_factor.powi(exponent);
         let calculated = self.config.initial_backoff.mul_f64(multiplier);
         self.current_backoff = calculated.min(self.config.max_backoff);
+
+        self.notify_state(self.state);
 
         warn!(
             failures = self.consecutive_failures,
@@ -136,12 +185,14 @@ impl Mt5Session {
         self.consecutive_failures = 0;
         self.current_backoff = self.config.initial_backoff;
         self.state = LifecycleState::Syncing;
+        self.notify_state(self.state);
     }
 
     /// Signal successful completion of symbol syncing, ready to begin mandatory reconciliation.
     pub fn on_synced(&mut self) {
         info!("Mt5Session synced; transitioning to Reconciling");
         self.state = LifecycleState::Reconciling;
+        self.notify_state(self.state);
     }
 
     /// Signal successful completion of broker reconciliation.
@@ -150,6 +201,7 @@ impl Mt5Session {
     pub fn on_reconciled(&mut self) {
         info!("Mt5Session reconciled successfully; transitioning to Ready");
         self.state = LifecycleState::Ready;
+        self.notify_state(self.state);
     }
 
     /// Register a symbol tick subscription to be preserved across reconnects.
@@ -195,6 +247,22 @@ impl Mt5Session {
     /// Set of symbols currently registered for book feeds.
     pub fn active_book_subscriptions(&self) -> &HashSet<String> {
         &self.subscribed_books
+    }
+
+    /// Register closed-bar subscription.
+    pub fn register_bars_subscription(&mut self, symbol: &str, timeframe: Timeframe) {
+        self.subscribed_bars.insert((symbol.to_string(), timeframe));
+    }
+
+    /// Unregister closed-bar subscription.
+    pub fn unregister_bars_subscription(&mut self, symbol: &str, timeframe: Timeframe) {
+        self.subscribed_bars
+            .remove(&(symbol.to_string(), timeframe));
+    }
+
+    /// Set of (symbol, timeframe) currently registered for bar feeds.
+    pub fn active_bar_subscriptions(&self) -> &HashSet<(String, Timeframe)> {
+        &self.subscribed_bars
     }
 }
 

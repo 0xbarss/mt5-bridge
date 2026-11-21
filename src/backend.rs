@@ -118,6 +118,37 @@ pub trait TradingBackend {
             cancelled: false,
         })
     }
+
+    /// Check backend responsiveness via heartbeat ping.
+    fn ping(&self) -> Result<()> {
+        self.account_info().map(|_| ())
+    }
+
+    /// Subscribe to real-time tick quotes.
+    fn subscribe_ticks(&self, _symbol: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Subscribe to real-time broker trade events.
+    fn subscribe_trade(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Subscribe to depth-of-market book updates.
+    fn subscribe_book(&self, _symbol: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Subscribe to closed-bar notifications.
+    fn subscribe_bars(&self, _symbol: &str, _timeframe: Timeframe) -> Result<()> {
+        Ok(())
+    }
+
+    /// Subscribe to connection disconnect notifications if supported by backend.
+    #[cfg(feature = "async")]
+    fn subscribe_disconnect(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        None
+    }
 }
 
 impl TradingBackend for Mt5Client {
@@ -207,6 +238,62 @@ impl TradingBackend for Mt5Client {
             Some(cancel),
         )
     }
+
+    fn ping(&self) -> Result<()> {
+        Mt5Client::ping(self).map(|_| ())
+    }
+
+    fn subscribe_ticks(&self, symbol: &str) -> Result<()> {
+        #[cfg(feature = "async")]
+        {
+            Mt5Client::subscribe_ticks(self, symbol).map(|_| ())
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            let _ = symbol;
+            Ok(())
+        }
+    }
+
+    fn subscribe_trade(&self) -> Result<()> {
+        #[cfg(feature = "async")]
+        {
+            Mt5Client::subscribe_trade(self).map(|_| ())
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            Ok(())
+        }
+    }
+
+    fn subscribe_book(&self, symbol: &str) -> Result<()> {
+        #[cfg(feature = "async")]
+        {
+            Mt5Client::subscribe_book(self, symbol).map(|_| ())
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            let _ = symbol;
+            Ok(())
+        }
+    }
+
+    fn subscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<()> {
+        #[cfg(feature = "async")]
+        {
+            Mt5Client::subscribe_bars(self, symbol, timeframe).map(|_| ())
+        }
+        #[cfg(not(feature = "async"))]
+        {
+            let _ = (symbol, timeframe);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "async")]
+    fn subscribe_disconnect(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        Some(self.subscribe_disconnect())
+    }
 }
 
 // Ergonomics: keep `manager.submit_order(&arc_client, ..)` and `&&client` working now that the
@@ -282,6 +369,26 @@ impl<T: TradingBackend + ?Sized> TradingBackend for Arc<T> {
     ) -> Result<HistoryResult> {
         (**self).copy_rates_chunked(symbol, timeframe, from, to, cancel)
     }
+
+    fn ping(&self) -> Result<()> {
+        (**self).ping()
+    }
+    fn subscribe_ticks(&self, symbol: &str) -> Result<()> {
+        (**self).subscribe_ticks(symbol)
+    }
+    fn subscribe_trade(&self) -> Result<()> {
+        (**self).subscribe_trade()
+    }
+    fn subscribe_book(&self, symbol: &str) -> Result<()> {
+        (**self).subscribe_book(symbol)
+    }
+    fn subscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<()> {
+        (**self).subscribe_bars(symbol, timeframe)
+    }
+    #[cfg(feature = "async")]
+    fn subscribe_disconnect(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        (**self).subscribe_disconnect()
+    }
 }
 
 impl<T: TradingBackend + ?Sized> TradingBackend for &T {
@@ -354,5 +461,25 @@ impl<T: TradingBackend + ?Sized> TradingBackend for &T {
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<HistoryResult> {
         (**self).copy_rates_chunked(symbol, timeframe, from, to, cancel)
+    }
+
+    fn ping(&self) -> Result<()> {
+        (**self).ping()
+    }
+    fn subscribe_ticks(&self, symbol: &str) -> Result<()> {
+        (**self).subscribe_ticks(symbol)
+    }
+    fn subscribe_trade(&self) -> Result<()> {
+        (**self).subscribe_trade()
+    }
+    fn subscribe_book(&self, symbol: &str) -> Result<()> {
+        (**self).subscribe_book(symbol)
+    }
+    fn subscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<()> {
+        (**self).subscribe_bars(symbol, timeframe)
+    }
+    #[cfg(feature = "async")]
+    fn subscribe_disconnect(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        (**self).subscribe_disconnect()
     }
 }

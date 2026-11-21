@@ -85,6 +85,7 @@ Every binary packet across the pipe starts with a 16-byte header (`#pragma pack(
 | `18` | `CMD_UNSUBSCRIBE_BOOK` | Req → Resp | Unsubscribe from Level II Market Depth DOM updates. |
 | `19` | `CMD_SUBSCRIBE_BARS` | Req → Resp | Subscribe to closed-bar notifications for symbol and timeframe. |
 | `20` | `CMD_UNSUBSCRIBE_BARS`| Req → Resp | Unsubscribe from closed-bar notifications. |
+| `21` | `CMD_PING` | Req → Resp | Heartbeat ping returning server_time_secs (`int64`) and protocol (`uint32`). |
 
 ---
 

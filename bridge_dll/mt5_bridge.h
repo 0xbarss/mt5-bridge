@@ -297,6 +297,9 @@ MT5_API int UnsubscribeBook(const char* symbol);
 MT5_API int SubscribeBars(const char* symbol, int timeframe);
 MT5_API int UnsubscribeBars(const char* symbol, int timeframe);
 
+/* Heartbeat ping returning MT5 server time and negotiated protocol version. */
+MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol);
+
 /* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);
 MT5_API int RegisterEventCallback(Mt5EventCallback cb);

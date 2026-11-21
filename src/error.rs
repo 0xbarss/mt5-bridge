@@ -154,6 +154,9 @@ pub enum Mt5Error {
     #[error("Stream channel disconnected")]
     ChannelDisconnected,
 
+    #[error("Named pipe disconnected or communication broken")]
+    PipeDisconnected,
+
     #[error("Internal bridge error: {0}")]
     Other(String),
 }

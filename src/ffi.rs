@@ -463,6 +463,7 @@ pub type FnSubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnUnsubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnSubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 pub type FnUnsubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+pub type FnPing = unsafe extern "C" fn(*mut i64, *mut u32) -> c_int;
 pub type Mt5EventCallback = unsafe extern "C" fn(u16, *const u8, u32);
 pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_int;
 pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
@@ -493,4 +494,5 @@ pub enum ProtocolCmd {
     UnsubscribeBook = 18,
     SubscribeBars = 19,
     UnsubscribeBars = 20,
+    Ping = 21,
 }

@@ -19,8 +19,11 @@ impl Mt5Client {
         }
         super::client::CLIENT_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         #[cfg(feature = "async")]
-        self.event_loop_running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        {
+            self.event_loop_running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.disconnect_tx.send(());
+        }
         let ret = unsafe { (self.fn_shut)() };
         if ret != 1 {
             return Err(Mt5Error::Other(format!(

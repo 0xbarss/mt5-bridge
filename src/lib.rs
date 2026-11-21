@@ -86,7 +86,8 @@ pub use error::{mt5_retcode_description, Mt5Error, Result};
 pub use ffi::PROTOCOL_VERSION;
 #[cfg(feature = "async")]
 pub use gateway::{
-    BlockingExecutor, GatewayConfig, Mt5Gateway, Mt5GatewayHandle, P1Command, P2Command, P3Command,
+    BlockingExecutor, Connector, FixedConnector, GatewayConfig, Mt5Gateway, Mt5GatewayHandle,
+    P1Command, P2Command, P3Command,
 };
 pub use journal::OrderStore;
 #[cfg(feature = "serde_json")]
@@ -105,8 +106,8 @@ pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
     BookEvent, Deal, DealEntry, EventEffect, Fill, HistoryResult, Level, MismatchKind,
-    OrderRequest, OrderState, OrderType, Position, Rate, RejectionEvidence, StreamMode, SymbolInfo,
-    Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeStatus, WorkingOrder,
+    OrderRequest, OrderState, OrderType, PingResult, Position, Rate, RejectionEvidence, StreamMode,
+    SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeStatus, WorkingOrder,
     MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
 };
 

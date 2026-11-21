@@ -32,3 +32,12 @@ impl AccountInfo {
         }
     }
 }
+
+/// Result of a heartbeat ping to MT5 EA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PingResult {
+    /// Current server time reported by MT5 terminal in UTC seconds.
+    pub server_time_secs: i64,
+    /// Wire protocol version negotiated with the EA.
+    pub protocol: u32,
+}

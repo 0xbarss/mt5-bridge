@@ -22,7 +22,7 @@ pub mod working_order;
 #[cfg(test)]
 mod tests;
 
-pub use account::AccountInfo;
+pub use account::{AccountInfo, PingResult};
 pub use bar::Bar;
 pub use deal::{Deal, DealEntry};
 pub use history::HistoryResult;

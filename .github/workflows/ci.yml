@@ -46,6 +46,7 @@ jobs:
           - "--no-default-features"
           - "--no-default-features --features async"
           - "--no-default-features --features serde_json"
+          - "--no-default-features --features wal"
           - "--all-features"
     steps:
       - name: Checkout repository

@@ -40,6 +40,7 @@ pub mod manager;
 pub mod shared;
 pub mod state;
 
+#[cfg(feature = "async")]
 pub(crate) use classification::classify_send_error;
 pub use manager::OrderManager;
 pub use shared::SharedOrderManager;

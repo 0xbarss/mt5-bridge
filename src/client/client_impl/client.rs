@@ -30,14 +30,23 @@ pub struct Mt5Client {
     pub(crate) fn_positions: Option<FnPositions>,
     pub(crate) fn_orders: Option<FnOrders>,
     pub(crate) fn_deals: Option<FnDeals>,
+    #[cfg(feature = "async")]
     pub(crate) fn_subscribe_ticks: Option<FnSubscribeTicks>,
+    #[cfg(feature = "async")]
     pub(crate) fn_unsubscribe_ticks: Option<FnUnsubscribeTicks>,
+    #[cfg(feature = "async")]
     pub(crate) fn_subscribe_trade: Option<FnSubscribeTrade>,
+    #[cfg(feature = "async")]
     pub(crate) fn_unsubscribe_trade: Option<FnUnsubscribeTrade>,
+    #[cfg(feature = "async")]
     pub(crate) fn_subscribe_book: Option<FnSubscribeBook>,
+    #[cfg(feature = "async")]
     pub(crate) fn_unsubscribe_book: Option<FnUnsubscribeBook>,
+    #[cfg(feature = "async")]
     pub(crate) fn_subscribe_bars: Option<FnSubscribeBars>,
+    #[cfg(feature = "async")]
     pub(crate) fn_unsubscribe_bars: Option<FnUnsubscribeBars>,
+    #[cfg(feature = "async")]
     pub(crate) fn_events_dropped_total: Option<FnEventsDroppedTotal>,
     pub(crate) symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     pub(crate) symbol_cache_ttl: Duration,

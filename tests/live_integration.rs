@@ -56,15 +56,31 @@ fn get_client() -> Option<(Mt5Client, LiveGuard)> {
     if require_live {
         panic!("MT5_REQUIRE_LIVE is set, but Mt5Client::connect failed: {last_err:?}");
     }
+    static REPORT_ONCE: std::sync::Once = std::sync::Once::new();
+    REPORT_ONCE.call_once(|| {
+        eprintln!(
+            "\n[SKIPPED] Live integration tests skipped: MT5_REQUIRE_LIVE is not set and no live MT5 connection \
+             could be established ({last_err:?}). Set MT5_REQUIRE_LIVE=1 with valid credentials to enforce."
+        );
+    });
     None
+}
+
+macro_rules! require_client_or_skip {
+    ($name:literal) => {
+        match get_client() {
+            Some(cg) => cg,
+            None => {
+                eprintln!("SKIPPED: {} (live MT5 terminal unavailable)", $name);
+                return;
+            }
+        }
+    };
 }
 
 #[test]
 fn test_live_account_info() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_account_info");
 
     let acct = client.account_info().expect("account_info failed");
     assert!(acct.balance > 0.0, "Balance should be positive");
@@ -77,10 +93,7 @@ fn test_live_account_info() {
 
 #[test]
 fn test_live_symbol_info() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_symbol_info");
 
     let info = client.symbol_info("EURUSD").expect("symbol_info failed");
     assert_eq!(info.symbol, "EURUSD");
@@ -99,10 +112,7 @@ fn test_live_symbol_info() {
 
 #[test]
 fn test_live_copy_rates_and_bars() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_copy_rates_and_bars");
 
     let now = Utc::now().timestamp();
     let from = now - (48 * 3600); // 48h lookback ensures Friday bars are retrieved on weekends
@@ -123,10 +133,7 @@ fn test_live_copy_rates_and_bars() {
 
 #[test]
 fn test_live_symbol_tick() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_symbol_tick");
 
     let tick = client.symbol_tick("EURUSD").expect("symbol_tick failed");
     assert!(tick.bid > 0.0);
@@ -168,10 +175,7 @@ fn test_live_pending_order_lifecycle() {
         return;
     }
 
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_pending_order_lifecycle");
 
     let tick = client.symbol_tick("EURUSD").expect("tick failed");
     let info = client.symbol_info("EURUSD").expect("info failed");
@@ -221,10 +225,7 @@ fn test_live_pending_order_lifecycle() {
 
 #[test]
 fn test_live_chunked_history() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_chunked_history");
 
     let now = Utc::now().timestamp();
     let start = now - (7 * 86400); // 7 days of H1
@@ -247,10 +248,7 @@ fn test_live_market_order_lifecycle() {
         return;
     }
 
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_market_order_lifecycle");
 
     let info = client.symbol_info("EURUSD").expect("info failed");
     let req = OrderRequest::buy("EURUSD", info.min_lot).comment("live_market_test");
@@ -286,10 +284,7 @@ fn test_live_market_order_lifecycle() {
 
 #[test]
 fn test_live_events_dropped_total() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_events_dropped_total");
 
     let dropped = client.events_dropped_total();
     println!("Live events dropped counter: {dropped}");
@@ -299,10 +294,7 @@ fn test_live_events_dropped_total() {
 
 #[test]
 fn test_live_positions_and_orders() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_positions_and_orders");
 
     let positions = client.positions().expect("client.positions failed");
     println!("Live positions retrieved: {}", positions.len());
@@ -317,10 +309,7 @@ fn test_live_positions_and_orders() {
 fn test_live_reconciliation_engine() {
     use mt5_bridge::{LifecycleState, OrderManager};
 
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_reconciliation_engine");
 
     let mut manager = OrderManager::new(998877);
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
@@ -339,10 +328,7 @@ fn test_live_reconciliation_engine() {
 
 #[test]
 fn test_live_deal_history() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_deal_history");
 
     let now = Utc::now().timestamp();
     let from = now - (30 * 86400); // 30 days lookback
@@ -358,10 +344,8 @@ fn test_live_deal_history() {
 fn test_live_order_manager_reconciliation_with_deals() {
     use mt5_bridge::{LifecycleState, OrderManager};
 
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) =
+        require_client_or_skip!("test_live_order_manager_reconciliation_with_deals");
 
     let mut manager = OrderManager::new(998877);
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
@@ -379,10 +363,7 @@ fn test_live_order_manager_reconciliation_with_deals() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_lossless() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_push_tick_stream_lossless");
 
     let mut sub = client
         .subscribe_ticks_with_mode("EURUSD", mt5_bridge::StreamMode::Lossless)
@@ -418,10 +399,7 @@ async fn test_live_push_tick_stream_lossless() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_latest() {
-    let (client, _guard) = match get_client() {
-        Some(cg) => cg,
-        None => return,
-    };
+    let (client, _guard) = require_client_or_skip!("test_live_push_tick_stream_latest");
 
     let mut sub = client
         .subscribe_ticks_with_mode("EURUSD", mt5_bridge::StreamMode::Latest)

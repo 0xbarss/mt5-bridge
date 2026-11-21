@@ -146,8 +146,8 @@ impl TradingBackend for TestBroker {
         let g = self.state.lock().unwrap();
         Ok(g.positions
             .iter()
-            .filter(|p| magic.is_none_or(|m| p.magic == m))
-            .filter(|p| symbol.is_none_or(|s| p.symbol == s))
+            .filter(|p| magic.map_or(true, |m| p.magic == m))
+            .filter(|p| symbol.map_or(true, |s| p.symbol == s))
             .cloned()
             .collect())
     }
@@ -160,8 +160,8 @@ impl TradingBackend for TestBroker {
         let g = self.state.lock().unwrap();
         Ok(g.pending
             .iter()
-            .filter(|o| magic.is_none_or(|m| o.magic == m))
-            .filter(|o| symbol.is_none_or(|s| o.symbol == s))
+            .filter(|o| magic.map_or(true, |m| o.magic == m))
+            .filter(|o| symbol.map_or(true, |s| o.symbol == s))
             .cloned()
             .collect())
     }
@@ -176,8 +176,8 @@ impl TradingBackend for TestBroker {
         let g = self.state.lock().unwrap();
         Ok(g.deals
             .iter()
-            .filter(|d| magic.is_none_or(|m| d.magic == m))
-            .filter(|d| symbol.is_none_or(|s| d.symbol == s))
+            .filter(|d| magic.map_or(true, |m| d.magic == m))
+            .filter(|d| symbol.map_or(true, |s| d.symbol == s))
             .cloned()
             .collect())
     }

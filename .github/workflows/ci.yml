@@ -37,6 +37,98 @@ jobs:
       - name: Check documentation
         run: cargo doc --all-features --no-deps
 
+  feature-matrix:
+    name: Feature Matrix (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features:
+          - "--no-default-features"
+          - "--no-default-features --features async"
+          - "--no-default-features --features serde_json"
+          - "--all-features"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+
+      - name: Check feature combination
+        run: cargo check ${{ matrix.features }}
+
+      - name: Clippy feature combination
+        run: cargo clippy ${{ matrix.features }} -- -D warnings
+
+  dependency-audit:
+    name: Dependency Audit (Deny & Audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny and cargo-audit
+        run: cargo install cargo-deny cargo-audit --locked
+
+      - name: Run cargo deny check
+        run: cargo deny check
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate code coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov.info
+          path: lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        continue-on-error: true
+        with:
+          files: lcov.info
+
+  msrv:
+    name: MSRV Check (1.77)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@1.77.0
+
+      - name: Verify MSRV compilation
+        run: cargo check --all-features
+
   cross-compile-dll:
     name: MinGW DLL Cross-Compilation
     runs-on: ubuntu-latest

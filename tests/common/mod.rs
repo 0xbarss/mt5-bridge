@@ -460,8 +460,8 @@ impl TradingBackend for MockBroker {
             .iter()
             .filter(|(_, vis)| *vis <= q)
             .map(|(p, _)| p)
-            .filter(|p| magic.is_none_or(|m| p.magic == m))
-            .filter(|p| symbol.is_none_or(|s| p.symbol == s))
+            .filter(|p| magic.map_or(true, |m| p.magic == m))
+            .filter(|p| symbol.map_or(true, |s| p.symbol == s))
             .cloned()
             .collect())
     }
@@ -477,8 +477,8 @@ impl TradingBackend for MockBroker {
             .iter()
             .filter(|(_, vis)| *vis <= q)
             .map(|(o, _)| o)
-            .filter(|o| magic.is_none_or(|m| o.magic == m))
-            .filter(|o| symbol.is_none_or(|s| o.symbol == s))
+            .filter(|o| magic.map_or(true, |m| o.magic == m))
+            .filter(|o| symbol.map_or(true, |s| o.symbol == s))
             .cloned()
             .collect())
     }
@@ -500,8 +500,8 @@ impl TradingBackend for MockBroker {
             .filter(|(_, vis)| *vis <= q)
             .map(|(d, _)| d)
             .filter(|d| d.time >= from && d.time <= to)
-            .filter(|d| magic.is_none_or(|m| d.magic == m))
-            .filter(|d| symbol.is_none_or(|s| d.symbol == s))
+            .filter(|d| magic.map_or(true, |m| d.magic == m))
+            .filter(|d| symbol.map_or(true, |s| d.symbol == s))
             .cloned()
             .collect())
     }

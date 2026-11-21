@@ -1,6 +1,7 @@
 use crate::client::pipe::validate_pipe_name;
 use crate::error::{Mt5Error, Result};
 use crate::ffi::*;
+#[cfg(feature = "async")]
 use crate::types::*;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -116,16 +117,6 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
-            fn_subscribe_ticks,
-            fn_unsubscribe_ticks,
-            fn_subscribe_trade,
-            fn_unsubscribe_trade,
-            fn_subscribe_book,
-            fn_unsubscribe_book,
-            fn_subscribe_bars,
-            fn_unsubscribe_bars,
-            fn_poll_event,
-            fn_events_dropped_total,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -245,6 +236,38 @@ impl Mt5Client {
                 })
                 .ok();
 
+            (
+                fn_init,
+                fn_shut,
+                fn_rates,
+                fn_acct,
+                fn_send,
+                fn_close,
+                fn_close_magic,
+                fn_close_deviation,
+                fn_modify,
+                fn_modify_magic,
+                fn_sym_tick,
+                fn_sym_info,
+                fn_positions,
+                fn_orders,
+                fn_deals,
+            )
+        };
+
+        #[cfg(feature = "async")]
+        let (
+            fn_subscribe_ticks,
+            fn_unsubscribe_ticks,
+            fn_subscribe_trade,
+            fn_unsubscribe_trade,
+            fn_subscribe_book,
+            fn_unsubscribe_book,
+            fn_subscribe_bars,
+            fn_unsubscribe_bars,
+            fn_poll_event,
+            fn_events_dropped_total,
+        ) = unsafe {
             let fn_subscribe_ticks: Option<FnSubscribeTicks> = lib
                 .get::<FnSubscribeTicks>(b"SubscribeTicks\0")
                 .map(|s| *s)
@@ -294,21 +317,6 @@ impl Mt5Client {
                 .ok();
 
             (
-                fn_init,
-                fn_shut,
-                fn_rates,
-                fn_acct,
-                fn_send,
-                fn_close,
-                fn_close_magic,
-                fn_close_deviation,
-                fn_modify,
-                fn_modify_magic,
-                fn_sym_tick,
-                fn_sym_info,
-                fn_positions,
-                fn_orders,
-                fn_deals,
                 fn_subscribe_ticks,
                 fn_unsubscribe_ticks,
                 fn_subscribe_trade,
@@ -401,14 +409,23 @@ impl Mt5Client {
             fn_positions,
             fn_orders,
             fn_deals,
+            #[cfg(feature = "async")]
             fn_subscribe_ticks,
+            #[cfg(feature = "async")]
             fn_unsubscribe_ticks,
+            #[cfg(feature = "async")]
             fn_subscribe_trade,
+            #[cfg(feature = "async")]
             fn_unsubscribe_trade,
+            #[cfg(feature = "async")]
             fn_subscribe_book,
+            #[cfg(feature = "async")]
             fn_unsubscribe_book,
+            #[cfg(feature = "async")]
             fn_subscribe_bars,
+            #[cfg(feature = "async")]
             fn_unsubscribe_bars,
+            #[cfg(feature = "async")]
             fn_events_dropped_total,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: super::cache::DEFAULT_SYMBOL_CACHE_TTL,

@@ -162,6 +162,32 @@ impl EventBus {
             .cloned()
             .collect()
     }
+
+    /// Returns the symbols currently tracked in the book subscription table.
+    pub fn active_book_symbols(&self) -> Vec<String> {
+        self.books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Remove the book sender for `symbol` when no subscribers remain.
+    ///
+    /// Callers may invoke this after the last [`BookSubscription`] for a symbol is dropped
+    /// so the internal sender map does not grow indefinitely.
+    pub fn prune_book(&self, symbol: &str) {
+        let mut map = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(tx) = map.get(symbol) {
+            if tx.receiver_count() == 0 {
+                map.remove(symbol);
+            }
+        }
+    }
 }
 
 impl Default for EventBus {
@@ -176,6 +202,7 @@ pub struct TickSubscription {
     mode: StreamMode,
     rx: broadcast::Receiver<Tick>,
     dropped_ticks: u64,
+    seq: SequenceTracker,
 }
 
 impl TickSubscription {
@@ -185,6 +212,7 @@ impl TickSubscription {
             mode,
             rx,
             dropped_ticks: 0,
+            seq: SequenceTracker::default(),
         }
     }
 
@@ -200,6 +228,16 @@ impl TickSubscription {
         self.dropped_ticks
     }
 
+    /// Total upstream sequence gaps observed on this subscription.
+    pub fn gaps(&self) -> u64 {
+        self.seq.gaps()
+    }
+
+    /// Last upstream sequence number received, or `None` if no sequenced event arrived yet.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.seq.last_seq()
+    }
+
     /// Asynchronously await and receive the next tick from the push feed.
     ///
     /// Under `StreamMode::Latest`, if the consumer lags and intermediate quotes are dropped,
@@ -210,7 +248,10 @@ impl TickSubscription {
     pub async fn recv(&mut self) -> Option<Tick> {
         loop {
             match self.rx.recv().await {
-                Ok(tick) => return Some(tick),
+                Ok(tick) => {
+                    self.seq.observe(tick.event_seq);
+                    return Some(tick);
+                }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     self.dropped_ticks += skipped;
                     if self.mode == StreamMode::Latest {
@@ -244,6 +285,7 @@ impl TickSubscription {
                         }
                         self.dropped_ticks += drained;
                         if let Some(tick) = latest {
+                            self.seq.observe(tick.event_seq);
                             return Some(tick);
                         }
                     } else {
@@ -266,7 +308,10 @@ impl TickSubscription {
     /// This allows recorder / auditing consumers to explicitly detect quote gaps.
     pub async fn recv_checked(&mut self) -> Result<Tick, broadcast::error::RecvError> {
         match self.rx.recv().await {
-            Ok(tick) => Ok(tick),
+            Ok(tick) => {
+                self.seq.observe(tick.event_seq);
+                Ok(tick)
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 self.dropped_ticks += skipped;
                 Err(broadcast::error::RecvError::Lagged(skipped))
@@ -282,7 +327,10 @@ impl TickSubscription {
     /// In [`StreamMode::Lossless`], it returns [`broadcast::error::TryRecvError::Lagged`].
     pub fn try_recv(&mut self) -> Result<Tick, broadcast::error::TryRecvError> {
         match self.rx.try_recv() {
-            Ok(tick) => Ok(tick),
+            Ok(tick) => {
+                self.seq.observe(tick.event_seq);
+                Ok(tick)
+            }
             Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
                 self.dropped_ticks += skipped;
                 if self.mode == StreamMode::Lossless {
@@ -308,6 +356,7 @@ impl TickSubscription {
                     }
                     self.dropped_ticks += drained;
                     if let Some(t) = latest {
+                        self.seq.observe(t.event_seq);
                         Ok(t)
                     } else {
                         Err(broadcast::error::TryRecvError::Empty)
@@ -325,7 +374,205 @@ impl TickSubscription {
             mode: self.mode,
             rx: self.rx.resubscribe(),
             dropped_ticks: 0,
+            seq: SequenceTracker::default(),
         }
+    }
+}
+
+/// Active subscription to pushed depth-of-market book events for a symbol (protocol v5+).
+///
+/// Wraps a broadcast receiver with per-subscription sequence gap detection. Use
+/// [`recv_checked`](BookSubscription::recv_checked) to receive events and detect upstream drops.
+pub struct BookSubscription {
+    symbol: String,
+    rx: Option<broadcast::Receiver<BookEvent>>,
+    seq: SequenceTracker,
+    dropped: u64,
+    pending: Option<BookEvent>,
+    bus: Option<std::sync::Arc<EventBus>>,
+}
+
+impl BookSubscription {
+    /// Construct a subscription from a raw broadcast receiver.
+    pub fn new(symbol: impl Into<String>, rx: broadcast::Receiver<BookEvent>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            rx: Some(rx),
+            seq: SequenceTracker::default(),
+            dropped: 0,
+            pending: None,
+            bus: None,
+        }
+    }
+
+    /// Construct a subscription from a raw broadcast receiver with an attached [`EventBus`].
+    ///
+    /// When the subscription is dropped, it will automatically prune idle book senders
+    /// from the bus if no other subscribers remain for `symbol`.
+    pub fn with_bus(
+        symbol: impl Into<String>,
+        rx: broadcast::Receiver<BookEvent>,
+        bus: std::sync::Arc<EventBus>,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            rx: Some(rx),
+            seq: SequenceTracker::default(),
+            dropped: 0,
+            pending: None,
+            bus: Some(bus),
+        }
+    }
+
+    /// Symbol this subscription tracks.
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    /// Total events dropped by broadcast buffer overflow (consumer lag).
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Total upstream sequence gaps observed on this subscription.
+    pub fn gaps(&self) -> u64 {
+        self.seq.gaps()
+    }
+
+    /// Total out-of-order events observed on this subscription.
+    pub fn reordered(&self) -> u64 {
+        self.seq.reordered()
+    }
+
+    /// Last upstream sequence number received, or `None` if no sequenced event arrived.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.seq.last_seq()
+    }
+
+    /// Asynchronously receive the next book event.
+    ///
+    /// Consumer buffer-overflow lag is tracked internally and logged.
+    /// Returns `None` when the sender channel is closed.
+    pub async fn recv(&mut self) -> Option<BookEvent> {
+        if let Some(ev) = self.pending.take() {
+            return Some(ev);
+        }
+        let rx = self.rx.as_mut()?;
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    self.seq.observe(ev.event_seq);
+                    return Some(ev);
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    self.dropped += skipped;
+                    warn!(
+                        symbol = %self.symbol,
+                        dropped = self.dropped,
+                        skipped,
+                        "Book subscription lagged: consumer fell behind broadcast buffer"
+                    );
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Asynchronously receive the next book event with sequence gap detection.
+    ///
+    /// - Returns `Ok(Some(ev))` when delivered cleanly.
+    /// - Returns `Err(StreamError::Gap { expected, got })` when an upstream sequence gap is detected;
+    ///   the event is retained and will be yielded on the subsequent call.
+    /// - Returns `Err(StreamError::Lagged(skipped))` on broadcast buffer overrun.
+    /// - Returns `Ok(None)` when the stream was closed by upstream.
+    pub async fn recv_checked(&mut self) -> Result<Option<BookEvent>, StreamError> {
+        if let Some(ev) = self.pending.take() {
+            return Ok(Some(ev));
+        }
+        let rx = self.rx.as_mut().ok_or(StreamError::Closed)?;
+        match rx.recv().await {
+            Ok(ev) => {
+                if let Some((first_missing, _)) = self.seq.observe(ev.event_seq) {
+                    self.pending = Some(ev.clone());
+                    Err(StreamError::Gap {
+                        expected: first_missing,
+                        got: ev.event_seq,
+                    })
+                } else {
+                    Ok(Some(ev))
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                self.dropped += skipped;
+                Err(StreamError::Lagged(skipped))
+            }
+            Err(broadcast::error::RecvError::Closed) => Ok(None),
+        }
+    }
+}
+
+impl Drop for BookSubscription {
+    fn drop(&mut self) {
+        self.rx = None;
+        if let Some(bus) = &self.bus {
+            bus.prune_book(&self.symbol);
+        }
+    }
+}
+
+/// Tracks monotonic per-stream sequence numbers and reports gaps.
+///
+/// Sequence zero is treated as "no sequence" and is always ignored.
+/// Out-of-order arrivals (sequence regressed) are counted as reorders; they
+/// do not advance `last` and are not counted as gaps.
+#[derive(Debug, Default)]
+pub struct SequenceTracker {
+    last: Option<u64>,
+    gaps: u64,
+    reordered: u64,
+}
+
+impl SequenceTracker {
+    /// Record a new sequence number.
+    ///
+    /// Returns `Some((first_missing, last_missing))` when a gap is detected, i.e.
+    /// the observed sequence jumped forward by more than one from the previous value.
+    /// Returns `None` when the event is contiguous, the first event, or seq is zero.
+    pub fn observe(&mut self, seq: u64) -> Option<(u64, u64)> {
+        if seq == 0 {
+            return None;
+        }
+        let gap = match self.last {
+            Some(prev) if seq == prev + 1 => None,
+            Some(prev) if seq > prev + 1 => Some((prev + 1, seq - 1)),
+            Some(prev) if seq <= prev => {
+                self.reordered += 1;
+                return None;
+            }
+            Some(_) => None,
+            None => None,
+        };
+        self.last = Some(seq);
+        if gap.is_some() {
+            self.gaps += 1;
+        }
+        gap
+    }
+
+    /// Total number of gap events observed since creation.
+    pub fn gaps(&self) -> u64 {
+        self.gaps
+    }
+
+    /// Total number of out-of-order (reordered) events observed since creation.
+    pub fn reordered(&self) -> u64 {
+        self.reordered
+    }
+
+    /// Last sequence number seen, or `None` if no non-zero event has been observed.
+    pub fn last_seq(&self) -> Option<u64> {
+        self.last
     }
 }
 
@@ -347,6 +594,11 @@ pub enum StreamError {
     /// Consumer lagged behind stream buffer.
     #[error("Stream consumer lagged by {0} events")]
     Lagged(u64),
+
+    /// Upstream event sequence jumped forward, indicating dropped events between
+    /// `expected` and `got` (inclusive range of missing sequence numbers).
+    #[error("Stream gap detected: expected seq {expected}, got {got}")]
+    Gap { expected: u64, got: u64 },
 
     /// Terminated after exceeding maximum consecutive polling errors.
     #[error("Stream exceeded maximum consecutive errors ({count}): {last_error}")]
@@ -746,6 +998,7 @@ mod tests {
             last: 0.0,
             volume: 0,
             flags: 0,
+            event_seq: 0,
         }
     }
 

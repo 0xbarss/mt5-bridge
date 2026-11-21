@@ -85,10 +85,7 @@ impl Mt5Client {
     }
 
     /// Subscribe to depth-of-market book events for a symbol (protocol v5+).
-    pub fn subscribe_book(
-        &self,
-        symbol: &str,
-    ) -> Result<tokio::sync::broadcast::Receiver<BookEvent>> {
+    pub fn subscribe_book(&self, symbol: &str) -> Result<crate::stream::BookSubscription> {
         let fn_sub = self
             .fn_subscribe_book
             .ok_or(Mt5Error::UnsupportedFeature("SubscribeBook"))?;
@@ -100,7 +97,12 @@ impl Mt5Client {
             )));
         }
         self.register_book_subscription(symbol.trim());
-        Ok(self.event_bus.subscribe_book(symbol.trim()))
+        let rx = self.event_bus.subscribe_book(symbol.trim());
+        Ok(crate::stream::BookSubscription::with_bus(
+            symbol.trim(),
+            rx,
+            Arc::clone(&self.event_bus),
+        ))
     }
 
     /// Unsubscribe from depth-of-market book events for a symbol (protocol v5+).
@@ -116,6 +118,7 @@ impl Mt5Client {
             )));
         }
         self.unregister_book_subscription(symbol.trim());
+        self.event_bus.prune_book(symbol.trim());
         Ok(())
     }
 
@@ -160,6 +163,11 @@ impl Mt5Client {
     /// Access the underlying [`EventBus`](crate::stream::EventBus) directly.
     pub fn event_bus(&self) -> Arc<crate::stream::EventBus> {
         Arc::clone(&self.event_bus)
+    }
+
+    /// Returns the symbols currently tracked in the active book subscription table.
+    pub fn active_book_symbols(&self) -> Vec<String> {
+        self.event_bus.active_book_symbols()
     }
 
     /// Total events dropped by the native C++ DLL buffer queue due to overflow.

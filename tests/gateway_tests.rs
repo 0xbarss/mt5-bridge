@@ -529,6 +529,7 @@ async fn test_gateway_tick_conflation() {
             last: 1.0801,
             volume: 10,
             flags: 0,
+            event_seq: 0,
         };
         gateway.dispatch_tick(tick);
     }

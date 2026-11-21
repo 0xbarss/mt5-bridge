@@ -114,5 +114,5 @@ pub use types::{
 #[cfg(feature = "async")]
 pub use stream::{
     bar_end_time, stream_bars, stream_ticks, stream_ticks_with_config, BackpressurePolicy,
-    EventBus, StreamConfig, StreamError, TickSubscription,
+    BookSubscription, EventBus, SequenceTracker, StreamConfig, StreamError, TickSubscription,
 };

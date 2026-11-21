@@ -492,6 +492,7 @@ fn test_tick_spread() {
         volume: 0,
         time_msc: 1780000000000,
         flags: 0,
+        event_seq: 0,
     };
     assert!((tick.spread() - 0.00015).abs() < 1e-6);
 }
@@ -1394,6 +1395,7 @@ async fn test_event_bus_tick_fanout_and_isolation() {
         volume: 10,
         time_msc: 1710000000123,
         flags: 6,
+        event_seq: 0,
     };
 
     bus.dispatch_tick(tick_eur.clone());
@@ -1426,6 +1428,7 @@ async fn test_tick_subscription_latest_mode_auto_drop_lag() {
             volume: i as u64,
             time_msc: (1710000000 + i) * 1000,
             flags: 6,
+            event_seq: i as u64,
         };
         bus.dispatch_tick(tick);
     }
@@ -1453,6 +1456,7 @@ async fn test_tick_subscription_lossless_mode_checked_lag() {
             volume: i as u64,
             time_msc: (1710000000 + i) * 1000,
             flags: 6,
+            event_seq: i as u64,
         };
         bus.dispatch_tick(tick);
     }
@@ -1506,6 +1510,7 @@ async fn test_event_bus_trade_and_book_dispatch() {
         is_buy: true,
         price: 155.250,
         volume: 25.0,
+        event_seq: 0,
     };
     bus.dispatch_book(book.clone());
 
@@ -1603,6 +1608,123 @@ fn test_raw_event_wire_conversions() {
     assert!(book.is_buy);
     assert_eq!(book.price, 1.08530);
     assert_eq!(book.volume, 100.0);
+    assert_eq!(book.event_seq, 1);
+}
+
+#[tokio::test]
+async fn test_book_subscription_recv_checked_gap_detection() {
+    use mt5_bridge::stream::BookSubscription;
+
+    let bus = EventBus::new(64);
+    let rx = bus.subscribe_book("EURUSD");
+    let mut sub = BookSubscription::new("EURUSD", rx);
+
+    // Dispatch seq 1, 2, then jump to 5 — gap: [3, 4] missing.
+    for (seq, price) in [(1u64, 1.085), (2, 1.086), (5, 1.087)] {
+        let ev = BookEvent {
+            symbol: "EURUSD".to_string(),
+            time_msc: 1710000000000,
+            is_buy: true,
+            price,
+            volume: 10.0,
+            event_seq: seq,
+        };
+        bus.dispatch_book(ev);
+    }
+
+    let ev1 = sub.recv_checked().await.unwrap().unwrap();
+    assert_eq!(ev1.event_seq, 1);
+    assert_eq!(sub.gaps(), 0);
+
+    let ev2 = sub.recv_checked().await.unwrap().unwrap();
+    assert_eq!(ev2.event_seq, 2);
+    assert_eq!(sub.gaps(), 0);
+
+    // Seq 5 arrives — gap detected (expected 3, got 5).
+    let err = sub.recv_checked().await.unwrap_err();
+    assert_eq!(
+        err,
+        mt5_bridge::StreamError::Gap {
+            expected: 3,
+            got: 5
+        }
+    );
+    assert_eq!(sub.gaps(), 1, "one gap should be counted");
+
+    // Subsequent call yields ev5 without loss.
+    let ev5 = sub.recv_checked().await.unwrap().unwrap();
+    assert_eq!(ev5.event_seq, 5);
+    assert_eq!(sub.last_seq(), Some(5));
+}
+
+#[tokio::test]
+async fn test_book_subscription_prunes_on_drop() {
+    use mt5_bridge::stream::BookSubscription;
+    use std::sync::Arc;
+
+    let bus = Arc::new(EventBus::new(64));
+    let rx = bus.subscribe_book("EURUSD");
+    let sub = BookSubscription::with_bus("EURUSD", rx, Arc::clone(&bus));
+
+    assert!(bus.active_book_symbols().contains(&"EURUSD".to_string()));
+    drop(sub);
+    assert!(!bus.active_book_symbols().contains(&"EURUSD".to_string()));
+}
+
+#[test]
+fn test_sequence_tracker_gap_and_reorder() {
+    use mt5_bridge::SequenceTracker;
+
+    let mut tracker = SequenceTracker::default();
+
+    assert_eq!(tracker.observe(0), None, "seq 0 is ignored");
+    assert_eq!(tracker.gaps(), 0);
+
+    // First real event — no gap.
+    assert_eq!(tracker.observe(1), None);
+    assert_eq!(tracker.observe(2), None);
+
+    // Gap: 3 is missing, 4 arrives next.
+    let gap = tracker.observe(5);
+    assert_eq!(gap, Some((3, 4)));
+    assert_eq!(tracker.gaps(), 1);
+
+    // Reordered: seq 3 arrives after 5.
+    assert_eq!(tracker.observe(3), None);
+    assert_eq!(tracker.reordered(), 1);
+    assert_eq!(tracker.gaps(), 1, "reorder does not add a gap");
+    assert_eq!(tracker.last_seq(), Some(5));
+}
+
+#[tokio::test]
+async fn test_book_subscription_dropped_events_tracking() {
+    use mt5_bridge::stream::BookSubscription;
+
+    // Small buffer so we can overflow it.
+    let bus = EventBus::new(4);
+    let rx = bus.subscribe_book("EURUSD");
+    let mut sub = BookSubscription::new("EURUSD", rx);
+
+    // Flood the channel.
+    for seq in 1u64..=200 {
+        let ev = BookEvent {
+            symbol: "EURUSD".to_string(),
+            time_msc: 1710000000000,
+            is_buy: true,
+            price: 1.0 + seq as f64 * 0.0001,
+            volume: 1.0,
+            event_seq: seq,
+        };
+        bus.dispatch_book(ev);
+    }
+
+    // recv_checked returns Lagged when the broadcast buffer overflows.
+    let result = sub.recv_checked().await;
+    assert!(
+        matches!(result, Err(mt5_bridge::StreamError::Lagged(_))),
+        "expected Lagged, got {result:?}"
+    );
+    assert!(sub.dropped() > 0);
 }
 
 #[test]

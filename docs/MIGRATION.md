@@ -37,7 +37,7 @@ This document details protocol evolution across versions and provides migration 
    - `unsubscribe_depth()` → [`Mt5Client::unsubscribe_book()`](file:///mnt/data6/MyFiles/Projects/mt5-bridge/src/client/mod.rs)
    - Added: [`Mt5Client::subscribe_bars()`](file:///mnt/data6/MyFiles/Projects/mt5-bridge/src/client/mod.rs) / [`unsubscribe_bars()`](file:///mnt/data6/MyFiles/Projects/mt5-bridge/src/client/mod.rs)
 2. **Channel Types:**
-   - `subscribe_book` returns `tokio::sync::broadcast::Receiver<BookEvent>`.
+   - `subscribe_book` returns `BookSubscription` (with `recv_checked()` sequence gap detection and drop pruning).
    - `subscribe_trade` returns `tokio::sync::broadcast::Receiver<TradeEvent>`.
    - `subscribe_ticks` returns `TickSubscription` with configurable mode (`StreamMode::Latest` or `StreamMode::Lossless`).
 3. **Magic Number Default Invariant:**

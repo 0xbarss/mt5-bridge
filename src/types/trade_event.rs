@@ -89,6 +89,8 @@ pub struct BookEvent {
     pub is_buy: bool,
     pub price: f64,
     pub volume: f64,
+    #[serde(default)]
+    pub event_seq: u64,
 }
 
 impl BookEvent {
@@ -111,6 +113,7 @@ impl BookEvent {
             is_buy: raw.book_type == 1,
             price: raw.price,
             volume: raw.volume,
+            event_seq: raw.event_seq,
         }
     }
 }
@@ -195,6 +198,7 @@ mod tests {
         assert!(!event.is_buy);
         assert_eq!(event.price, 1.27500);
         assert_eq!(event.volume, 50.0);
+        assert_eq!(event.event_seq, 101);
     }
 
     #[test]
@@ -212,5 +216,6 @@ mod tests {
         };
         let event = BookEvent::from_raw(raw);
         assert_eq!(event.time_msc, 123_456);
+        assert_eq!(event.event_seq, 1);
     }
 }

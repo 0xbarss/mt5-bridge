@@ -15,6 +15,8 @@ pub struct Tick {
     pub last: f64,
     pub volume: u64,
     pub flags: u32,
+    #[serde(default)]
+    pub event_seq: u64,
 }
 
 impl Tick {
@@ -28,6 +30,7 @@ impl Tick {
             last: raw.last,
             volume: raw.volume,
             flags: raw.flags,
+            event_seq: 0,
         }
     }
 
@@ -49,6 +52,7 @@ impl Tick {
             last: raw.last,
             volume: raw.volume,
             flags: raw.flags,
+            event_seq: raw.event_seq,
         }
     }
 

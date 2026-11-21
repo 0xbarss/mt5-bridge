@@ -30,14 +30,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Ok(tick)) => {
                 let dt = Utc.timestamp_opt(tick.time, 0).single().unwrap_or_default();
                 println!(
-                    "[{}] Lossless Tick #{}: Bid={:.5} Ask={:.5} Spread={:.5} Vol={} (dropped={})",
+                    "[{}] Lossless Tick #{}: Bid={:.5} Ask={:.5} Spread={:.5} Vol={} (dropped={} gaps={})",
                     dt.format("%H:%M:%S"),
                     count + 1,
                     tick.bid,
                     tick.ask,
                     tick.spread(),
                     tick.volume,
-                    lossless_ticks.dropped_ticks()
+                    lossless_ticks.dropped_ticks(),
+                    lossless_ticks.gaps(),
                 );
                 count += 1;
             }

@@ -117,8 +117,8 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 ```
 
 - **IPC via Windows Named Pipes**: Operates locally via kernel memory with microsecond latency.
-- **Thread-safe & Resilient I/O**: The C++ DLL serializes requests using Windows `CRITICAL_SECTION`, preventing packet interleaving. When pipe I/O breaks or the terminal closes, the DLL automatically tears down and invalidates the pipe handle (`disconnect_locked`) to fail fast and cleanly reconnect.
-- **Bounded High-Throughput EA Timer Loop**: The MQL5 EA non-blockingly polls client connections on an optimized 5ms timer loop (`InpTimerIntervalMs`), draining queued requests with strict execution bounds (`InpMaxRequestsPerTimer = 32` and `InpMaxTimerBudgetUs = 2000 µs`). This prevents request floods from ever starving MT5's single-threaded event loop or freezing the terminal UI.
+- **Thread-safe & Resilient I/O**: The C++ DLL serializes requests using C++11 `std::mutex` and condition variables, preventing packet interleaving. When pipe I/O breaks or the terminal closes, the DLL automatically tears down and invalidates the pipe handle (`disconnect_locked`) to fail fast and cleanly reconnect.
+- **Bounded High-Throughput EA Timer Loop**: The MQL5 EA non-blockingly polls client connections on an optimized 1ms timer loop (`InpTimerIntervalMs = 1`), draining queued requests with strict execution bounds (`InpMaxRequestsPerTimer = 64` and `InpMaxTimerBudgetUs = 5000 µs`). This prevents request floods from ever starving MT5's single-threaded event loop or freezing the terminal UI.
 
 ### Security Model & Threat Assumptions
 
@@ -231,8 +231,8 @@ A production-grade algorithmic trading architecture strictly separates **transpo
 ```
 
 #### Event-Snapshot Lifecycle
-1. **Initial Snapshot**: Upon startup or reconnect, [`OrderManager::reconcile(&client)`](src/reconciliation.rs) queries active positions (`CMD_POSITIONS_GET`), pending orders (`CMD_ORDERS_GET`), and historical deals (`CMD_DEALS_GET`), establishing an exact baseline of current broker exposure.
-2. **Incremental Push Stream**: The MQL5 EA monitors [`OnTradeTransaction()`](mql5/Experts/mt5_bridge.mq5) and pushes structured [`Mt5TradeEvent`](src/ffi.rs) payloads into the named pipe. The EA automatically propagates trade comments (from order requests, deal history, or order history), enabling [`OrderManager::apply_trade_event(&event)`](src/reconciliation.rs) to instantly attribute fills, partial executions, and closes to tracked client order IDs without polling overhead.
+1. **Initial Snapshot**: Upon startup or reconnect, [`OrderManager::reconcile(&client)`](src/reconciliation/mod.rs) queries active positions (`CMD_POSITIONS_GET`), pending orders (`CMD_ORDERS_GET`), and historical deals (`CMD_DEALS_GET`), establishing an exact baseline of current broker exposure.
+2. **Incremental Push Stream**: The MQL5 EA monitors [`OnTradeTransaction()`](mql5/Experts/mt5_bridge.mq5) and pushes structured [`Mt5TradeEvent`](src/ffi.rs) payloads into the named pipe. The EA automatically propagates trade comments (from order requests, deal history, or order history), enabling [`OrderManager::apply_trade_event(&event)`](src/reconciliation/mod.rs) to instantly attribute fills, partial executions, and closes to tracked client order IDs without polling overhead.
 3. **Periodic Reconcile Pass**: A lightweight background snapshot reconciles all tracked open positions against MT5 state, detecting any discrepancies (e.g. manual broker intervention, slippage, off-bridge closes) and resolving any in-flight orders.
 4. **Consistent State Guarantee**: If event delivery lags or drops under severe load, the periodic reconciliation engine corrects any drift, guaranteeing eventual consistency without risking out-of-order corruption.
 
@@ -240,8 +240,8 @@ A production-grade algorithmic trading architecture strictly separates **transpo
 
 In high-volatility market conditions (e.g. major news releases), quote or transaction generation can outpace consumer processing. `mt5-bridge` ensures pipeline backpressure and event loss are strictly observable:
 
-- **C++ Ring Buffer with Overwrite Protection**: The C++ DLL maintains an internal circular ring buffer (default 65,536 slots). When downstream consumers fail to drain events before the buffer cycles, older unread events are overwritten safely without memory leaks, and an atomic counter `g_events_dropped_total` is incremented.
-- **Client Drop Counter Inspection**: Call [`Mt5Client::events_dropped_total(&self) -> u64`](src/client.rs) at any time to monitor dropped events across all active subscriptions.
+- **C++ Ring Buffer with Overwrite Protection**: The C++ DLL maintains an internal circular ring buffer (default 8,192 slots). When downstream consumers fail to drain events before the buffer cycles, older unread events are overwritten safely without memory leaks, and an atomic counter `g_events_dropped_total` is incremented.
+- **Client Drop Counter Inspection**: Call [`Mt5Client::events_dropped_total(&self) -> u64`](src/client/mod.rs) at any time to monitor dropped events across all active subscriptions.
 - **MQL5 EA Drops Alerting**: The EA maintains independent queue counters (`g_ticks_dropped_total`, `g_trades_dropped_total`) and emits periodic warning alerts to the MT5 Experts log whenever queue capacity thresholds are exceeded.
 - **Dual Stream Modes**:
   - `StreamMode::Lossless`: Backpressure detection via `recv_checked()` which returns `Err(RecvError::Lagged(skipped))` whenever a consumer falls behind, guaranteeing that recording and auditing engines detect data gaps.
@@ -251,14 +251,14 @@ In high-volatility market conditions (e.g. major news releases), quote or transa
 
 - **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge unless a custom magic number is specified.
 - **Multi-Strategy & Magic Management**:
-  - By default (`InpEnforceMagicNumber = false`), orders placed with custom magic numbers (or multiple strategies sharing the same bridge connection) can be freely closed and modified by ticket. When closing or modifying positions, the bridge preserves the position's original magic number in the trade record.
-  - To restrict the bridge strictly to a single magic number, set `InpEnforceMagicNumber = true`. When enabled, the EA strictly enforces `InpMagicNumber` across `OrderSend`, `OrderClose`, and `OrderModify`, rejecting any operation where the magic number does not match.
+  - By default (`InpEnforceMagicNumber = true`), the EA strictly enforces `InpMagicNumber` across `OrderSend`, `OrderClose`, and `OrderModify`, rejecting any operation where the magic number does not match.
+  - To allow multi-strategy magic routing or custom magic numbers across multiple strategies sharing the same bridge connection, set `InpEnforceMagicNumber = false`. When disabled, orders placed with custom magic numbers can be freely closed and modified by ticket. When closing or modifying positions, the bridge preserves the position's original magic number in the trade record.
 - **Custom Order Magic**: Callers can specify custom magic numbers per-request using `OrderRequest::buy(...).magic(my_magic)`.
 
 ### Concurrency, Latency & Serialization
 
-- **Single-Channel Serialization**: All requests through `Mt5Client` are serialized through a Win32 `CRITICAL_SECTION` in `mt5_bridge.dll` and handled sequentially by the MQL5 EA on a timer loop.
-- **Bounded Timer Draining**: The EA runs an optimized 5ms timer (`InpTimerIntervalMs = 5`) and drains buffered pipe requests up to `InpMaxRequestsPerTimer` (32) or `InpMaxTimerBudgetUs` (2000 µs) per tick. This yields ultra-low latency while preserving MT5 terminal UI responsiveness.
+- **Single-Channel Serialization**: All requests through `Mt5Client` are serialized through a C++11 `std::mutex` in `mt5_bridge.dll` and handled sequentially by the MQL5 EA on a timer loop.
+- **Bounded Timer Draining**: The EA runs an optimized 1ms timer (`InpTimerIntervalMs = 1`) and drains buffered pipe requests up to `InpMaxRequestsPerTimer` (64) or `InpMaxTimerBudgetUs` (5000 µs) per tick. This yields ultra-low latency while preserving MT5 terminal UI responsiveness.
 - **Broken Pipe Invalidation**: On pipe I/O failure (`ERROR_BROKEN_PIPE`, broken socket/pipe, or client crash), the C++ DLL automatically closes and invalidates the pipe handle (`disconnect_locked()`), allowing downstream callers to handle the error immediately without deadlocking.
 - **Multi-Symbol Throughput Guidelines**: For multi-symbol streaming, configure balanced polling intervals (e.g. 50ms–100ms across 10+ symbols) to prevent pipe queue serialization backpressure, or run separate dedicated MT5 terminal instances with independent pipe names (`InpPipeName`).
 - **Latency Expectations**:
@@ -402,12 +402,12 @@ mt5-bridge/
 | `InpPipeName` | `string` | `"mt5bridge"` | Named pipe name (override for multi-terminal setups) |
 | `InpPipeSecret` | `string` | `""` | Shared secret token for client authentication (required by default) |
 | `InpRequireSecret` | `bool` | `true` | Require non-empty secret token before allowing initialization (set false to opt out) |
-| `InpEnforceMagicNumber` | `bool` | `false` | Restrict send/modify/close to `InpMagicNumber` (default `false` allows multi-strategy magic routing) |
+| `InpEnforceMagicNumber` | `bool` | `true` | Restrict send/modify/close to `InpMagicNumber` (default `true`; set `false` to allow multi-strategy magic routing) |
 | `InpPipeSDDL` | `string` | `"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"` | SDDL security descriptor restricting pipe access to owner user, Local System & admins |
 | `InpConvertToUTC` | `bool` | `true` | Convert broker history and tick timestamps to UTC (disable for raw broker time) |
-| `InpTimerIntervalMs` | `int` | `5` | Timer polling and pipe draining loop frequency in milliseconds |
-| `InpMaxRequestsPerTimer` | `int` | `32` | Max requests serviced per timer tick (prevents terminal UI starvation) |
-| `InpMaxTimerBudgetUs` | `uint` | `2000` | Max execution budget per timer tick in microseconds (2000 µs = 2 ms) |
+| `InpTimerIntervalMs` | `int` | `1` | Timer polling and pipe draining loop frequency in milliseconds |
+| `InpMaxRequestsPerTimer` | `int` | `64` | Max requests serviced per timer tick (prevents terminal UI starvation) |
+| `InpMaxTimerBudgetUs` | `uint` | `5000` | Max execution budget per timer tick in microseconds (5000 µs = 5 ms) |
 | `InpAutoSelectSymbols` | `bool` | `true` | Automatically select queried/traded symbols into Market Watch |
 
 ### Step 2: Build and Deploy `mt5_bridge.dll`
@@ -471,7 +471,7 @@ tokio = { version = "1.0", features = ["full"] }
 
 ### 1. Connecting to MT5 & Configuration
 
-```rust
+```rust,no_run
 use mt5_bridge::Mt5Client;
 use std::time::Duration;
 
@@ -500,7 +500,7 @@ Instead of hardcoding credentials, the client can automatically read:
 - `MT5_PIPE_NAME` (custom named pipe name for multi-instance deployments)
 
 *Custom DLL Path:*
-```rust
+```rust,no_run
 let client = Mt5Client::connect_with_dll(
     "C:\\path\\to\\mt5_bridge.dll",
     12345678,
@@ -513,7 +513,7 @@ let client = Mt5Client::connect_with_dll(
 
 ### 2. Fetching Account Information
 
-```rust
+```rust,no_run
 let account = client.account_info()?;
 
 println!("Balance:      ${:.2}", account.balance);
@@ -533,7 +533,7 @@ if let Some(margin_level) = account.margin_level() {
 
 ### 3. Querying Symbol Specifications & Risk Helpers
 
-```rust
+```rust,no_run
 let info = client.symbol_info("EURUSD")?;
 
 println!("Symbol:     {}", info.symbol);
@@ -566,7 +566,7 @@ println!("1-point move value: ${:.5}", p_val);
 
 ### 4. Fetching Historical OHLCV Bars & Technical Metrics
 
-```rust
+```rust,no_run
 use chrono::Utc;
 use mt5_bridge::Timeframe;
 
@@ -595,7 +595,7 @@ if let Some(first) = raw_rates.first() {
 
 ### 5. Downloading Deep Chunked History with Completeness
 
-```rust
+```rust,no_run
 use chrono::Utc;
 use mt5_bridge::Timeframe;
 
@@ -625,7 +625,7 @@ if !history.is_complete() {
 
 `mt5-bridge` (protocol v5+) provides event-driven push tick streaming directly from MT5 `OnTick()`, with dual stream modes:
 
-```rust
+```rust,no_run
 use mt5_bridge::{Mt5Client, StreamMode};
 
 #[tokio::main]
@@ -663,7 +663,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Emits clean `Bar` instances whenever a candle closes:
 
-```rust
+```rust,no_run
 use mt5_bridge::{stream_bars, Timeframe};
 use std::sync::Arc;
 use std::time::Duration;
@@ -690,7 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 8. Placing, Modifying & Closing Market Orders
 
-```rust
+```rust,no_run
 use mt5_bridge::{Mt5Client, OrderRequest};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -749,7 +749,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 9. Pending Orders with Expiration & Cancellation
 
-```rust
+```rust,no_run
 use chrono::Utc;
 use mt5_bridge::{Mt5Client, OrderRequest, OrderType};
 
@@ -789,7 +789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 All bridge operations return typed `Result<T, Mt5Error>`. You can pattern match on errors or inspect MT5 trade retcodes:
 
-```rust
+```rust,no_run
 use mt5_bridge::{mt5_retcode_description, Mt5Client, Mt5Error, OrderRequest};
 
 fn place_trade(client: &Mt5Client, req: &OrderRequest) {
@@ -823,7 +823,7 @@ fn place_trade(client: &Mt5Client, req: &OrderRequest) {
 
 Inspect currently active open positions and pending orders directly from MT5:
 
-```rust
+```rust,no_run
 use mt5_bridge::Mt5Client;
 
 let client = Mt5Client::connect(0, "test", "")?;
@@ -851,12 +851,12 @@ for ord in orders {
 
 ### 12. Order Idempotency, Lifecycle & Reconciliation Engine
 
-For mission-critical production trading, [`OrderManager`](src/reconciliation.rs) wraps `Mt5Client` with:
+For mission-critical production trading, [`OrderManager`](src/reconciliation/mod.rs) wraps `Mt5Client` with:
 - **Client Order ID Deduplication**: Replays of existing orders are returned from local memory without sending duplicate orders to the broker.
 - **Uncertain Execution Protection**: Disconnects after order submission are flagged as `OrderState::Unknown` rather than triggering dangerous blind retries.
 - **Broker State Reconciliation**: Automatically syncs local in-memory orders with live broker state after reconnects or startup.
 
-```rust
+```rust,no_run
 use mt5_bridge::{LifecycleState, OrderManager, OrderRequest};
 
 let mut manager = OrderManager::new(998877); // Strategy Magic 998877
@@ -901,22 +901,22 @@ println!("Order status: {:?}, filled: {:.2}", tracked.state, tracked.filled_volu
 To prevent prematurely marking asynchronously visible broker orders as rejected on a single snapshot:
 - `SafetyPolicy::default()` requires at least **3 consecutive absent observations** spanning at least **30 seconds** before transitioning an unresolved `Unknown` order to `OrderState::Rejected`.
 - Deal history from MT5 (`CMD_DEALS_GET`) is queried automatically during reconciliation to verify whether any executions occurred before an order is declared unplaced.
-- Call [`reconcile_until_settled`](src/reconciliation.rs) to poll until all in-flight orders are resolved.
+- Call [`reconcile_until_settled`](src/reconciliation/mod.rs) to poll until all in-flight orders are resolved.
 
 #### Full Attribute Verification & Mismatch Detection
 When a live position or working order matches on ticket or wire identity token, `OrderManager` verifies all critical attributes:
 - Direction (`Buy` vs `Sell`), Symbol, Volume, Stop Loss, and Take Profit.
-- Discrepancies are flagged as [`OrderState::Mismatched`](src/types.rs) with specific [`AttributeMismatch`](src/types.rs) categories (e.g. `VolumeMismatch`, `ProtectionMismatch`) rather than silently accepted as clean executions. Operators can acknowledge verified mismatches using `acknowledge_mismatch()`.
+- Discrepancies are flagged as [`OrderState::Mismatched`](src/types/mod.rs) with specific [`AttributeMismatch`](src/types/mod.rs) categories (e.g. `VolumeMismatch`, `ProtectionMismatch`) rather than silently accepted as clean executions. Operators can acknowledge verified mismatches using `acknowledge_mismatch()`.
 
 #### Submission Gates & Retry Safety (`retry_order`)
 - When an order enters `Unknown` state, new submissions for the strategy are automatically blocked under default `UnknownBlockScope::Strategy` (configurable to `Symbol` or `Disabled`) to prevent cascading duplicate exposure.
 - Calling `submit_order` with the same `client_order_id` safely short-circuits to the existing tracked order.
-- To re-attempt an intent after a definitive failure, callers must use [`retry_order`](src/reconciliation.rs), which strictly enforces that the original order is definitively `Rejected` or `Cancelled` before issuing a traceable retry (`<id>-r1`).
+- To re-attempt an intent after a definitive failure, callers must use [`retry_order`](src/reconciliation/mod.rs), which strictly enforces that the original order is definitively `Rejected` or `Cancelled` before issuing a traceable retry (`<id>-r1`).
 
 #### Concurrency Contract & Thread Safety (`SharedOrderManager`)
 - `OrderManager` is designed with single-ownership semantics (`&mut self`) for maximum single-threaded efficiency.
-- For multi-threaded applications, use [`SharedOrderManager`](src/reconciliation.rs):
-  ```rust
+- For multi-threaded applications, use [`SharedOrderManager`](src/reconciliation/mod.rs):
+  ```rust,no_run
   use mt5_bridge::{OrderManager, SharedOrderManager};
   use std::sync::Arc;
 
@@ -932,11 +932,11 @@ When a live position or working order matches on ticket or wire identity token, 
   This structurally guarantees that checking idempotency, journaling write-ahead, transmitting over the pipe, and recording the outcome happen atomically across concurrent threads.
 
 #### Incremental Event Processing (`apply_trade_event`)
-Rather than relying solely on periodic snapshot polling (which introduces latency and pipe overhead), [`OrderManager`](src/reconciliation.rs) and [`SharedOrderManager`](src/reconciliation.rs) directly consume live push trade notifications via [`apply_trade_event`](src/reconciliation.rs):
+Rather than relying solely on periodic snapshot polling (which introduces latency and pipe overhead), [`OrderManager`](src/reconciliation/mod.rs) and [`SharedOrderManager`](src/reconciliation/mod.rs) directly consume live push trade notifications via [`apply_trade_event`](src/reconciliation/mod.rs):
 
-```rust
+```rust,no_run
 // Subscribe to real-time broker trade events (Protocol v5+)
-let mut trade_sub = client.subscribe_trades()?;
+let mut trade_sub = client.subscribe_trade()?;
 
 // Background event processing loop
 tokio::spawn(async move {
@@ -946,7 +946,7 @@ tokio::spawn(async move {
     }
 });
 ```
-This enables sub-millisecond local state transitions for fills and closes while reserving full snapshot reconciliation ([`manager.reconcile(&client)`](src/reconciliation.rs)) for startup, reconnects, or periodic drift verification.
+This enables sub-millisecond local state transitions for fills and closes while reserving full snapshot reconciliation ([`manager.reconcile(&client)`](src/reconciliation/mod.rs)) for startup, reconnects, or periodic drift verification.
 
 ---
 
@@ -954,7 +954,7 @@ This enables sub-millisecond local state transitions for fills and closes while 
 
 Eliminate floating-point rounding drift by performing arithmetic in integer price ticks:
 
-```rust
+```rust,no_run
 use mt5_bridge::{calculate_sl_ticks, calculate_tp_ticks, price_to_ticks, ticks_to_price};
 
 let entry_price = 1.08500;
@@ -1004,52 +1004,52 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 
 ### `Mt5Client`
 
-[`Mt5Client`](src/client.rs) is the primary thread-safe client managing dynamic DLL loading, named pipe IPC, market data queries, and trade execution.
+[`Mt5Client`](src/client/mod.rs) is the primary thread-safe client managing dynamic DLL loading, named pipe IPC, market data queries, and trade execution.
 
 #### Connection & Lifecycle
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`connect`](src/client.rs) | `pub fn connect(login: i64, password: &str, server: &str) -> Result<Self>` | Connects to MT5. Resolves `mt5_bridge.dll` via `MT5_DLL_PATH` environment variable, or checks adjacent to executable / current working directory. |
-| [`connect_with_dll`](src/client.rs) | `pub fn connect_with_dll(dll_path: impl AsRef<Path>, login: i64, password: &str, server: &str) -> Result<Self>` | Connects by loading the bridge DLL from an explicit file path. |
-| [`set_symbol_cache_ttl`](src/client.rs) | `pub fn set_symbol_cache_ttl(&mut self, ttl: Duration)` | Overrides the in-memory cache time-to-live for `symbol_info` lookups (default: 60 seconds). |
-| [`shutdown`](src/client.rs) | `pub fn shutdown(&self) -> Result<()>` | Gracefully disconnects from the MT5 pipe server. Automatically called when the client is dropped (`Drop`). |
+| [`connect`](src/client/mod.rs) | `pub fn connect(login: i64, password: &str, server: &str) -> Result<Self>` | Connects to MT5. Resolves `mt5_bridge.dll` via `MT5_DLL_PATH` environment variable, or checks adjacent to executable / current working directory. |
+| [`connect_with_dll`](src/client/mod.rs) | `pub fn connect_with_dll(dll_path: impl AsRef<Path>, login: i64, password: &str, server: &str) -> Result<Self>` | Connects by loading the bridge DLL from an explicit file path. |
+| [`set_symbol_cache_ttl`](src/client/mod.rs) | `pub fn set_symbol_cache_ttl(&mut self, ttl: Duration)` | Overrides the in-memory cache time-to-live for `symbol_info` lookups (default: 60 seconds). |
+| [`shutdown`](src/client/mod.rs) | `pub fn shutdown(&self) -> Result<()>` | Gracefully disconnects from the MT5 pipe server. Automatically called when the client is dropped (`Drop`). |
 
 #### Account & Symbol Data
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`account_info`](src/client.rs) | `pub fn account_info(&self) -> Result<AccountInfo>` | Queries real-time balance, equity, margin, and free margin in deposit currency. |
-| [`symbol_info`](src/client.rs) | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Queries contract specifications (point size, tick size, tick value, lot step, min/max lots, spread, digits) with thread-safe caching. |
-| [`symbol_tick`](src/client.rs) | `pub fn symbol_tick(&self, symbol: &str) -> Result<Tick>` | Queries the latest quote tick (bid, ask, last, volume, flags). |
+| [`account_info`](src/client/mod.rs) | `pub fn account_info(&self) -> Result<AccountInfo>` | Queries real-time balance, equity, margin, and free margin in deposit currency. |
+| [`symbol_info`](src/client/mod.rs) | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Queries contract specifications (point size, tick size, tick value, lot step, min/max lots, spread, digits) with thread-safe caching. |
+| [`symbol_tick`](src/client/mod.rs) | `pub fn symbol_tick(&self, symbol: &str) -> Result<Tick>` | Queries the latest quote tick (bid, ask, last, volume, flags). |
 
 #### Historical Market Data
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`copy_rates`](src/client.rs) | `pub fn copy_rates(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Rate>>` | Fetches raw `Rate` structs within UTC timestamp range `[from, to]`. Rejects requests exceeding 1M bars with `RatesLimitExceeded`. |
-| [`copy_bars`](src/client.rs) | `pub fn copy_bars(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Bar>>` | Convenience wrapper around `copy_rates` that returns clean `Bar` records. |
-| [`copy_rates_chunked`](src/client.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries. |
-| [`copy_rates_chunked_detailed`](src/client.rs) | `pub fn copy_rates_chunked_detailed(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<HistoryResult>` | Detailed downloader returning `HistoryResult` with completeness tracking. |
+| [`copy_rates`](src/client/mod.rs) | `pub fn copy_rates(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Rate>>` | Fetches raw `Rate` structs within UTC timestamp range `[from, to]`. Rejects requests exceeding 1M bars with `RatesLimitExceeded`. |
+| [`copy_bars`](src/client/mod.rs) | `pub fn copy_bars(&self, symbol: &str, timeframe: Timeframe, from: i64, to: i64) -> Result<Vec<Bar>>` | Convenience wrapper around `copy_rates` that returns clean `Bar` records. |
+| [`copy_rates_chunked`](src/client/mod.rs) | `pub fn copy_rates_chunked(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<Vec<Rate>>` | Deep history downloader. Fetches history in chunks with stabilization retries. |
+| [`copy_rates_chunked_detailed`](src/client/mod.rs) | `pub fn copy_rates_chunked_detailed(&self, symbol: &str, timeframe: Timeframe, start: i64, end: i64, chunk_bars: usize) -> Result<HistoryResult>` | Detailed downloader returning `HistoryResult` with completeness tracking. |
 
 #### Order & Position Management
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`order_send`](src/client.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
-| [`order_close`](src/client.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position or cancels a pending order by ticket ID. |
-| [`close_position`](src/client.rs) | `pub fn close_position(&self, ticket: u64) -> Result<TradeResult>` | Semantic alias for closing an open market position by ticket ID. |
-| [`order_close_with_magic`](src/client.rs) | `pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
-| [`close_position_with_magic`](src/client.rs) | `pub fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
-| [`order_modify`](src/client.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
-| [`order_modify_with_magic`](src/client.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
-| [`positions`](src/client.rs) | `pub fn positions(&self) -> Result<Vec<Position>>` | Queries all active open positions in the terminal. |
-| [`positions_filtered`](src/client.rs) | `pub fn positions_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Position>>` | Queries open positions matching optional magic number and/or symbol filters. |
-| [`pending_orders`](src/client.rs) | `pub fn pending_orders(&self) -> Result<Vec<WorkingOrder>>` | Queries all active working pending orders in the terminal. |
-| [`pending_orders_filtered`](src/client.rs) | `pub fn pending_orders_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<WorkingOrder>>` | Queries working pending orders matching optional magic number and/or symbol filters. |
-| [`deals`](src/client.rs) | `pub fn deals(&self, from: i64, to: i64) -> Result<Vec<Deal>>` | Queries completed trade execution history within a UTC timestamp range `[from, to]`. |
-| [`deals_filtered`](src/client.rs) | `pub fn deals_filtered(&self, from: i64, to: i64, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Deal>>` | Queries completed trade execution history with optional magic number and/or symbol filters. |
-| [`events_dropped_total`](src/client.rs) | `pub fn events_dropped_total(&self) -> u64` | Queries the total count of dropped push streaming events in the C++ ring buffer. |
+| [`order_send`](src/client/mod.rs) | `pub fn order_send(&self, req: &OrderRequest) -> Result<TradeResult>` | Submits a market order (`Buy`/`Sell`) or pending order (`Limit`/`Stop`). |
+| [`order_close`](src/client/mod.rs) | `pub fn order_close(&self, ticket: u64) -> Result<TradeResult>` | Closes an open position or cancels a pending order by ticket ID. |
+| [`close_position`](src/client/mod.rs) | `pub fn close_position(&self, ticket: u64) -> Result<TradeResult>` | Semantic alias for closing an open market position by ticket ID. |
+| [`order_close_with_magic`](src/client/mod.rs) | `pub fn order_close_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
+| [`close_position_with_magic`](src/client/mod.rs) | `pub fn close_position_with_magic(&self, ticket: u64, magic: u64) -> Result<TradeResult>` | Closes position with strategy magic number ownership verification. |
+| [`order_modify`](src/client/mod.rs) | `pub fn order_modify(&self, ticket: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies Stop Loss and Take Profit levels on an existing ticket. |
+| [`order_modify_with_magic`](src/client/mod.rs) | `pub fn order_modify_with_magic(&self, ticket: u64, magic: u64, stop_loss: f64, take_profit: f64) -> Result<TradeResult>` | Modifies stops with strategy magic number ownership verification. |
+| [`positions`](src/client/mod.rs) | `pub fn positions(&self) -> Result<Vec<Position>>` | Queries all active open positions in the terminal. |
+| [`positions_filtered`](src/client/mod.rs) | `pub fn positions_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Position>>` | Queries open positions matching optional magic number and/or symbol filters. |
+| [`pending_orders`](src/client/mod.rs) | `pub fn pending_orders(&self) -> Result<Vec<WorkingOrder>>` | Queries all active working pending orders in the terminal. |
+| [`pending_orders_filtered`](src/client/mod.rs) | `pub fn pending_orders_filtered(&self, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<WorkingOrder>>` | Queries working pending orders matching optional magic number and/or symbol filters. |
+| [`deals`](src/client/mod.rs) | `pub fn deals(&self, from: i64, to: i64) -> Result<Vec<Deal>>` | Queries completed trade execution history within a UTC timestamp range `[from, to]`. |
+| [`deals_filtered`](src/client/mod.rs) | `pub fn deals_filtered(&self, from: i64, to: i64, magic: Option<u64>, symbol: Option<&str>) -> Result<Vec<Deal>>` | Queries completed trade execution history with optional magic number and/or symbol filters. |
+| [`events_dropped_total`](src/client/mod.rs) | `pub fn events_dropped_total(&self) -> u64` | Queries the total count of dropped push streaming events in the C++ ring buffer. |
 
 ---
 
@@ -1059,17 +1059,19 @@ Real-time streaming built on Tokio async broadcast & mpsc channels (enabled via 
 
 #### Real-Time Push Streaming (Protocol v5+)
 
-Event-driven streaming directly fed from MT5's `OnTick()`, `OnBookEvent()`, and `OnTradeTransaction()`:
+Event-driven streaming directly fed from MT5's `OnTick()`, `OnBookEvent()`, `OnTradeTransaction()`, and bar closing events:
 
 | Method | Signature | Description |
 | :--- | :--- | :--- |
-| [`subscribe_ticks`](src/client.rs) | `pub fn subscribe_ticks(&self, symbol: &str) -> Result<TickSubscription>` | Subscribes to push tick events for `symbol` using default [`StreamMode::Latest`](src/stream.rs). |
-| [`subscribe_ticks_with_mode`](src/client.rs) | `pub fn subscribe_ticks_with_mode(&self, symbol: &str, mode: StreamMode) -> Result<TickSubscription>` | Subscribes to push ticks with explicit mode: `StreamMode::Lossless` (guaranteed delivery with lag detection) or `StreamMode::Latest` (lowest-latency). |
-| [`unsubscribe_ticks`](src/client.rs) | `pub fn unsubscribe_ticks(&self, symbol: &str) -> Result<()>` | Unsubscribes from push tick quotes for `symbol`. |
-| [`subscribe_depth`](src/client.rs) | `pub fn subscribe_depth(&self, symbol: &str) -> Result<BookSubscription>` | Subscribes to real-time Level II Market Depth (order book) updates for `symbol`. |
-| [`unsubscribe_depth`](src/client.rs) | `pub fn unsubscribe_depth(&self, symbol: &str) -> Result<()>` | Unsubscribes from Level II depth stream for `symbol`. |
-| [`subscribe_trades`](src/client.rs) | `pub fn subscribe_trades(&self) -> Result<TradeSubscription>` | Subscribes to real-time broker trade transactions (`OnTradeTransaction`) with order comment attribution. |
-| [`unsubscribe_trades`](src/client.rs) | `pub fn unsubscribe_trades(&self) -> Result<()>` | Unsubscribes from broker trade transactions stream. |
+| [`subscribe_ticks`](src/client/mod.rs) | `pub fn subscribe_ticks(&self, symbol: &str) -> Result<TickSubscription>` | Subscribes to push tick events for `symbol` using default [`StreamMode::Latest`](src/stream.rs). |
+| [`subscribe_ticks_with_mode`](src/client/mod.rs) | `pub fn subscribe_ticks_with_mode(&self, symbol: &str, mode: StreamMode) -> Result<TickSubscription>` | Subscribes to push ticks with explicit mode: `StreamMode::Lossless` (guaranteed delivery with lag detection) or `StreamMode::Latest` (lowest-latency). |
+| [`unsubscribe_ticks`](src/client/mod.rs) | `pub fn unsubscribe_ticks(&self, symbol: &str) -> Result<()>` | Unsubscribes from push tick quotes for `symbol`. |
+| [`subscribe_book`](src/client/mod.rs) | `pub fn subscribe_book(&self, symbol: &str) -> Result<tokio::sync::broadcast::Receiver<BookEvent>>` | Subscribes to real-time Level II Market Depth (order book) updates for `symbol`. |
+| [`unsubscribe_book`](src/client/mod.rs) | `pub fn unsubscribe_book(&self, symbol: &str) -> Result<()>` | Unsubscribes from Level II depth stream for `symbol`. |
+| [`subscribe_trade`](src/client/mod.rs) | `pub fn subscribe_trade(&self) -> Result<tokio::sync::broadcast::Receiver<TradeEvent>>` | Subscribes to real-time broker trade transactions (`OnTradeTransaction`) with order comment attribution. |
+| [`unsubscribe_trade`](src/client/mod.rs) | `pub fn unsubscribe_trade(&self) -> Result<()>` | Unsubscribes from broker trade transactions stream. |
+| [`subscribe_bars`](src/client/mod.rs) | `pub fn subscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<tokio::sync::broadcast::Receiver<Bar>>` | Subscribes to real-time closed candlestick bar notifications for `symbol` and `timeframe`. |
+| [`unsubscribe_bars`](src/client/mod.rs) | `pub fn unsubscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<()>` | Unsubscribes from closed bar stream. |
 
 #### Polling-Based Streams (Fallback & Candle Aggregation)
 
@@ -1089,8 +1091,8 @@ The streaming pipeline offers two explicit backpressure policies:
 ### Data Structures & Models
 
 #### `AccountInfo`
-[`AccountInfo`](src/types.rs) holds current account equity and margin metrics:
-```rust
+[`AccountInfo`](src/types/mod.rs) holds current account equity and margin metrics:
+```rust,ignore
 pub struct AccountInfo {
     pub balance: f64,      // Balance in deposit currency
     pub equity: f64,       // Current equity (balance + floating PnL)
@@ -1102,8 +1104,8 @@ pub struct AccountInfo {
 - `margin_level(&self) -> Option<f64>`: Returns margin percentage (`equity / margin * 100.0`), or `None` if margin is zero.
 
 #### `SymbolInfo`
-[`SymbolInfo`](src/types.rs) contains contract specifications:
-```rust
+[`SymbolInfo`](src/types/mod.rs) contains contract specifications:
+```rust,ignore
 pub struct SymbolInfo {
     pub symbol: String,    // Symbol name (e.g., "EURUSD")
     pub point: f64,        // Smallest price change unit (e.g. 0.00001)
@@ -1122,8 +1124,8 @@ pub struct SymbolInfo {
 - `round_price(&self, price: f64) -> f64`: Rounds `price` to the nearest broker `tick_size` and normalizes to symbol `digits`.
 
 #### `Tick`
-[`Tick`](src/types.rs) represents a live price quote:
-```rust
+[`Tick`](src/types/mod.rs) represents a live price quote:
+```rust,ignore
 pub struct Tick {
     pub symbol: String,    // Symbol name
     pub time_msc: i64,     // Quote timestamp in milliseconds (UTC)
@@ -1139,8 +1141,8 @@ pub struct Tick {
 - `mid(&self) -> f64`: Returns mid-market price `(ask + bid) / 2.0`.
 
 #### `Bar`
-[`Bar`](src/types.rs) is a clean OHLCV candle representation:
-```rust
+[`Bar`](src/types/mod.rs) is a clean OHLCV candle representation:
+```rust,ignore
 pub struct Bar {
     pub time: i64,         // Candle open timestamp in seconds (UTC)
     pub open: f64,
@@ -1158,8 +1160,8 @@ pub struct Bar {
 - `is_bearish(&self) -> bool`: Returns `true` if `close < open`.
 
 #### `Rate`
-[`Rate`](src/types.rs) is the raw 1-to-1 binary equivalent of MT5 `MqlRates`:
-```rust
+[`Rate`](src/types/mod.rs) is the raw 1-to-1 binary equivalent of MT5 `MqlRates`:
+```rust,ignore
 pub struct Rate {
     pub time: i64,
     pub open: f64,
@@ -1173,8 +1175,8 @@ pub struct Rate {
 ```
 
 #### `HistoryResult`
-[`HistoryResult`](src/types.rs) returned from `copy_rates_chunked_detailed`:
-```rust
+[`HistoryResult`](src/types/mod.rs) returned from `copy_rates_chunked_detailed`:
+```rust,ignore
 pub struct HistoryResult {
     pub rates: Vec<Rate>,                // Retrieved historical rates
     pub complete: bool,                  // True if all requested ranges were retrieved
@@ -1184,7 +1186,7 @@ pub struct HistoryResult {
 - `is_complete(&self) -> bool`: Returns `true` if all requested ranges were retrieved without error.
 
 #### `Timeframe`
-[`Timeframe`](src/types.rs) covers standard chart intervals:
+[`Timeframe`](src/types/mod.rs) covers standard chart intervals:
 - **Variants**: `M1`, `M2`, `M3`, `M5`, `M6`, `M10`, `M12`, `M15`, `M20`, `M30`, `H1`, `H2`, `H3`, `H4`, `H6`, `H8`, `H12`, `D1`, `W1`, `MN1`.
 - `to_mt5_const(self) -> i32`: Translates to MT5 `ENUM_TIMEFRAMES` constant.
 - `seconds(self) -> i64`: Bar duration in seconds (e.g. `Timeframe::M15.seconds()` -> `900`).
@@ -1193,8 +1195,8 @@ pub struct HistoryResult {
 - `FromStr`: Parses standard representations (e.g. `"m15"`, `"15m"`, `"h1"`, `"1h"`, `"d1"`).
 
 #### `OrderRequest`
-[`OrderRequest`](src/types.rs) provides a fluent builder for trades:
-```rust
+[`OrderRequest`](src/types/mod.rs) provides a fluent builder for trades:
+```rust,no_run
 // Instant Market Orders with custom deviation & magic
 let req = OrderRequest::buy("EURUSD", 0.1)
     .stop_loss(1.0800)
@@ -1215,7 +1217,7 @@ let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, 1.0820)
 ```
 
 #### `OrderType`
-[`OrderType`](src/types.rs) corresponds to MT5 `ENUM_ORDER_TYPE`:
+[`OrderType`](src/types/mod.rs) corresponds to MT5 `ENUM_ORDER_TYPE`:
 - `OrderType::Buy` (0)
 - `OrderType::Sell` (1)
 - `OrderType::BuyLimit` (2)
@@ -1226,15 +1228,15 @@ let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.1, 1.0820)
 - `is_sell(self) -> bool`: Returns `true` for `Sell`, `SellLimit`, `SellStop`.
 
 #### `TradeStatus`
-[`TradeStatus`](src/types.rs) provides granular classification:
+[`TradeStatus`](src/types/mod.rs) provides granular classification:
 - `TradeStatus::Filled`: Market order filled in full.
 - `TradeStatus::Placed`: Pending order placed and active in terminal.
 - `TradeStatus::PartiallyFilled`: Order partially executed.
 - `TradeStatus::Rejected`: Order rejected or failed.
 
 #### `TradeResult`
-[`TradeResult`](src/types.rs) returned from order operations:
-```rust
+[`TradeResult`](src/types/mod.rs) returned from order operations:
+```rust,ignore
 pub struct TradeResult {
     pub retcode: u32,      // MT5 return code (e.g. 10009 = TRADE_RETCODE_DONE)
     pub deal: u64,         // Deal ticket number (if executed)
@@ -1257,8 +1259,8 @@ pub struct TradeResult {
 - `description(&self) -> &'static str`: Returns human-readable explanation of `retcode`.
 
 #### `Position`
-[`Position`](src/types.rs) represents an active open position in MetaTrader 5:
-```rust
+[`Position`](src/types/mod.rs) represents an active open position in MetaTrader 5:
+```rust,ignore
 pub struct Position {
     pub ticket: u64,
     pub time: i64,
@@ -1280,8 +1282,8 @@ pub struct Position {
 - `matches_magic(&self, magic: u64) -> bool`: Verifies ownership against strategy magic number.
 
 #### `WorkingOrder`
-[`WorkingOrder`](src/types.rs) represents an active working pending order:
-```rust
+[`WorkingOrder`](src/types/mod.rs) represents an active working pending order:
+```rust,ignore
 pub struct WorkingOrder {
     pub ticket: u64,
     pub time_setup: i64,
@@ -1299,8 +1301,8 @@ pub struct WorkingOrder {
 ```
 
 #### `Deal`
-[`Deal`](src/types.rs) represents a completed trade execution from MT5 trade history (protocol v4):
-```rust
+[`Deal`](src/types/mod.rs) represents a completed trade execution from MT5 trade history (protocol v4):
+```rust,ignore
 pub struct Deal {
     pub ticket: u64,           // Deal ticket
     pub order: u64,            // Order ticket that generated this deal
@@ -1322,18 +1324,18 @@ pub struct Deal {
 - `is_out(&self) -> bool`: Returns `true` if position closing or reducing deal (`entry == 1`).
 
 #### `OrderManager` & Reconciliation Engine
-[`OrderManager`](src/reconciliation.rs) wraps `Mt5Client` with production-grade execution and recovery guarantees:
+[`OrderManager`](src/reconciliation/mod.rs) wraps `Mt5Client` with production-grade execution and recovery guarantees:
 - **Order Idempotency**: Automatically maps `client_order_id` to deterministic, collision-free wire tokens (`w:<hash>`) and short-circuits duplicates.
 - **Durable Write-Ahead Journaling**: Supports [`OrderStore`](src/journal.rs) (e.g. [`JsonFileStore`](src/journal.rs)) to persist intents to disk via atomic tempfile + rename before transmitting over the wire.
 - **Uncertain Execution Handling**: Maps ambiguous disconnects to `OrderState::Unknown` and `LifecycleState::Degraded` instead of blindingly retrying.
 - **Broker Reconciliation & Deal Attribution**: Reconciles in-memory orders against live MT5 positions, working orders, and deal history (`CMD_DEALS_GET`) via `reconcile(&client)` or `reconcile_with_snapshot(...)`.
-- **Multi-Pass Grace Period**: Configurable [`SafetyPolicy`](src/reconciliation.rs) requires multiple absent passes over time (default: 3 passes over 30s) and checks MT5 deal history before transitioning `Unknown` to `Rejected`.
+- **Multi-Pass Grace Period**: Configurable [`SafetyPolicy`](src/reconciliation/mod.rs) requires multiple absent passes over time (default: 3 passes over 30s) and checks MT5 deal history before transitioning `Unknown` to `Rejected`.
 - **Full Attribute Verification**: Compares symbol, direction, volume, price, SL, and TP against expectations, flagging discrepancies as `OrderState::Mismatched(AttributeMismatch)`.
-- **Submission Gates & Traceable Retries**: Gated by [`UnknownBlockScope`](src/reconciliation.rs) to prevent cascading exposure. Retries must be initiated via [`retry_order()`](src/reconciliation.rs).
-- **Multi-Threaded Concurrency**: [`SharedOrderManager`](src/reconciliation.rs) provides atomic locking across the entire check-journal-transmit-record cycle.
+- **Submission Gates & Traceable Retries**: Gated by [`UnknownBlockScope`](src/reconciliation/mod.rs) to prevent cascading exposure. Retries must be initiated via [`retry_order()`](src/reconciliation/mod.rs).
+- **Multi-Threaded Concurrency**: [`SharedOrderManager`](src/reconciliation/mod.rs) provides atomic locking across the entire check-journal-transmit-record cycle.
 - **Strategy Ownership**: Strict magic number enforcement on all submissions, modifications, and closures.
 
-```rust
+```rust,no_run
 use mt5_bridge::{OrderManager, JsonFileStore, SafetyPolicy, OrderRequest, LifecycleState};
 use std::path::PathBuf;
 
@@ -1391,7 +1393,7 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 
 #### Return Code Translator
 Call [`mt5_retcode_description(retcode: u32) -> &'static str`](src/error.rs) to inspect any MT5 return code:
-```rust
+```rust,no_run
 use mt5_bridge::mt5_retcode_description;
 
 let msg = mt5_retcode_description(10016);
@@ -1408,27 +1410,34 @@ To connect to multiple MT5 terminals simultaneously on the same machine:
    - When attaching `mt5_bridge` to the chart, set input parameter `InpPipeName = "mt5bridge_account1"`.
 2. In MT5 Terminal #2:
    - Attach `mt5_bridge` with `InpPipeName = "mt5bridge_account2"`.
-3. In Rust, direct each client to the corresponding pipe via the `MT5_PIPE_NAME` environment variable:
+3. In Rust, run a separate process per terminal and direct each client to the corresponding pipe via the `MT5_PIPE_NAME` environment variable:
    ```bash
-   MT5_PIPE_NAME=mt5bridge_account1 ./my_bot
+   MT5_PIPE_NAME=mt5bridge_account1 ./my_bot_account1 &
+   MT5_PIPE_NAME=mt5bridge_account2 ./my_bot_account2 &
    ```
+
+> [!NOTE]
+> `mt5-bridge` enforces single-connection-per-process semantics via a process-level atomic guard (`CLIENT_ACTIVE`). To interact with multiple terminals simultaneously, run one dedicated process per MT5 terminal.
 
 ---
 
 ## Low-Level Binary IPC Protocol
 
-For developers writing bridges in other languages (Python, Go, C#, Java), the named pipe uses a clean, packed binary protocol over little-endian bytes:
+For developers writing bridges in other languages (Python, Go, C#, Java), the named pipe uses a clean, packed binary protocol over little-endian bytes.
+
+For the authoritative specification, wire layout diagrams, and complete struct layouts, see [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ### Packet Framing
 
-#### Request Packet
-#### 12-Byte Wire Header Framing (`PacketHdr`)
+#### Request & Response Framing
+#### 16-Byte Wire Header Framing (`PacketHdr`)
 ```text
-[uint32 length (4 bytes)] [uint8 kind (1 byte)] [uint8 _pad (1 byte)] [uint16 id (2 bytes)] [int32 status (4 bytes)] [payload...]
+[uint32 length (4 bytes)] [uint8 kind (1 byte)] [uint8 _pad (1 byte)] [uint16 id (2 bytes)] [int32 status (4 bytes)] [uint32 request_id (4 bytes)] [payload...]
 ```
 - `kind`: `PKT_REQUEST` (`0`), `PKT_RESPONSE` (`1`), `PKT_EVENT` (`2`).
-- `id`: Command ID (for requests/responses) or Event Type (`EVENT_TICK = 1`, `EVENT_TRADE = 2`, `EVENT_BOOK = 3`).
+- `id`: Command ID (for requests/responses) or Event Type (`EVENT_TICK = 1`, `EVENT_TRADE = 2`, `EVENT_BOOK = 3`, `EVENT_BAR = 4`).
 - `status`: Execution status code (`>= 0`: Success; `< 0`: Failure).
+- `request_id`: Request correlation identifier.
 
 ### Command Table
 
@@ -1452,19 +1461,23 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 | `16` | `CMD_UNSUBSCRIBE_TRADE`| Unsubscribe from real-time pushed trade transaction events |
 | `17` | `CMD_SUBSCRIBE_BOOK` | Subscribe to real-time pushed DOM order book depth events for symbol |
 | `18` | `CMD_UNSUBSCRIBE_BOOK` | Unsubscribe from real-time pushed DOM order book depth events for symbol |
+| `19` | `CMD_SUBSCRIBE_BARS` | Subscribe to real-time pushed closed-bar notifications for symbol and timeframe |
+| `20` | `CMD_UNSUBSCRIBE_BARS` | Unsubscribe from real-time pushed closed-bar notifications |
 
 ### Packed Struct Layouts (`#pragma pack(push, 1)`)
 
-- **`PacketHdr` (12 bytes)**:
-  `uint32 length`, `uint8 kind`, `uint8 _pad`, `uint16 id`, `int32 status`.
-- **`Mt5TickEvent` (76 bytes)**:
-  `char symbol[32]`, `int64 time_msc`, `double bid`, `double ask`, `double last`, `uint64 volume`, `uint32 flags`.
-- **`Mt5TradeEvent` (136 bytes)**:
-  `uint64 deal`, `uint64 order`, `uint64 position`, `int64 time`, `int32 trans_type`, `int32 order_type`, `double price`, `double volume`, `double sl`, `double tp`, `char symbol[32]`, `char comment[32]`.
-- **`Mt5BookEvent` (64 bytes)**:
-  `char symbol[32]`, `int64 time_msc`, `int32 book_type`, `int32 _pad`, `double price`, `double volume`.
-- **`Mt5SymInfo` (60 bytes)**:
-  `double point`, `double tick_value`, `double tick_size`, `double lot_step`, `double min_lot`, `double max_lot`, `double spread`, `int32 digits`.
+- **`PacketHdr` (16 bytes)**:
+  `uint32 length`, `uint8 kind`, `uint8 _pad`, `uint16 id`, `int32 status`, `uint32 request_id`.
+- **`Mt5TickEvent` (88 bytes)**:
+  `char symbol[32]`, `int64 time_msc`, `double bid`, `double ask`, `double last`, `uint64 volume`, `uint32 flags`, `int32 _pad`, `uint64 event_seq`.
+- **`Mt5TradeEvent` (176 bytes)**:
+  `uint64 deal`, `uint64 order`, `uint64 position`, `int64 time`, `int32 trans_type`, `int32 order_type`, `double price`, `double volume`, `double sl`, `double tp`, `char symbol[32]`, `char comment[32]`, `int32 deal_entry`, `int32 deal_type`, `uint64 deal_magic`, `uint64 deal_position_id`, `int32 deal_reason`, `int32 _pad`, `uint64 event_seq`.
+- **`Mt5BookEvent` (72 bytes)**:
+  `char symbol[32]`, `int64 time_msc`, `int32 book_type`, `int32 _pad`, `double price`, `double volume`, `uint64 event_seq`.
+- **`Mt5SymInfo` (76 bytes)**:
+  `double point`, `double tick_value`, `double tick_size`, `double lot_step`, `double min_lot`, `double max_lot`, `double spread`, `int32 digits`, `double bid`, `double ask`.
+- **`Mt5BarEvent` (96 bytes)**:
+  `char symbol[32]`, `int64 time`, `double open`, `double high`, `double low`, `double close`, `int64 volume`, `int32 timeframe`, `int32 spread`, `uint64 event_seq`.
 - **`Mt5Rate` (60 bytes)**:
   `int64 time`, `double open`, `double high`, `double low`, `double close`, `int64 volume`, `int32 spread`, `int64 real_volume`.
 - **`Mt5Tick` (44 bytes)**:
@@ -1483,12 +1496,12 @@ For developers writing bridges in other languages (Python, Go, C#, Java), the na
 The bridge enforces strict compile-time and runtime alignment across the C++ DLL, MQL5 EA, and Rust FFI:
 - **Wire Protocol Version**: Handshake version `PROTOCOL_VERSION = 7` (defined as `MT5_BRIDGE_PROTOCOL_VERSION` in C++ and `PROTOCOL_VERSION` in MQL5 and Rust).
 - **Compile-Time ABI Assertions**: Struct byte layouts are validated via C++11 `static_assert` and Rust compile-time layout assertions:
-  - `PacketHdr`: 12 bytes
-  - `Mt5TickEvent`: 76 bytes
-  - `Mt5TradeEvent`: 136 bytes
-  - `Mt5BookEvent`: 64 bytes
-  - `Mt5SymInfo`: 76 bytes  *(Protocol v7: added `bid`/`ask`)*
-  - `Mt5BarEvent`: 96 bytes  *(Protocol v7)*
+  - `PacketHdr` (16 bytes)
+  - `Mt5TickEvent` (88 bytes)
+  - `Mt5TradeEvent` (176 bytes)
+  - `Mt5BookEvent` (72 bytes)
+  - `Mt5SymInfo` (76 bytes)
+  - `Mt5BarEvent` (96 bytes)
   - `Mt5Rate`: 60 bytes
   - `Mt5Tick`: 44 bytes
   - `Mt5TradeResult`: 44 bytes

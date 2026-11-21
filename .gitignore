@@ -22,4 +22,8 @@ bridge_dll/bin/
 Thumbs.db
 
 # Documentation
-docs/
+docs/*
+!docs/PROTOCOL.md
+!docs/RUNBOOK.md
+!docs/MIGRATION.md
+!docs/SECURITY.md

@@ -41,7 +41,9 @@ This document details protocol evolution across versions and provides migration 
    - `subscribe_trade` returns `tokio::sync::broadcast::Receiver<TradeEvent>`.
    - `subscribe_ticks` returns `TickSubscription` with configurable mode (`StreamMode::Latest` or `StreamMode::Lossless`).
 3. **Magic Number Default Invariant:**
+   - Introduced `EA_DEFAULT_MAGIC` (`20240101`) matching the MQL5 EA `InpMagicNumber` parameter. Deprecated `DEFAULT_MAGIC` (`424242`).
    - The MQL5 EA parameter `InpEnforceMagicNumber` defaults to `true`.
+   - `OrderManager::submit_order` populates `req.magic` with `strategy_magic` when `req.magic` is `None` (never silently defaulting to legacy `DEFAULT_MAGIC`).
    - When submitting orders, ensure the client magic number matches the EA's `InpMagicNumber` (or set `InpEnforceMagicNumber = false` in the EA parameters if multiple strategies share the terminal).
 4. **Session Supervision:**
    - `Mt5Session` manages connection lifecycle states (`Starting`, `Connecting`, `Authenticating`, `Syncing`, `Reconciling`, `Ready`, `Degraded`, `Stopped`).

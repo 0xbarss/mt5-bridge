@@ -350,8 +350,9 @@ impl OrderManager {
     ///
     /// Sequence (all under the caller's exclusive `&mut self` — see the concurrency contract):
     /// 1. Validate the request (invalid requests never touch state).
-    /// 2. Idempotency: a repeated `client_order_id` returns the existing record and never
-    ///    re-contacts the broker.
+    /// 2. Idempotency & Magic: a repeated `client_order_id` returns the existing record and never
+    ///    re-contacts the broker. If `req.magic` is `None` (or 0), it is assigned `strategy_magic`.
+    ///    Any non-matching magic number is rejected with [`Mt5Error::OwnershipMismatch`].
     /// 3. Unknown gate: refuse while any order's outcome is unresolved
     ///    ([`Mt5Error::UnresolvedUnknownOrders`]).
     /// 4. Write-ahead: record `Submitting` and, if a store is configured, make it durable.
@@ -1147,6 +1148,39 @@ impl OrderManager {
                 }
                 Err(e)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_order_magic_defaults_to_strategy_magic() {
+        let manager = OrderManager::new(20240101);
+        let mut req = OrderRequest::buy("EURUSD", 0.1);
+        assert_eq!(req.magic, None);
+        let res = manager.check_idempotency_and_magic(&mut req);
+        assert!(res.is_ok());
+        assert_eq!(req.magic, Some(20240101));
+    }
+
+    #[test]
+    fn submit_order_magic_rejects_mismatched_magic() {
+        let manager = OrderManager::new(20240101);
+        let mut req = OrderRequest::buy("EURUSD", 0.1).magic(999999);
+        let res = manager.check_idempotency_and_magic(&mut req);
+        match res {
+            Err(Mt5Error::OwnershipMismatch {
+                expected_magic,
+                actual_magic,
+                ..
+            }) => {
+                assert_eq!(expected_magic, 20240101);
+                assert_eq!(actual_magic, 999999);
+            }
+            other => panic!("expected OwnershipMismatch, got {other:?}"),
         }
     }
 }

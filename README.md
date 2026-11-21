@@ -250,11 +250,11 @@ In high-volatility market conditions (e.g. major news releases), quote or transa
 
 ### Trade Ownership & Magic Number Scope
 
-- **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`) to all orders placed through the bridge unless a custom magic number is specified.
+- **Bridge Magic Number**: The EA attaches `InpMagicNumber` (default `20240101`, exposed as `EA_DEFAULT_MAGIC`) to all orders placed through the bridge unless a custom magic number is specified.
 - **Multi-Strategy & Magic Management**:
   - By default (`InpEnforceMagicNumber = true`), the EA strictly enforces `InpMagicNumber` across `OrderSend`, `OrderClose`, and `OrderModify`, rejecting any operation where the magic number does not match.
   - To allow multi-strategy magic routing or custom magic numbers across multiple strategies sharing the same bridge connection, set `InpEnforceMagicNumber = false`. When disabled, orders placed with custom magic numbers can be freely closed and modified by ticket. When closing or modifying positions, the bridge preserves the position's original magic number in the trade record.
-- **Custom Order Magic**: Callers can specify custom magic numbers per-request using `OrderRequest::buy(...).magic(my_magic)`.
+- **Custom Order Magic**: Callers can specify custom magic numbers per-request using `OrderRequest::buy(...).magic(my_magic)` or using `EA_DEFAULT_MAGIC`.
 
 ### Concurrency, Latency & Serialization
 
@@ -692,7 +692,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 8. Placing, Modifying & Closing Market Orders
 
 ```rust,no_run
-use mt5_bridge::{Mt5Client, OrderRequest};
+use mt5_bridge::{Mt5Client, OrderRequest, EA_DEFAULT_MAGIC};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Mt5Client::connect(12345678, "password", "Broker-Demo")?;
@@ -710,7 +710,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .stop_loss(sl)
         .take_profit(tp)
         .deviation(15)
-        .magic(20240101)
+        .magic(EA_DEFAULT_MAGIC)
         .comment("bot_trade_1");
 
     let result = client.order_send(&order_req)?;
@@ -740,7 +740,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Or close verifying strategy magic number ownership:
-    // let close_result = client.close_position_with_magic(target_ticket, 20240101)?;
+    // let close_result = client.close_position_with_magic(target_ticket, EA_DEFAULT_MAGIC)?;
 
     Ok(())
 }
@@ -1203,7 +1203,7 @@ let req = OrderRequest::buy("EURUSD", 0.1)
     .stop_loss(1.0800)
     .take_profit(1.0950)
     .deviation(10)
-    .magic(20240101)
+    .magic(EA_DEFAULT_MAGIC)
     .comment("my_bot_buy");
 
 let req = OrderRequest::sell("EURUSD", 0.1)

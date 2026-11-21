@@ -351,3 +351,29 @@ fn synthetic_book_event_with_epoch_ms_round_trips() {
     assert_eq!(event.price, 1.08530);
     assert_eq!(event.volume, 100.0);
 }
+
+#[test]
+fn rust_ea_default_magic_matches_ea_input() {
+    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let value = ea
+        .lines()
+        .find(|l| l.contains("InpMagicNumber") && l.trim_start().starts_with("input"))
+        .and_then(|l| l.split('=').nth(1))
+        .and_then(|s| s.split(';').next())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .expect("failed to extract InpMagicNumber default from mt5_bridge.mq5");
+    assert_eq!(value, mt5_bridge::constants::EA_DEFAULT_MAGIC);
+}
+
+#[test]
+fn rust_ea_enforce_magic_defaults_to_true() {
+    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let value = ea
+        .lines()
+        .find(|l| l.contains("InpEnforceMagicNumber") && l.trim_start().starts_with("input"))
+        .and_then(|l| l.split('=').nth(1))
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim())
+        .expect("failed to extract InpEnforceMagicNumber default from mt5_bridge.mq5");
+    assert_eq!(value, "true");
+}

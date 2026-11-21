@@ -1,6 +1,7 @@
 use mt5_bridge::journal::OrderStore;
 use mt5_bridge::types::{OrderRequest, OrderState, TrackedOrder};
 use mt5_bridge::wal::{WalConfig, WalOrderStore};
+use mt5_bridge::EA_DEFAULT_MAGIC;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,7 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let req = OrderRequest::buy("EURUSD", 0.50)
         .price(1.08500)
         .stop_loss(1.08000)
-        .take_profit(1.09000);
+        .take_profit(1.09000)
+        .magic(EA_DEFAULT_MAGIC);
     let mut order = TrackedOrder::new(&req, "strat-101-alpha");
 
     println!(

@@ -1,4 +1,4 @@
-use mt5_bridge::{Mt5Client, OrderRequest};
+use mt5_bridge::{Mt5Client, OrderRequest, EA_DEFAULT_MAGIC};
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let order_req = OrderRequest::buy(symbol, volume)
         .stop_loss(sl)
         .take_profit(tp)
+        .magic(EA_DEFAULT_MAGIC)
         .comment("mt5_bridge_test");
 
     println!(

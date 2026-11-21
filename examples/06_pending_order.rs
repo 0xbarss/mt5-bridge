@@ -1,4 +1,4 @@
-use mt5_bridge::{Mt5Client, OrderRequest, OrderType};
+use mt5_bridge::{Mt5Client, OrderRequest, OrderType, EA_DEFAULT_MAGIC};
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let req = OrderRequest::pending(symbol, OrderType::BuyLimit, volume, limit_price)
+        .magic(EA_DEFAULT_MAGIC)
         .comment("test_buylimit");
 
     let result = match client.order_send(&req) {

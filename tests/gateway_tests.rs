@@ -11,7 +11,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use mt5_bridge::backend::TradingBackend;
-use mt5_bridge::constants::DEFAULT_MAGIC;
+use mt5_bridge::constants::EA_DEFAULT_MAGIC;
 use mt5_bridge::gateway::*;
 use mt5_bridge::reconciliation::{LifecycleState, OrderManager, SafetyPolicy};
 use mt5_bridge::session::*;
@@ -223,7 +223,7 @@ fn test_manager() -> OrderManager {
         min_absent_secs: 0,
         ..Default::default()
     };
-    OrderManager::with_policy(DEFAULT_MAGIC, policy)
+    OrderManager::with_policy(EA_DEFAULT_MAGIC, policy)
 }
 
 fn buy_order(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
@@ -400,7 +400,7 @@ async fn test_gateway_concurrent_submissions_and_modifications() {
             let mod_res = g
                 .modify_order(
                     tracked.position_ticket,
-                    DEFAULT_MAGIC,
+                    EA_DEFAULT_MAGIC,
                     Level::Set(1.0800),
                     Level::Set(1.0900),
                 )
@@ -416,7 +416,7 @@ async fn test_gateway_concurrent_submissions_and_modifications() {
 
     // Verify all positions open and accounted for
     let positions = gateway
-        .positions_filtered(Some(DEFAULT_MAGIC), None)
+        .positions_filtered(Some(EA_DEFAULT_MAGIC), None)
         .await
         .unwrap();
     assert_eq!(positions.len(), num_tasks);
@@ -457,7 +457,7 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
         comment: "".to_string(),
         deal_entry: 0,
         deal_type: 0,
-        deal_magic: DEFAULT_MAGIC,
+        deal_magic: EA_DEFAULT_MAGIC,
         deal_position_id: 301,
         deal_reason: 0,
         event_seq: 1,
@@ -484,7 +484,7 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
         comment: "".to_string(),
         deal_entry: 0,
         deal_type: 0,
-        deal_magic: DEFAULT_MAGIC,
+        deal_magic: EA_DEFAULT_MAGIC,
         deal_position_id: 305,
         deal_reason: 0,
         event_seq: 5,
@@ -566,7 +566,7 @@ async fn test_gateway_position_book_tracking_and_queries() {
         take_profit: 1.0950,
         deviation: Some(10),
         comment: "gateway_book_test".to_string(),
-        magic: Some(DEFAULT_MAGIC),
+        magic: Some(EA_DEFAULT_MAGIC),
         expiration: None,
         client_order_id: None,
     };
@@ -584,7 +584,7 @@ async fn test_gateway_position_book_tracking_and_queries() {
         deal_entry: 0, // In
         deal_type: 0,
         deal_reason: 3, // Expert
-        deal_magic: DEFAULT_MAGIC,
+        deal_magic: EA_DEFAULT_MAGIC,
         deal_position_id: ticket,
         time: 1700000100,
         price: 1.0850,
@@ -610,7 +610,7 @@ async fn test_gateway_position_book_tracking_and_queries() {
     gateway
         .modify_order(
             ticket,
-            DEFAULT_MAGIC,
+            EA_DEFAULT_MAGIC,
             Level::Set(1.0820),
             Level::Set(1.0980),
         )
@@ -623,7 +623,10 @@ async fn test_gateway_position_book_tracking_and_queries() {
     assert_eq!(pos.take_profit, 1.0980);
 
     // Close position
-    gateway.close_position(ticket, DEFAULT_MAGIC).await.unwrap();
+    gateway
+        .close_position(ticket, EA_DEFAULT_MAGIC)
+        .await
+        .unwrap();
 
     // Position is marked Closing immediately
     let book = gateway.position_book().await.unwrap();
@@ -641,7 +644,7 @@ async fn test_gateway_position_book_tracking_and_queries() {
         deal_entry: 1, // Out
         deal_type: 1,
         deal_reason: 3, // Expert
-        deal_magic: DEFAULT_MAGIC,
+        deal_magic: EA_DEFAULT_MAGIC,
         deal_position_id: ticket,
         time: 1700000200,
         price: 1.0860,
@@ -1281,4 +1284,31 @@ async fn test_session_state_stream_and_wait_ready_standalone() {
 
     let res2 = session2.wait_ready(Duration::from_millis(50)).await;
     assert!(res2.is_ok());
+}
+
+#[test]
+fn test_order_manager_strategy_magic_assignment() {
+    let manager = OrderManager::new(998877);
+    let mut req = OrderRequest::buy("EURUSD", 0.1);
+    assert_eq!(req.magic, None);
+    let _ = manager.check_idempotency_and_magic(&mut req).unwrap();
+    assert_eq!(req.magic, Some(998877));
+}
+
+#[test]
+fn test_order_manager_ownership_mismatch() {
+    let manager = OrderManager::new(998877);
+    let mut req = OrderRequest::buy("EURUSD", 0.1).magic(123456);
+    let err = manager.check_idempotency_and_magic(&mut req).unwrap_err();
+    match err {
+        Mt5Error::OwnershipMismatch {
+            expected_magic,
+            actual_magic,
+            ..
+        } => {
+            assert_eq!(expected_magic, 998877);
+            assert_eq!(actual_magic, 123456);
+        }
+        other => panic!("expected OwnershipMismatch, got {other:?}"),
+    }
 }

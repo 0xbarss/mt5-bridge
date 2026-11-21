@@ -20,7 +20,14 @@ pub const DUP_PRICE_THRESHOLD: f64 = PRICE_TOLERANCE;
 /// Tick de-duplication timestamp threshold (1e-6 seconds).
 pub const DUP_TIME_THRESHOLD: f64 = TIME_TOLERANCE;
 
+/// Magic number used by the default EA configuration (`InpMagicNumber`).
+pub const EA_DEFAULT_MAGIC: u64 = 20240101;
+
 /// Default magic number for identifying orders/positions belonging to this bridge client.
+#[deprecated(
+    since = "0.4.0",
+    note = "use EA_DEFAULT_MAGIC or an explicit strategy magic"
+)]
 pub const DEFAULT_MAGIC: u64 = 424242;
 
 #[cfg(test)]
@@ -33,9 +40,11 @@ mod tests {
     const_assert!(ULTRA_TOLERANCE > 0.0);
 
     #[test]
+    #[allow(deprecated)]
     fn test_tolerance_values() {
         assert_eq!(DUP_PRICE_THRESHOLD, PRICE_TOLERANCE);
         assert_eq!(DUP_TIME_THRESHOLD, TIME_TOLERANCE);
+        assert_eq!(EA_DEFAULT_MAGIC, 20240101);
         assert_eq!(DEFAULT_MAGIC, 424242);
     }
 }

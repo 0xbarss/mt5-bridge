@@ -15,6 +15,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 pub const MAGIC: u64 = 424242;
+pub const STRATEGY_MAGIC: StrategyMagic = match StrategyMagic::const_new(MAGIC) {
+    Some(m) => m,
+    None => unreachable!(),
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Fault {
@@ -520,7 +524,7 @@ pub fn instant_policy() -> SafetyPolicy {
 
 /// Grace-period-free policy but otherwise default (block scope = Strategy, history required).
 pub fn manager() -> OrderManager {
-    OrderManager::with_policy(MAGIC, instant_policy())
+    OrderManager::with_policy(STRATEGY_MAGIC, instant_policy())
 }
 
 pub fn buy(symbol: &str, vol: f64, cid: &str) -> OrderRequest {

@@ -860,7 +860,7 @@ For mission-critical production trading, [`OrderManager`](src/reconciliation/mod
 ```rust,no_run
 use mt5_bridge::{LifecycleState, OrderManager, OrderRequest};
 
-let mut manager = OrderManager::new(998877); // Strategy Magic 998877
+let mut manager = OrderManager::try_new(998877)?; // Strategy Magic 998877
 
 // Reconcile against live MT5 state on startup
 let report = manager.reconcile(&client)?;
@@ -873,7 +873,7 @@ println!(
 
 // Configure write-ahead durable journal
 let store = JsonFileStore::new("orders_journal.json");
-let mut manager = OrderManager::new(998877).with_store(store);
+let mut manager = OrderManager::with_store(998877, store)?;
 
 // Reconcile against live MT5 state on startup (evaluates positions, working orders, and deal history)
 let report = manager.reconcile(&client)?;
@@ -921,7 +921,7 @@ When a live position or working order matches on ticket or wire identity token, 
   use mt5_bridge::{OrderManager, SharedOrderManager};
   use std::sync::Arc;
 
-  let manager = OrderManager::new(998877);
+  let manager = OrderManager::try_new(998877)?;
   let shared = SharedOrderManager::new(manager);
 
   // Cloneable across threads: holds exclusive lock across idempotency check + write-ahead + broker execution
@@ -1342,7 +1342,7 @@ use std::path::PathBuf;
 
 // Initialize manager with magic number, durable journal, and safety policy
 let store = JsonFileStore::new(PathBuf::from("data/orders.json"))?;
-let mut manager = OrderManager::with_store(998877, store)
+let mut manager = OrderManager::with_store(998877, store)?
     .with_safety_policy(SafetyPolicy::default());
 
 // Reconcile on startup against live MT5 positions, orders, and deal history

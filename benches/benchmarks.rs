@@ -304,7 +304,7 @@ fn main() {
 
     // 7. OrderManager idempotency lookup & submission (in-memory backend)
     let backend = DummyBackend::default();
-    let mut mgr = OrderManager::new(998877);
+    let mut mgr = OrderManager::try_new(998877).expect("valid magic");
     let mut order_idx = 0u64;
     bench("order_manager_submit_order (single-owner)", 20_000, || {
         order_idx += 1;
@@ -314,7 +314,7 @@ fn main() {
     });
 
     // 6. Reconciliation snapshot evaluation (50 positions + 50 deals matching)
-    let mut recon_mgr = OrderManager::new(998877);
+    let mut recon_mgr = OrderManager::try_new(998877).expect("valid magic");
     let mut snap_positions = Vec::new();
     let mut snap_deals = Vec::new();
     for i in 0..50 {
@@ -351,7 +351,7 @@ fn main() {
 
     // 7. Multi-threaded submission throughput under SharedOrderManager
     let shared_backend = Arc::new(DummyBackend::default());
-    let shared_mgr = SharedOrderManager::new(OrderManager::new(998877));
+    let shared_mgr = SharedOrderManager::new(OrderManager::try_new(998877).expect("valid magic"));
     let num_threads = 4;
     let ops_per_thread = 5_000;
     let barrier = Arc::new(Barrier::new(num_threads + 1));

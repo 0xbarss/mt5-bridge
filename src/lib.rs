@@ -98,7 +98,7 @@ pub use position_book::{
 };
 pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderManager, ReconciliationReport, SafetyPolicy,
-    SharedOrderManager, UnknownBlockScope,
+    SharedOrderManager, StrategyMagic, UnknownBlockScope,
 };
 pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;

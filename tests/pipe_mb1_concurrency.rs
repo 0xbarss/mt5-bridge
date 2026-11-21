@@ -150,7 +150,7 @@ fn test_shared_order_manager_high_concurrency_stress() {
     let num_threads = 8;
     let ops_per_thread = 200;
     let backend = Arc::new(ConcurrentMockBackend::default());
-    let manager = SharedOrderManager::new(OrderManager::new(424242));
+    let manager = SharedOrderManager::new(OrderManager::try_new(424242).expect("valid magic"));
     let barrier = Arc::new(Barrier::new(num_threads + 1));
     let mut handles = Vec::new();
 

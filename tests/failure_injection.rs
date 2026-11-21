@@ -376,7 +376,7 @@ fn delayed_broker_visibility_keeps_the_order_unknown_instead_of_misclassifying_i
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.set_visibility_delay(2);
     let mut mgr = OrderManager::with_policy(
-        MAGIC,
+        STRATEGY_MAGIC,
         SafetyPolicy {
             min_absent_observations: 4,
             min_absent_secs: 0,
@@ -430,7 +430,7 @@ fn single_shot_policy_misclassifies_delayed_visibility_which_is_why_it_is_not_th
 
 #[test]
 fn default_policy_needs_multiple_observations_and_elapsed_time_before_rejecting() {
-    let mut mgr = OrderManager::new(MAGIC); // SafetyPolicy::default(): 3 obs, 30 s, history required
+    let mut mgr = OrderManager::new(STRATEGY_MAGIC); // SafetyPolicy::default(): 3 obs, 30 s, history required
     let broker = MockBroker::new();
     broker.push_fault(Fault::LoseBeforeExecution);
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "grace-1"));
@@ -457,7 +457,7 @@ fn default_policy_needs_multiple_observations_and_elapsed_time_before_rejecting(
 
 #[test]
 fn absence_without_deal_history_never_rejects_under_default_policy() {
-    let mut mgr = OrderManager::new(MAGIC);
+    let mut mgr = OrderManager::new(STRATEGY_MAGIC);
     let broker = MockBroker::new();
     broker.push_fault(Fault::LoseBeforeExecution);
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "nohist-1"));
@@ -500,7 +500,7 @@ fn backend_without_history_support_leaves_absent_orders_unknown() {
 
 #[test]
 fn absence_counter_resets_when_the_order_is_seen_and_survives_persistence() {
-    let mut mgr = OrderManager::new(MAGIC);
+    let mut mgr = OrderManager::new(STRATEGY_MAGIC);
     let broker = MockBroker::new();
     broker.push_fault(Fault::LoseBeforeExecution);
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "ctr-1"));
@@ -514,7 +514,7 @@ fn absence_counter_resets_when_the_order_is_seen_and_survives_persistence() {
     );
     assert_eq!(mgr.get_order("ctr-1").unwrap().absent_observations, 1);
 
-    let mut restored = OrderManager::new(MAGIC);
+    let mut restored = OrderManager::new(STRATEGY_MAGIC);
     restored.restore_orders(mgr.export_orders());
     let o = restored.get_order("ctr-1").unwrap();
     assert_eq!((o.absent_observations, o.first_absent_at), (1, Some(t0)));
@@ -729,7 +729,7 @@ fn hedging_selects_the_correct_ticket_among_same_symbol_positions() {
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     let mut mgr = OrderManager::with_policy(
-        MAGIC,
+        STRATEGY_MAGIC,
         SafetyPolicy {
             unknown_block_scope: UnknownBlockScope::Disabled,
             ..instant_policy()
@@ -1051,7 +1051,7 @@ fn block_scope_strategy_symbol_and_disabled() {
         let broker = MockBroker::new();
         broker.push_fault(Fault::LoseBeforeExecution);
         let mut mgr = OrderManager::with_policy(
-            MAGIC,
+            STRATEGY_MAGIC,
             SafetyPolicy {
                 unknown_block_scope: scope,
                 ..instant_policy()
@@ -1139,7 +1139,7 @@ fn reconcile_until_settled_waits_for_delayed_visibility_and_reports_timeouts() {
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.set_visibility_delay(3);
     let mut mgr = OrderManager::with_policy(
-        MAGIC,
+        STRATEGY_MAGIC,
         SafetyPolicy {
             min_absent_observations: 10,
             ..instant_policy()
@@ -1155,7 +1155,7 @@ fn reconcile_until_settled_waits_for_delayed_visibility_and_reports_timeouts() {
     // A genuinely absent order under the default 30 s policy times out unresolved (and stays blocking).
     let broker2 = MockBroker::new();
     broker2.push_fault(Fault::LoseBeforeExecution);
-    let mut mgr2 = OrderManager::new(MAGIC);
+    let mut mgr2 = OrderManager::new(STRATEGY_MAGIC);
     let _ = mgr2.submit_order(&broker2, buy("EURUSD", 0.5, "T"));
     let r2 = mgr2
         .reconcile_until_settled(
@@ -1178,7 +1178,7 @@ async fn reconcile_until_settled_async_with_paused_time_settles_without_blocking
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.set_visibility_delay(3);
     let mut mgr = OrderManager::with_policy(
-        MAGIC,
+        STRATEGY_MAGIC,
         SafetyPolicy {
             min_absent_observations: 10,
             ..instant_policy()
@@ -1203,7 +1203,7 @@ async fn reconcile_until_settled_async_with_paused_time_settles_without_blocking
     // Absent order times out asynchronously without blocking
     let broker2 = MockBroker::new();
     broker2.push_fault(Fault::LoseBeforeExecution);
-    let mut mgr2 = OrderManager::new(MAGIC);
+    let mut mgr2 = OrderManager::new(STRATEGY_MAGIC);
     let _ = mgr2.submit_order(&broker2, buy("EURUSD", 0.5, "ASYNC-T"));
 
     let wall_start2 = std::time::Instant::now();
@@ -1227,7 +1227,7 @@ async fn shared_order_manager_reconcile_until_settled_async_with_paused_time() {
     broker.push_fault(Fault::ExecuteThenLoseResponse);
     broker.set_visibility_delay(2);
     let mgr = SharedOrderManager::new(OrderManager::with_policy(
-        MAGIC,
+        STRATEGY_MAGIC,
         SafetyPolicy {
             min_absent_observations: 5,
             ..instant_policy()

@@ -13,11 +13,100 @@ use crate::types::{
 };
 use chrono::Utc;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 static ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Strongly-typed non-zero strategy magic number for order identification and isolation.
+///
+/// In MetaTrader 5 and this bridge, a non-zero magic number uniquely identifies
+/// orders and positions owned by a specific trading strategy or expert advisor instance.
+/// A magic number of zero indicates unmanaged manual trades or an unconfigured strategy,
+/// which cannot provide isolation guarantees.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct StrategyMagic(NonZeroU64);
+
+impl StrategyMagic {
+    /// Create a new `StrategyMagic` after validating that `value` is non-zero.
+    pub fn new(value: u64) -> Result<Self> {
+        NonZeroU64::new(value).map(Self).ok_or_else(|| {
+            Mt5Error::InvalidRequest("strategy magic number must be non-zero".to_string())
+        })
+    }
+
+    /// Construct a `StrategyMagic` from a known non-zero value at compile time or in const contexts.
+    pub const fn const_new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    /// Construct a `StrategyMagic` directly from a [`NonZeroU64`].
+    pub const fn from_non_zero(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    /// Return the raw `u64` magic number value.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    /// Return the underlying [`NonZeroU64`].
+    pub const fn as_non_zero(self) -> NonZeroU64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for StrategyMagic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<StrategyMagic> for u64 {
+    fn from(magic: StrategyMagic) -> Self {
+        magic.get()
+    }
+}
+
+impl From<StrategyMagic> for NonZeroU64 {
+    fn from(magic: StrategyMagic) -> Self {
+        magic.0
+    }
+}
+
+impl From<NonZeroU64> for StrategyMagic {
+    fn from(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+}
+
+impl TryFrom<u64> for StrategyMagic {
+    type Error = Mt5Error;
+
+    fn try_from(value: u64) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl PartialEq<u64> for StrategyMagic {
+    fn eq(&self, other: &u64) -> bool {
+        self.0.get() == *other
+    }
+}
+
+impl PartialEq<StrategyMagic> for u64 {
+    fn eq(&self, other: &StrategyMagic) -> bool {
+        *self == other.0.get()
+    }
+}
 
 /// High-level execution and order lifecycle manager.
 ///
@@ -31,7 +120,7 @@ static ID_SEQ: AtomicU64 = AtomicU64::new(0);
 /// See the [module-level concurrency contract](crate::reconciliation#concurrency-contract): this type is
 /// single-owner; use [`SharedOrderManager`](crate::reconciliation::SharedOrderManager) to share it between threads.
 pub struct OrderManager {
-    strategy_magic: u64,
+    strategy_magic: StrategyMagic,
     lifecycle: LifecycleState,
     orders: BTreeMap<String, TrackedOrder>,
     /// wire token → full `client_order_id`; detects hash collisions between distinct IDs.
@@ -41,14 +130,9 @@ pub struct OrderManager {
 }
 
 impl OrderManager {
-    /// Create a new `OrderManager` bound to a specific strategy magic number, with no
+    /// Create a new `OrderManager` bound to a validated [`StrategyMagic`] number, with no
     /// durable journal (state lives in memory only — see [`with_store`](Self::with_store)).
-    /// Panics if `strategy_magic == 0`.
-    pub fn new(strategy_magic: u64) -> Self {
-        assert!(
-            strategy_magic != 0,
-            "strategy magic number must be non-zero"
-        );
+    pub fn new(strategy_magic: StrategyMagic) -> Self {
         Self {
             strategy_magic,
             lifecycle: LifecycleState::Starting,
@@ -61,19 +145,21 @@ impl OrderManager {
 
     /// Safely create a new `OrderManager` validating that strategy magic is non-zero.
     pub fn try_new(strategy_magic: u64) -> Result<Self> {
-        if strategy_magic == 0 {
-            return Err(Mt5Error::InvalidRequest(
-                "strategy magic number must be non-zero".to_string(),
-            ));
-        }
-        Ok(Self::new(strategy_magic))
+        let magic = StrategyMagic::new(strategy_magic)?;
+        Ok(Self::new(magic))
     }
 
-    /// Create a manager with an explicit [`SafetyPolicy`].
-    pub fn with_policy(strategy_magic: u64, policy: SafetyPolicy) -> Self {
+    /// Create a manager with an explicit [`SafetyPolicy`] and validated [`StrategyMagic`].
+    pub fn with_policy(strategy_magic: StrategyMagic, policy: SafetyPolicy) -> Self {
         let mut m = Self::new(strategy_magic);
         m.policy = policy;
         m
+    }
+
+    /// Safely create a manager with an explicit [`SafetyPolicy`], validating that strategy magic is non-zero.
+    pub fn try_with_policy(strategy_magic: u64, policy: SafetyPolicy) -> Result<Self> {
+        let magic = StrategyMagic::new(strategy_magic)?;
+        Ok(Self::with_policy(magic, policy))
     }
 
     /// Create a manager backed by a durable [`OrderStore`], restoring any state it holds.
@@ -84,13 +170,21 @@ impl OrderManager {
     /// reconciliation resolves it against the broker. Orders restored in `Submitting` state
     /// are converted to `Unknown` for exactly that reason.
     ///
-    /// Fails (rather than starting empty) if the store exists but cannot be read.
+    /// Fails (rather than starting empty) if the store exists but cannot be read, or if
+    /// `strategy_magic` is zero.
     pub fn with_store(strategy_magic: u64, store: Box<dyn OrderStore>) -> Result<Self> {
-        if strategy_magic == 0 {
-            return Err(Mt5Error::InvalidRequest(
-                "strategy magic number must be non-zero".to_string(),
-            ));
-        }
+        let magic = StrategyMagic::new(strategy_magic)?;
+        Self::with_store_magic(magic, store)
+    }
+
+    /// Create a manager backed by a durable [`OrderStore`] with a validated [`StrategyMagic`],
+    /// restoring any state it holds.
+    ///
+    /// Fails (rather than starting empty) if the store exists but cannot be read.
+    pub fn with_store_magic(
+        strategy_magic: StrategyMagic,
+        store: Box<dyn OrderStore>,
+    ) -> Result<Self> {
         let restored = store.load()?;
         let mut m = Self::new(strategy_magic);
         m.restore_orders(restored);
@@ -118,8 +212,13 @@ impl OrderManager {
         self.lifecycle = state;
     }
 
-    /// Strategy magic number owned by this manager.
+    /// Strategy magic number owned by this manager as a primitive `u64`.
     pub fn strategy_magic(&self) -> u64 {
+        self.strategy_magic.get()
+    }
+
+    /// Validated [`StrategyMagic`] owned by this manager.
+    pub fn magic(&self) -> StrategyMagic {
         self.strategy_magic
     }
 
@@ -283,11 +382,11 @@ impl OrderManager {
         req: &mut OrderRequest,
     ) -> Result<Option<TrackedOrder>> {
         if req.magic.is_none() || req.magic == Some(0) {
-            req.magic = Some(self.strategy_magic);
-        } else if req.magic != Some(self.strategy_magic) {
+            req.magic = Some(self.strategy_magic.get());
+        } else if req.magic != Some(self.strategy_magic.get()) {
             return Err(Mt5Error::OwnershipMismatch {
                 ticket: 0,
-                expected_magic: self.strategy_magic,
+                expected_magic: self.strategy_magic.get(),
                 actual_magic: req.magic.unwrap_or(0),
             });
         }
@@ -500,8 +599,9 @@ impl OrderManager {
         client: &B,
         now: i64,
     ) -> Result<BrokerSnapshot> {
-        let positions = client.positions_filtered(Some(self.strategy_magic), None)?;
-        let pending_orders = client.pending_orders_filtered(Some(self.strategy_magic), None)?;
+        let positions = client.positions_filtered(Some(self.strategy_magic.get()), None)?;
+        let pending_orders =
+            client.pending_orders_filtered(Some(self.strategy_magic.get()), None)?;
 
         let oldest_unresolved = self
             .orders
@@ -514,7 +614,7 @@ impl OrderManager {
             Some(oldest) => {
                 let from = oldest - DEAL_WINDOW_SLACK_SECS;
                 let to = now + DEAL_WINDOW_SLACK_SECS;
-                match client.deals_filtered(from, to, Some(self.strategy_magic), None) {
+                match client.deals_filtered(from, to, Some(self.strategy_magic.get()), None) {
                     Ok(d) => Some(d),
                     Err(e) => {
                         warn!(error = %e, "Deal history unavailable for reconciliation; absent orders will stay Unknown");
@@ -1024,7 +1124,7 @@ impl OrderManager {
         client: &B,
         ticket: u64,
     ) -> Result<TradeResult> {
-        let outcome = client.order_close_with_magic(ticket, self.strategy_magic);
+        let outcome = client.order_close_with_magic(ticket, self.strategy_magic.get());
         match outcome {
             Ok(res) => {
                 let mut touched = false;
@@ -1089,8 +1189,12 @@ impl OrderManager {
         stop_loss: Level,
         take_profit: Level,
     ) -> Result<TradeResult> {
-        let outcome =
-            client.order_modify_with_magic(ticket, self.strategy_magic, stop_loss, take_profit);
+        let outcome = client.order_modify_with_magic(
+            ticket,
+            self.strategy_magic.get(),
+            stop_loss,
+            take_profit,
+        );
         match outcome {
             Ok(res) => {
                 let mut touched = false;
@@ -1157,8 +1261,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strategy_magic_validation_and_conversions() {
+        assert!(StrategyMagic::new(0).is_err());
+        assert!(StrategyMagic::const_new(0).is_none());
+        assert!(StrategyMagic::try_from(0).is_err());
+
+        let magic = StrategyMagic::new(20240101).expect("valid magic");
+        assert_eq!(magic.get(), 20240101);
+        assert_eq!(magic.as_non_zero().get(), 20240101);
+        assert_eq!(u64::from(magic), 20240101);
+        assert_eq!(NonZeroU64::from(magic).get(), 20240101);
+
+        let const_magic = StrategyMagic::const_new(20240101).expect("valid const magic");
+        assert_eq!(const_magic, magic);
+        assert_eq!(magic, 20240101);
+        assert_eq!(20240101, magic);
+
+        let from_nz = StrategyMagic::from(NonZeroU64::new(20240101).unwrap());
+        assert_eq!(from_nz, magic);
+
+        let from_try = StrategyMagic::try_from(20240101).expect("try_from valid");
+        assert_eq!(from_try, magic);
+
+        assert_eq!(format!("{magic}"), "20240101");
+
+        let serialized = serde_json::to_string(&magic).expect("serialize");
+        assert_eq!(serialized, "20240101");
+        let deserialized: StrategyMagic =
+            serde_json::from_str(&serialized).expect("deserialize valid");
+        assert_eq!(deserialized, magic);
+        assert!(serde_json::from_str::<StrategyMagic>("0").is_err());
+    }
+
+    #[test]
+    fn constructors_reject_zero_without_panicking() {
+        let unwind_try_new = std::panic::catch_unwind(|| OrderManager::try_new(0));
+        assert!(unwind_try_new.is_ok());
+        let res_try_new = unwind_try_new.unwrap();
+        assert!(matches!(res_try_new, Err(Mt5Error::InvalidRequest(_))));
+
+        let unwind_try_policy =
+            std::panic::catch_unwind(|| OrderManager::try_with_policy(0, SafetyPolicy::default()));
+        assert!(unwind_try_policy.is_ok());
+        let res_try_policy = unwind_try_policy.unwrap();
+        assert!(matches!(res_try_policy, Err(Mt5Error::InvalidRequest(_))));
+
+        let unwind_magic_new = std::panic::catch_unwind(|| StrategyMagic::new(0));
+        assert!(unwind_magic_new.is_ok());
+        let res_magic_new = unwind_magic_new.unwrap();
+        assert!(matches!(res_magic_new, Err(Mt5Error::InvalidRequest(_))));
+
+        struct DummyStore;
+        impl OrderStore for DummyStore {
+            fn save(&self, _orders: &[TrackedOrder]) -> Result<()> {
+                Ok(())
+            }
+            fn load(&self) -> Result<Vec<TrackedOrder>> {
+                Ok(vec![])
+            }
+        }
+
+        let unwind_store =
+            std::panic::catch_unwind(|| OrderManager::with_store(0, Box::new(DummyStore)));
+        assert!(unwind_store.is_ok());
+        let res_store = unwind_store.unwrap();
+        assert!(matches!(res_store, Err(Mt5Error::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn valid_constructors_succeed() {
+        let magic = StrategyMagic::new(20240101).expect("valid magic");
+
+        let mgr1 = OrderManager::new(magic);
+        assert_eq!(mgr1.strategy_magic(), 20240101);
+        assert_eq!(mgr1.magic(), magic);
+
+        let mgr2 = OrderManager::try_new(20240101).expect("try_new");
+        assert_eq!(mgr2.strategy_magic(), 20240101);
+        assert_eq!(mgr2.magic(), magic);
+
+        let mgr3 = OrderManager::with_policy(magic, SafetyPolicy::default());
+        assert_eq!(mgr3.strategy_magic(), 20240101);
+
+        let mgr4 = OrderManager::try_with_policy(20240101, SafetyPolicy::default())
+            .expect("try_with_policy");
+        assert_eq!(mgr4.strategy_magic(), 20240101);
+    }
+
+    #[test]
     fn submit_order_magic_defaults_to_strategy_magic() {
-        let manager = OrderManager::new(20240101);
+        let manager = OrderManager::try_new(20240101).expect("valid manager");
         let mut req = OrderRequest::buy("EURUSD", 0.1);
         assert_eq!(req.magic, None);
         let res = manager.check_idempotency_and_magic(&mut req);
@@ -1168,7 +1360,7 @@ mod tests {
 
     #[test]
     fn submit_order_magic_rejects_mismatched_magic() {
-        let manager = OrderManager::new(20240101);
+        let manager = OrderManager::try_new(20240101).expect("valid manager");
         let mut req = OrderRequest::buy("EURUSD", 0.1).magic(999999);
         let res = manager.check_idempotency_and_magic(&mut req);
         match res {

@@ -1,6 +1,6 @@
 use crate::backend::TradingBackend;
 use crate::error::Result;
-use crate::reconciliation::manager::OrderManager;
+use crate::reconciliation::manager::{OrderManager, StrategyMagic};
 use crate::reconciliation::state::{LifecycleState, ReconciliationReport};
 use crate::types::{Level, OrderRequest, TrackedOrder, TradeEvent, TradeResult};
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,11 @@ impl SharedOrderManager {
     /// Strategy magic number owned by the underlying order manager.
     pub fn strategy_magic(&self) -> u64 {
         self.lock().strategy_magic()
+    }
+
+    /// Validated [`StrategyMagic`] owned by the underlying order manager.
+    pub fn magic(&self) -> StrategyMagic {
+        self.lock().magic()
     }
 
     /// Set current operational lifecycle state.

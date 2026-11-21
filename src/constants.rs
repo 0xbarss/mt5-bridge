@@ -20,8 +20,17 @@ pub const DUP_PRICE_THRESHOLD: f64 = PRICE_TOLERANCE;
 /// Tick de-duplication timestamp threshold (1e-6 seconds).
 pub const DUP_TIME_THRESHOLD: f64 = TIME_TOLERANCE;
 
+use crate::reconciliation::StrategyMagic;
+
 /// Magic number used by the default EA configuration (`InpMagicNumber`).
 pub const EA_DEFAULT_MAGIC: u64 = 20240101;
+
+/// Strategy magic corresponding to [`EA_DEFAULT_MAGIC`].
+pub const EA_DEFAULT_STRATEGY_MAGIC: StrategyMagic =
+    match StrategyMagic::const_new(EA_DEFAULT_MAGIC) {
+        Some(magic) => magic,
+        None => unreachable!(),
+    };
 
 /// Default magic number for identifying orders/positions belonging to this bridge client.
 #[deprecated(
@@ -45,6 +54,8 @@ mod tests {
         assert_eq!(DUP_PRICE_THRESHOLD, PRICE_TOLERANCE);
         assert_eq!(DUP_TIME_THRESHOLD, TIME_TOLERANCE);
         assert_eq!(EA_DEFAULT_MAGIC, 20240101);
+        assert_eq!(EA_DEFAULT_STRATEGY_MAGIC.get(), EA_DEFAULT_MAGIC);
+        assert_eq!(EA_DEFAULT_STRATEGY_MAGIC, EA_DEFAULT_MAGIC);
         assert_eq!(DEFAULT_MAGIC, 424242);
     }
 }

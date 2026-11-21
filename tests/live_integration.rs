@@ -311,7 +311,7 @@ fn test_live_reconciliation_engine() {
 
     let (client, _guard) = require_client_or_skip!("test_live_reconciliation_engine");
 
-    let mut manager = OrderManager::new(998877);
+    let mut manager = OrderManager::try_new(998877).expect("valid magic");
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
 
     let report = manager
@@ -347,7 +347,7 @@ fn test_live_order_manager_reconciliation_with_deals() {
     let (client, _guard) =
         require_client_or_skip!("test_live_order_manager_reconciliation_with_deals");
 
-    let mut manager = OrderManager::new(998877);
+    let mut manager = OrderManager::try_new(998877).expect("valid magic");
     assert_eq!(manager.lifecycle(), LifecycleState::Starting);
 
     let report = manager

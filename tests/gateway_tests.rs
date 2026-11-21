@@ -223,7 +223,7 @@ fn test_manager() -> OrderManager {
         min_absent_secs: 0,
         ..Default::default()
     };
-    OrderManager::with_policy(EA_DEFAULT_MAGIC, policy)
+    OrderManager::try_with_policy(EA_DEFAULT_MAGIC, policy).expect("valid magic")
 }
 
 fn buy_order(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
@@ -1288,7 +1288,7 @@ async fn test_session_state_stream_and_wait_ready_standalone() {
 
 #[test]
 fn test_order_manager_strategy_magic_assignment() {
-    let manager = OrderManager::new(998877);
+    let manager = OrderManager::try_new(998877).expect("valid magic");
     let mut req = OrderRequest::buy("EURUSD", 0.1);
     assert_eq!(req.magic, None);
     let _ = manager.check_idempotency_and_magic(&mut req).unwrap();
@@ -1297,7 +1297,7 @@ fn test_order_manager_strategy_magic_assignment() {
 
 #[test]
 fn test_order_manager_ownership_mismatch() {
-    let manager = OrderManager::new(998877);
+    let manager = OrderManager::try_new(998877).expect("valid magic");
     let mut req = OrderRequest::buy("EURUSD", 0.1).magic(123456);
     let err = manager.check_idempotency_and_magic(&mut req).unwrap_err();
     match err {

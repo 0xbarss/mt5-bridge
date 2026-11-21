@@ -179,7 +179,7 @@ fn main() {
 
     // 4. Multi-threaded order submission throughput (8 threads)
     let shared_backend = Arc::new(BenchBackend::default());
-    let shared_mgr = SharedOrderManager::new(OrderManager::new(424242));
+    let shared_mgr = SharedOrderManager::new(OrderManager::try_new(424242).expect("valid magic"));
     let num_threads = 8;
     let ops_per_thread = 5_000;
     let barrier = Arc::new(Barrier::new(num_threads + 1));

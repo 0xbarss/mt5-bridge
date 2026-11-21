@@ -883,7 +883,7 @@ fn test_order_manager_tracking_and_reconciliation() {
         min_absent_secs: 0,
         ..Default::default()
     };
-    let mut mgr = OrderManager::with_policy(777888, policy);
+    let mut mgr = OrderManager::try_with_policy(777888, policy).unwrap();
     assert_eq!(mgr.strategy_magic(), 777888);
     assert_eq!(mgr.lifecycle(), LifecycleState::Starting);
 
@@ -914,7 +914,7 @@ fn test_order_manager_tracking_and_reconciliation() {
     assert_eq!(exported.len(), 3);
 
     // Restore into fresh manager
-    let mut restored_mgr = OrderManager::new(777888);
+    let mut restored_mgr = OrderManager::try_new(777888).unwrap();
     restored_mgr.restore_orders(exported);
     assert_eq!(restored_mgr.tracked_orders().len(), 3);
 
@@ -1214,7 +1214,7 @@ fn test_reconciliation_report_serde_and_clean() {
 
 #[test]
 fn test_order_manager_magic_and_idempotency_check() {
-    let mut mgr = OrderManager::new(888999);
+    let mut mgr = OrderManager::try_new(888999).unwrap();
 
     // 1. Order with no magic gets strategy magic assigned
     let mut req_no_magic = OrderRequest::buy("EURUSD", 0.1);
@@ -1258,7 +1258,7 @@ fn test_order_manager_magic_and_idempotency_check() {
 
 #[test]
 fn test_order_manager_pending_order_reconciliation() {
-    let mut mgr = OrderManager::new(555666);
+    let mut mgr = OrderManager::try_new(555666).unwrap();
 
     // Track order with Unknown state
     let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800).magic(555666);
@@ -1299,7 +1299,7 @@ fn test_order_manager_pending_order_reconciliation() {
 
 #[test]
 fn test_order_manager_apply_trade_event() {
-    let mut mgr = OrderManager::new(12345);
+    let mut mgr = OrderManager::try_new(12345).unwrap();
 
     let req = OrderRequest::buy("EURUSD", 1.0)
         .magic(12345)

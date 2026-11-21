@@ -901,7 +901,7 @@ println!("Order status: {:?}, filled: {:.2}", tracked.state, tracked.filled_volu
 To prevent prematurely marking asynchronously visible broker orders as rejected on a single snapshot:
 - `SafetyPolicy::default()` requires at least **3 consecutive absent observations** spanning at least **30 seconds** before transitioning an unresolved `Unknown` order to `OrderState::Rejected`.
 - Deal history from MT5 (`CMD_DEALS_GET`) is queried automatically during reconciliation to verify whether any executions occurred before an order is declared unplaced.
-- Call [`reconcile_until_settled`](src/reconciliation/mod.rs) to poll until all in-flight orders are resolved.
+- Call [`reconcile_until_settled`](src/reconciliation/mod.rs) (or [`reconcile_until_settled_async`](src/reconciliation/mod.rs) in async runtimes) to poll until all in-flight orders are resolved.
 
 #### Full Attribute Verification & Mismatch Detection
 When a live position or working order matches on ticket or wire identity token, `OrderManager` verifies all critical attributes:

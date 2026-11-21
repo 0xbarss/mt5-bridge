@@ -79,6 +79,56 @@ impl SharedOrderManager {
         self.lock().reconcile(client)
     }
 
+    /// Call [`reconcile`](Self::reconcile) every `interval` until no order is unresolved or
+    /// `timeout` elapses, returning the last report.
+    ///
+    /// # Blocking
+    ///
+    /// This method is synchronous and blocks the calling thread via [`std::thread::sleep`].
+    /// In asynchronous contexts (such as Tokio runtimes), callers should use
+    /// [`reconcile_until_settled_async`](Self::reconcile_until_settled_async) or run this within
+    /// `tokio::task::spawn_blocking`.
+    pub fn reconcile_until_settled<B: TradingBackend + ?Sized>(
+        &self,
+        client: &B,
+        interval: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> Result<ReconciliationReport> {
+        let start = std::time::Instant::now();
+        loop {
+            let report = self.reconcile(client)?;
+            let elapsed = start.elapsed();
+            if report.is_settled() || elapsed >= timeout {
+                return Ok(report);
+            }
+            std::thread::sleep(interval.min(timeout.saturating_sub(elapsed)));
+        }
+    }
+
+    /// Asynchronously call [`reconcile`](Self::reconcile) every `interval` until no order is
+    /// unresolved or `timeout` elapses, yielding cooperatively via [`tokio::time::sleep`].
+    ///
+    /// Note that each reconciliation pass acquires and releases the internal lock, allowing other
+    /// tasks to submit or query orders between intervals. The underlying [`TradingBackend`] calls
+    /// within [`reconcile`](Self::reconcile) remain synchronous.
+    #[cfg(feature = "async")]
+    pub async fn reconcile_until_settled_async<B: TradingBackend + ?Sized>(
+        &self,
+        client: &B,
+        interval: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> Result<ReconciliationReport> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let report = self.reconcile(client)?;
+            let elapsed = start.elapsed();
+            if report.is_settled() || elapsed >= timeout {
+                return Ok(report);
+            }
+            tokio::time::sleep(interval.min(timeout.saturating_sub(elapsed))).await;
+        }
+    }
+
     /// See [`OrderManager::close_position`].
     pub fn close_position<B: TradingBackend + ?Sized>(
         &self,

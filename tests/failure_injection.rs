@@ -1168,6 +1168,85 @@ fn reconcile_until_settled_waits_for_delayed_visibility_and_reports_timeouts() {
     assert_eq!(mgr2.lifecycle(), LifecycleState::Degraded);
 }
 
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn reconcile_until_settled_async_with_paused_time_settles_without_blocking() {
+    use std::time::Duration;
+    tokio::time::pause();
+
+    let broker = MockBroker::new();
+    broker.push_fault(Fault::ExecuteThenLoseResponse);
+    broker.set_visibility_delay(3);
+    let mut mgr = OrderManager::with_policy(
+        MAGIC,
+        SafetyPolicy {
+            min_absent_observations: 10,
+            ..instant_policy()
+        },
+    );
+    let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "ASYNC-S"));
+
+    let wall_start = std::time::Instant::now();
+    let r = mgr
+        .reconcile_until_settled_async(&broker, Duration::from_secs(1), Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    assert!(r.is_settled());
+    assert_eq!(
+        mgr.get_order("ASYNC-S").unwrap().state,
+        OrderState::Reconciled
+    );
+    // Virtual time advanced by 3 intervals (3s), but real wall time should be instantaneous (< 200ms)
+    assert!(wall_start.elapsed() < Duration::from_millis(200));
+
+    // Absent order times out asynchronously without blocking
+    let broker2 = MockBroker::new();
+    broker2.push_fault(Fault::LoseBeforeExecution);
+    let mut mgr2 = OrderManager::new(MAGIC);
+    let _ = mgr2.submit_order(&broker2, buy("EURUSD", 0.5, "ASYNC-T"));
+
+    let wall_start2 = std::time::Instant::now();
+    let r2 = mgr2
+        .reconcile_until_settled_async(&broker2, Duration::from_secs(1), Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    assert!(!r2.is_settled());
+    assert_eq!(mgr2.lifecycle(), LifecycleState::Degraded);
+    assert!(wall_start2.elapsed() < Duration::from_millis(200));
+}
+
+#[cfg(feature = "async")]
+#[tokio::test]
+async fn shared_order_manager_reconcile_until_settled_async_with_paused_time() {
+    use std::time::Duration;
+    tokio::time::pause();
+
+    let broker = MockBroker::new();
+    broker.push_fault(Fault::ExecuteThenLoseResponse);
+    broker.set_visibility_delay(2);
+    let mgr = SharedOrderManager::new(OrderManager::with_policy(
+        MAGIC,
+        SafetyPolicy {
+            min_absent_observations: 5,
+            ..instant_policy()
+        },
+    ));
+    let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "SHARED-ASYNC"));
+
+    let r = mgr
+        .reconcile_until_settled_async(&broker, Duration::from_secs(1), Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    assert!(r.is_settled());
+    assert_eq!(
+        mgr.get_order("SHARED-ASYNC").unwrap().state,
+        OrderState::Reconciled
+    );
+}
+
 #[test]
 fn ea_or_mt5_restart_loses_the_ea_cache_but_manager_idempotency_still_holds() {
     let broker = MockBroker::new();

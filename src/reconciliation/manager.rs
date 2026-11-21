@@ -530,7 +530,14 @@ impl OrderManager {
     }
 
     /// Call [`reconcile`](Self::reconcile) every `interval` until no order is unresolved or
-    /// `timeout` elapses, returning the last report. Blocks the calling thread.
+    /// `timeout` elapses, returning the last report.
+    ///
+    /// # Blocking
+    ///
+    /// This method is synchronous and blocks the calling thread via [`std::thread::sleep`].
+    /// In asynchronous contexts (such as Tokio runtimes), calling this directly on a runtime
+    /// worker thread will block the executor. Use [`reconcile_until_settled_async`](Self::reconcile_until_settled_async)
+    /// or wrap the call in `tokio::task::spawn_blocking`.
     pub fn reconcile_until_settled<B: TradingBackend + ?Sized>(
         &mut self,
         client: &B,
@@ -544,7 +551,32 @@ impl OrderManager {
             if report.is_settled() || elapsed >= timeout {
                 return Ok(report);
             }
-            std::thread::sleep(interval.min(timeout - elapsed));
+            std::thread::sleep(interval.min(timeout.saturating_sub(elapsed)));
+        }
+    }
+
+    /// Asynchronously call [`reconcile`](Self::reconcile) every `interval` until no order is
+    /// unresolved or `timeout` elapses, returning the last report without blocking executor threads.
+    ///
+    /// Yields cooperatively between reconciliation passes using [`tokio::time::sleep`].
+    /// Note that each [`reconcile`](Self::reconcile) pass performs synchronous queries against
+    /// the provided [`TradingBackend`]; if backend operations block, each pass can be dispatched
+    /// via `tokio::task::spawn_blocking`.
+    #[cfg(feature = "async")]
+    pub async fn reconcile_until_settled_async<B: TradingBackend + ?Sized>(
+        &mut self,
+        client: &B,
+        interval: Duration,
+        timeout: Duration,
+    ) -> Result<ReconciliationReport> {
+        let start = tokio::time::Instant::now();
+        loop {
+            let report = self.reconcile(client)?;
+            let elapsed = start.elapsed();
+            if report.is_settled() || elapsed >= timeout {
+                return Ok(report);
+            }
+            tokio::time::sleep(interval.min(timeout.saturating_sub(elapsed))).await;
         }
     }
 

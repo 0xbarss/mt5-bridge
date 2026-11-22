@@ -13,7 +13,6 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$SCRIPT_DIR/build"
-mkdir -p "$SCRIPT_DIR/bin"
 
 "$CXX" -O2 -shared \
     -DMT5_BRIDGE_EXPORTS \
@@ -25,9 +24,4 @@ mkdir -p "$SCRIPT_DIR/bin"
     -fno-exceptions \
     -static
 
-cp "$SCRIPT_DIR/build/mt5_bridge.dll" "$SCRIPT_DIR/bin/mt5_bridge.dll"
-cp "$SCRIPT_DIR/build/mt5_bridge.dll" "$SCRIPT_DIR/../mt5_bridge.dll"
-
 echo "Built: build/mt5_bridge.dll"
-echo "Synchronized: bin/mt5_bridge.dll and ../mt5_bridge.dll"
-echo "Deploy to: C:\\Program Files\\MetaTrader 5\\MQL5\\Libraries\\mt5_bridge.dll"

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **C++ DLL test harness and MQL5 compile in CI**:
+  - New `bridge_dll/tests/` CMake/ctest suite covering `PacketHdr` framing,
+    `Packer` payload serialization, `PollEvent` buffer-too-small / whole-event
+    delivery, event ring-buffer overflow with per-type drop counters, and
+    socketpair-backed request/response multiplexing with orphan counting.
+  - New `bridge_dll/tests/wine_dll_test.cpp` smoke test that loads `mt5_bridge.dll`
+    under Wine and verifies exports resolve and calls do not crash.
+  - New `.github/workflows/ci.yml` jobs: `cpp-tests` (Linux, builds + runs the C++
+    suite with `g++`/cmake/ctest) and MQL5 EA compile in `windows-build`
+    (`metaeditor64.exe /compile`, idempotent MT5 install).
+  - New `scripts/ci/install-mt5.ps1` installs MetaTrader 5 and skips when already
+    present.
+
 - **Builder API and prelude**:
   - New `OrderRequestBuilder` with `build()` validation, constructible via
     `OrderRequest::market_buy` / `market_sell` / `OrderRequestBuilder::pending`.

@@ -6,6 +6,7 @@ lcov.info
 # C++ Build outputs
 bridge_dll/build/
 bridge_dll/bin/
+bridge_dll/tests/build/
 /mt5_bridge.dll
 *.o
 *.obj

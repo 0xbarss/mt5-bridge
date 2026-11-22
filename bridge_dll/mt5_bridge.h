@@ -200,7 +200,7 @@ typedef struct {
 #pragma pack(pop)
 
 /* Protocol version for wire handshake compatibility checks. */
-#define MT5_BRIDGE_PROTOCOL_VERSION 7
+#define MT5_BRIDGE_PROTOCOL_VERSION 8
 
 /* Wire transaction kinds (WTX_*) - stable across MT5 builds */
 #define WTX_OTHER         0
@@ -314,8 +314,11 @@ MT5_API int UnsubscribeBook(const char* symbol);
 MT5_API int SubscribeBars(const char* symbol, int timeframe);
 MT5_API int UnsubscribeBars(const char* symbol, int timeframe);
 
-/* Heartbeat ping returning MT5 server time and negotiated protocol version. */
-MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol);
+/* Heartbeat ping returning MT5 server time, monotonic microsecond counter, and negotiated protocol version. */
+MT5_API int Ping(int64_t* server_time_secs, uint64_t* monotonic_microseconds, uint32_t* protocol);
+
+/* Last request DLL-side timing (microseconds since DLL load). */
+MT5_API void LastRequestTimings(uint64_t* write_start_us, uint64_t* write_end_us, uint64_t* response_at_us);
 
 /* Symbol universe discovery (protocol v8+).
  * SymbolsTotal returns the number of symbols in Market Watch.

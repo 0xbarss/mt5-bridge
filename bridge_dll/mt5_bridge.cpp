@@ -206,6 +206,16 @@ static std::atomic<int32_t>       g_last_error{0};
 static std::chrono::steady_clock::time_point g_start_time =
     std::chrono::steady_clock::now();
 
+static uint64_t now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - g_start_time
+    ).count();
+}
+
+static std::atomic<uint64_t> g_last_write_start_us{0};
+static std::atomic<uint64_t> g_last_write_end_us{0};
+static std::atomic<uint64_t> g_last_response_at_us{0};
+
 /* ── Pending Request Table ────────────────────────────────────────────────── */
 
 struct PendingRequest {
@@ -330,7 +340,9 @@ public:
                 out_status = MT5_ERR_PIPE_DISCONNECTED;
                 return Outcome::NOT_CONNECTED;
             }
+            g_last_write_start_us.store(now_us(), std::memory_order_relaxed);
             write_ok = write_frame(hdr, payload);
+            g_last_write_end_us.store(now_us(), std::memory_order_relaxed);
         }
 
         if (!write_ok) {
@@ -378,6 +390,7 @@ public:
 
         out_status = status;
         out_data   = std::move(data);
+        g_last_response_at_us.store(now_us(), std::memory_order_relaxed);
         if (out_status < 0) {
             g_last_error.store(out_status, std::memory_order_relaxed);
         }
@@ -1256,22 +1269,31 @@ int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_
     return 1;
 }
 
-MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol) {
+MT5_API int Ping(int64_t* server_time_secs, uint64_t* monotonic_microseconds, uint32_t* protocol) {
     auto c = current_conn();
     if (!c || !c->is_alive()) return 0;
 
     int32_t st = 0;
     std::string data;
     Outcome out = c->request(CMD_PING, {}, st, data, query_timeout_sec());
-    if (out != Outcome::RESPONDED || st != 1 || data.size() < 12) return 0;
+    if (out != Outcome::RESPONDED || st != 1 || data.size() < 20) return 0;
 
     if (server_time_secs) {
         std::memcpy(server_time_secs, data.data(), 8);
     }
+    if (monotonic_microseconds) {
+        std::memcpy(monotonic_microseconds, data.data() + 8, 8);
+    }
     if (protocol) {
-        std::memcpy(protocol, data.data() + 8, 4);
+        std::memcpy(protocol, data.data() + 16, 4);
     }
     return 1;
+}
+
+MT5_API void LastRequestTimings(uint64_t* write_start_us, uint64_t* write_end_us, uint64_t* response_at_us) {
+    if (write_start_us) *write_start_us = g_last_write_start_us.load(std::memory_order_relaxed);
+    if (write_end_us)   *write_end_us   = g_last_write_end_us.load(std::memory_order_relaxed);
+    if (response_at_us) *response_at_us = g_last_response_at_us.load(std::memory_order_relaxed);
 }
 
 MT5_API uint64_t EventsDroppedTotal(void) {

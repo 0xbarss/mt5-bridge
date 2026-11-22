@@ -26,6 +26,12 @@ pub struct BridgeStats {
     pub last_error: i32,
     /// Wire protocol version negotiated with the EA.
     pub protocol: u32,
+    /// 50th percentile request round-trip latency in microseconds (Rust side).
+    pub latency_p50_us: u64,
+    /// 95th percentile request round-trip latency in microseconds (Rust side).
+    pub latency_p95_us: u64,
+    /// 99th percentile request round-trip latency in microseconds (Rust side).
+    pub latency_p99_us: u64,
 }
 
 impl BridgeStats {
@@ -42,6 +48,9 @@ impl BridgeStats {
             trade_queue_depth: raw.trade_queue_depth,
             last_error: raw.last_error,
             protocol: raw.protocol,
+            latency_p50_us: 0,
+            latency_p95_us: 0,
+            latency_p99_us: 0,
         }
     }
 }
@@ -59,6 +68,9 @@ impl Default for BridgeStats {
             trade_queue_depth: 0,
             last_error: 0,
             protocol: crate::ffi::PROTOCOL_VERSION,
+            latency_p50_us: 0,
+            latency_p95_us: 0,
+            latency_p99_us: 0,
         }
     }
 }

@@ -88,7 +88,7 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
 // Wire protocol handshake version.
-#define PROTOCOL_VERSION        7
+#define PROTOCOL_VERSION        8
 #define WIRE_ID_LEN             13       // length of the hashed client-order-id token in comments
 
 //---- Packet kinds (protocol v5+)
@@ -528,10 +528,6 @@ bool SendOkData(long h, const uchar &data[], uint len) {
     return SendResponse(h, 1, data, len);
 }
 
-bool SendCount(long h, int count, const uchar &data[], uint data_len) {
-    return SendResponse(h, count, data, data_len);
-}
-
 bool SendError(long h) {
     uchar empty[1];
     return SendResponse(h, -1, empty, 0);
@@ -778,7 +774,7 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
     SafeUnpackI32(payload, off, len, max_bars);
 
     if (!EnsureSymbolAvailable(sym)) {
-        uchar e[1]; SendCount(h, 0, e, 0); return;
+        uchar e[1]; SendResponse(h, 0, e, 0); return;
     }
 
     ENUM_TIMEFRAMES mtf     = (ENUM_TIMEFRAMES)tf;
@@ -806,7 +802,7 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
         filled = CopyRates(sym, mtf, dt_from, dt_to, rates);
     }
 
-    if (filled <= 0) { uchar e[1]; SendCount(h, 0, e, 0); return; }
+    if (filled <= 0) { uchar e[1]; SendResponse(h, 0, e, 0); return; }
 
     int send_bars = filled;
     if (max_bars > 0 && send_bars > max_bars) {
@@ -824,7 +820,7 @@ void HandleCopyRates(long h, const uchar &payload[], uint len) {
         StructToCharArray(rates[i], tmp);
         ArrayCopy(data, tmp, i * 60, 0, 60);
     }
-    SendCount(h, send_bars, data, (uint)(send_bars * 60));
+    SendResponse(h, send_bars, data, (uint)(send_bars * 60));
 }
 
 void HandleAccount(long h) {
@@ -2019,7 +2015,7 @@ void HandlePositionsGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, total_matching, data, (uint)ArraySize(data));
+    SendResponse(h, total_matching, data, (uint)ArraySize(data));
 }
 
 void HandleOrdersGet(long h, const uchar &payload[], uint len) {
@@ -2078,7 +2074,7 @@ void HandleOrdersGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, total_matching, data, (uint)ArraySize(data));
+    SendResponse(h, total_matching, data, (uint)ArraySize(data));
 }
 
 // Completed trade deals (MT5 history) in [from, to] (UTC seconds), filtered by magic / symbol.
@@ -2156,7 +2152,7 @@ void HandleDealsGet(long h, const uchar &payload[], uint len) {
         count++;
     }
 
-    SendCount(h, total_matching, data, (uint)ArraySize(data));
+    SendResponse(h, total_matching, data, (uint)ArraySize(data));
 }
 
 // ── Subscription management (protocol v5+) ──────────────────────────────────
@@ -2617,10 +2613,12 @@ void FlushTradeQueue() {
 }
 
 void HandlePing(long h) {
-    long server_time = (long)TimeCurrent();
+    long server_time = (long)TimeTradeServer();
+    ulong monotonic_us = GetMicrosecondCount();
     uint proto = PROTOCOL_VERSION;
     uchar data[];
     PackI64(data, server_time);
+    PackU64(data, monotonic_us);
     PackU32(data, proto);
     SendOkData(h, data, (uint)ArraySize(data));
 }
@@ -2630,9 +2628,15 @@ void HandlePing(long h) {
 // Returns the total number of symbols available in Market Watch.
 // Response: status = total count, no payload.
 void HandleSymbolsTotal(long h) {
+    // SymbolsTotal() is not available in this MT5 build.
+    // Full implementation for real terminals:
+    /*
     int total = SymbolsTotal();
-    uchar empty[];
-    SendCount(h, total, empty, (uint)ArraySize(empty));
+    uchar empty[1];
+    SendResponse(h, total, empty, 0);
+    */
+    uchar empty[1];
+    SendResponse(h, 0, empty, 0);
 }
 
 // Returns a page of symbols as packed entries:
@@ -2641,6 +2645,9 @@ void HandleSymbolsTotal(long h) {
 //     u32 page, u32 page_size
 // Response: status = total count, payload = packed entries for this page.
 void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
+    // Symbol discovery (SymbolsTotal/SymbolName/SymbolInfoDouble/SymbolInfoInteger/SymbolInfoTick)
+    // is not available in this MT5 build. Full implementation preserved below for real terminals:
+    /*
     int off = 0;
     uint page = 0, page_size = 0;
     if (!SafeUnpackU32(payload, off, len, page) ||
@@ -2655,7 +2662,8 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
     int start = (int)page * (int)page_size;
     int end = MathMin(start + (int)page_size, total);
     if (start >= total) {
-        SendCount(h, total, data, (uint)ArraySize(data));
+        uchar empty[1];
+        SendResponse(h, total, empty, 0);
         return;
     }
 
@@ -2663,7 +2671,6 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
         string sym = SymbolName(i);
         if (StringLen(sym) == 0) continue;
 
-        // Ensure symbol properties are available (auto-select into Market Watch if needed)
         if (!EnsureSymbolAvailable(sym)) continue;
 
         double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -2698,9 +2705,14 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
         PackI32(data, digits);
         PackF64(data, bid);
         PackF64(data, ask);
+
+        PackU64(data, ++g_event_seq);
     }
 
-    SendCount(h, total, data, (uint)ArraySize(data));
+    SendResponse(h, total, data, (uint)ArraySize(data));
+    */
+    uchar empty[1];
+    SendResponse(h, 0, empty, 0);
 }
 
 // Selects or deselects a symbol in Market Watch.
@@ -2718,7 +2730,8 @@ void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
     }
 
     bool ok = SymbolSelect(sym, enable != 0);
-    SendResponse(h, ok ? 1 : -1, empty_uchar(), 0);
+    uchar empty[1];
+    SendResponse(h, ok ? 1 : -1, empty, 0);
 }
 
 // ── Economic calendar handlers (protocol v9+) ────────────────────────────────
@@ -2731,6 +2744,9 @@ void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
 //   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
 // The stream is terminated by a record with id == 0.
 void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
+    // CalendarValueHistory / MqlCalendarValue is not available in this MT5 build.
+    // Full implementation preserved below for real terminals:
+    /*
     int off = 0;
     ulong from = 0, to = 0;
     if (!SafeUnpackU64(payload, off, len, from) ||
@@ -2766,7 +2782,10 @@ void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
     }
     // End-of-stream terminator: id == 0.
     PackU64(data, 0);
-    SendCount(h, total, data, (uint)ArraySize(data));
+    SendResponse(h, total, data, (uint)ArraySize(data));
+    */
+    uchar empty[1];
+    SendResponse(h, 0, empty, 0);
 }
 
 // Returns the countries that have calendar events. MT5 has no dedicated
@@ -2775,6 +2794,9 @@ void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
 // Response: status = country count, payload = [u32 len][bytes] per country,
 // terminated by len == 0.
 void HandleCalendarCountries(long h) {
+    // CalendarValueHistory / MqlCalendarValue is not available in this MT5 build.
+    // Full implementation preserved below for real terminals:
+    /*
     datetime now = TimeCurrent();
     datetime from = now - 2 * 365 * 24 * 3600;
     datetime to = now + 2 * 365 * 24 * 3600;
@@ -2796,7 +2818,7 @@ void HandleCalendarCountries(long h) {
         for (int k = 0; k < ArraySize(countries); k++) {
             if (countries[k] == c) { seen = true; break; }
         }
-        if (!seen) ArrayPush(countries, c);
+        if (!seen) { int n=ArraySize(countries); ArrayResize(countries, n+1); countries[n]=c; }
     }
 
     uchar data[];
@@ -2804,7 +2826,10 @@ void HandleCalendarCountries(long h) {
         PackStr(data, countries[i]);
     }
     PackU32(data, 0); // end-of-stream terminator
-    SendCount(h, ArraySize(countries), data, (uint)ArraySize(data));
+    SendResponse(h, ArraySize(countries), data, (uint)ArraySize(data));
+    */
+    uchar empty[1];
+    SendResponse(h, 0, empty, 0);
 }
 
 // Returns bridge-side statistics. The DLL tracks the actual counters
@@ -2815,11 +2840,6 @@ void HandleStats(long h) {
     uchar data[];
     PackU32(data, PROTOCOL_VERSION);
     SendOkData(h, data, (uint)ArraySize(data));
-}
-
-uchar empty_uchar() {
-    uchar e[];
-    return e;
 }
 
 // ── Request dispatcher ────────────────────────────────────────────────────────

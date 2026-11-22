@@ -40,4 +40,8 @@ pub struct PingResult {
     pub server_time_secs: i64,
     /// Wire protocol version negotiated with the EA.
     pub protocol: u32,
+    /// Monotonic microsecond counter reported by the EA (`CMD_PING`).
+    pub monotonic_microseconds: u64,
+    /// Round-trip time measured on the Rust side, in microseconds.
+    pub rtt_us: u64,
 }

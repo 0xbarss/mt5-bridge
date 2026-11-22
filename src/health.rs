@@ -389,6 +389,9 @@ mod tests {
             trade_queue_depth: 0,
             last_error: 0,
             protocol: PROTOCOL_VERSION,
+            latency_p50_us: 0,
+            latency_p95_us: 0,
+            latency_p99_us: 0,
         };
         let check = check_stats(Some(&stats));
         assert_eq!(check.status, HealthStatus::Ok);

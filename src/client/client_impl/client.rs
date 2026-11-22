@@ -212,16 +212,34 @@ impl Mt5Client {
             .unregister_bars_subscription(symbol, timeframe);
     }
 
-    /// Send a heartbeat ping to MT5 and return the server timestamp and negotiated protocol.
+    /// Send a heartbeat ping to MT5 and return the server timestamp, negotiated protocol,
+    /// the EA's monotonic microsecond counter, and the measured round-trip time.
+    ///
+    /// Emits a [`tracing`] span carrying `command`, `rtt_us`, and (on the DLL side) the
+    /// request id so the round trip can be correlated end to end.
     pub fn ping(&self) -> Result<PingResult> {
         if let Some(fn_ping) = self.fn_ping {
+            let span = tracing::debug_span!(
+                "mt5_bridge.request",
+                command = "PING",
+                rtt_us = tracing::field::Empty,
+            );
+            let _enter = span.enter();
+            let start = Instant::now();
             let mut server_time: i64 = 0;
+            let mut monotonic_us: u64 = 0;
             let mut protocol: u32 = 0;
-            let ret = unsafe { fn_ping(&mut server_time, &mut protocol) };
+            let ret = unsafe { fn_ping(&mut server_time, &mut monotonic_us, &mut protocol) };
+            let rtt_us = start.elapsed().as_micros() as u64;
+            span.record("rtt_us", rtt_us);
+            #[cfg(feature = "metrics")]
+            crate::telemetry::record_request_latency_us(rtt_us);
             if ret == 1 {
                 return Ok(PingResult {
                     server_time_secs: server_time,
                     protocol,
+                    monotonic_microseconds: monotonic_us,
+                    rtt_us,
                 });
             }
             return Err(Mt5Error::PipeDisconnected);
@@ -229,6 +247,8 @@ impl Mt5Client {
         self.account_info().map(|_| PingResult {
             server_time_secs: chrono::Utc::now().timestamp(),
             protocol: crate::ffi::PROTOCOL_VERSION,
+            monotonic_microseconds: 0,
+            rtt_us: 0,
         })
     }
 
@@ -249,7 +269,18 @@ impl Mt5Client {
         }
 
         let raw: crate::ffi::Mt5Stats = unsafe { read_unaligned(buf.as_ptr() as *const _) };
-        Ok(crate::types::BridgeStats::from_raw(raw))
+        #[cfg(feature = "metrics")]
+        let stats = {
+            let mut s = crate::types::BridgeStats::from_raw(raw);
+            let (p50, p95, p99) = crate::telemetry::latency_percentiles();
+            s.latency_p50_us = p50;
+            s.latency_p95_us = p95;
+            s.latency_p99_us = p99;
+            s
+        };
+        #[cfg(not(feature = "metrics"))]
+        let stats = crate::types::BridgeStats::from_raw(raw);
+        Ok(stats)
     }
 
     /// Subscribe to connection disconnect notifications.

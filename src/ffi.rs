@@ -392,7 +392,7 @@ pub const MT5_MAX_BARS_PER_FETCH: usize =
     (MT5_MAX_FRAME_BYTES - 64) / std::mem::size_of::<Mt5Rate>();
 
 // Wire protocol handshake version matching mt5_bridge.h and mt5_bridge.mq5.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 pub const MT5_OK: i32 = 1;
 pub const MT5_ERR_GENERAL: i32 = 0;
@@ -514,7 +514,7 @@ pub type FnSubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnUnsubscribeBook = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type FnSubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 pub type FnUnsubscribeBars = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
-pub type FnPing = unsafe extern "C" fn(*mut i64, *mut u32) -> c_int;
+pub type FnPing = unsafe extern "C" fn(*mut i64, *mut u64, *mut u32) -> c_int;
 pub type FnSymbolsTotal = unsafe extern "C" fn() -> c_int;
 pub type FnSymbolsGet = unsafe extern "C" fn(u32, u32, *mut c_char, c_int) -> c_int;
 pub type FnSymbolSelect = unsafe extern "C" fn(*const c_char, c_int) -> c_int;

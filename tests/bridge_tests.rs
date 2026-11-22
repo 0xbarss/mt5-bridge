@@ -534,7 +534,7 @@ fn test_account_info_helpers() {
 
 #[test]
 fn test_protocol_version() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
 }
 
 #[test]

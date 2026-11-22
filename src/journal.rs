@@ -60,12 +60,10 @@ pub trait OrderStore: Send {
     }
 }
 
-#[cfg(feature = "serde_json")]
-pub use crate::wal::{migrate_json_to_wal, wal_to_json, WalConfig, WalOrderStore};
-#[cfg(feature = "serde_json")]
+#[cfg(feature = "json-journal")]
 pub use json_file::JsonFileStore;
 
-#[cfg(feature = "serde_json")]
+#[cfg(feature = "json-journal")]
 mod json_file {
     use super::OrderStore;
     use crate::error::{Mt5Error, Result};

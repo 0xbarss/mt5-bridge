@@ -8,12 +8,11 @@
 //! Periodic atomic snapshots (`orders.snap`) and pruning keep WAL files compact and bounded.
 
 use crate::error::{Mt5Error, Result};
-use crate::journal::{JsonFileStore, OrderStore};
+use crate::journal::OrderStore;
 use crate::position_book::{PositionRef, PositionState};
 use crate::sync::LockExt;
 use crate::types::TrackedOrder;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -67,6 +66,493 @@ fn crc_poly_for_version(version: u32) -> u32 {
         _ => CRC_POLY_IEEE,
     }
 }
+
+/// Binary serialization helpers for WAL payloads.
+///
+/// The WAL frame format is binary; `serde_json` is only needed for the legacy
+/// `JsonFileStore` migration path. These helpers encode the journaled types
+/// (orders, fills, positions, snapshot envelope) to/from little-endian bytes
+/// so `WalOrderStore` compiles and works with `--no-default-features --features wal`.
+use crate::types::{
+    AttributeMismatch, Fill, MismatchKind, OrderState, OrderType, RejectionEvidence,
+};
+
+// ----- primitives -----
+
+fn write_u8<W: Write>(w: &mut W, v: u8) -> std::io::Result<()> {
+    w.write_all(&[v])
+}
+fn write_u32<W: Write>(w: &mut W, v: u32) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_u64<W: Write>(w: &mut W, v: u64) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_i32<W: Write>(w: &mut W, v: i32) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_i64<W: Write>(w: &mut W, v: i64) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_f64<W: Write>(w: &mut W, v: f64) -> std::io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+
+fn read_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
+}
+fn read_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+fn read_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
+}
+fn read_i32<R: Read>(r: &mut R) -> std::io::Result<i32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(i32::from_le_bytes(b))
+}
+fn read_i64<R: Read>(r: &mut R) -> std::io::Result<i64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(i64::from_le_bytes(b))
+}
+fn read_f64<R: Read>(r: &mut R) -> std::io::Result<f64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(f64::from_le_bytes(b))
+}
+
+/// Write a length-prefixed UTF-8 string.
+fn write_string<W: Write>(w: &mut W, s: &str) -> std::io::Result<()> {
+    write_u32(w, s.len() as u32)?;
+    w.write_all(s.as_bytes())
+}
+/// Read a length-prefixed UTF-8 string.
+fn read_string<R: Read>(r: &mut R) -> std::io::Result<String> {
+    let len = read_u32(r)? as usize;
+    let mut b = vec![0u8; len];
+    r.read_exact(&mut b)?;
+    String::from_utf8(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Write an `Option<T>` as a discriminant byte plus the value when `Some`.
+fn write_option<W: Write, F: FnOnce(&mut W, &T) -> std::io::Result<()>, T>(
+    w: &mut W,
+    opt: &Option<T>,
+    f: F,
+) -> std::io::Result<()> {
+    match opt {
+        Some(v) => {
+            write_u8(w, 1)?;
+            f(w, v)
+        }
+        None => write_u8(w, 0),
+    }
+}
+/// Read an `Option<T>`.
+fn read_option<R: Read, F: FnOnce(&mut R) -> std::io::Result<T>, T>(
+    r: &mut R,
+    f: F,
+) -> std::io::Result<Option<T>> {
+    match read_u8(r)? {
+        0 => Ok(None),
+        1 => f(r).map(Some),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid option discriminant {other}"),
+        )),
+    }
+}
+
+/// Write a length-prefixed vector.
+fn write_vec<W: Write, F: FnMut(&mut W, &T) -> std::io::Result<()>, T>(
+    w: &mut W,
+    items: &[T],
+    mut f: F,
+) -> std::io::Result<()> {
+    write_u32(w, items.len() as u32)?;
+    for item in items {
+        f(w, item)?;
+    }
+    Ok(())
+}
+/// Read a length-prefixed vector.
+fn read_vec<R: Read, F: FnMut(&mut R) -> std::io::Result<T>, T>(
+    r: &mut R,
+    mut f: F,
+) -> std::io::Result<Vec<T>> {
+    let len = read_u32(r)? as usize;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        out.push(f(r)?);
+    }
+    Ok(out)
+}
+
+// ----- enums -----
+
+impl OrderType {
+    fn to_byte(self) -> u8 {
+        match self {
+            OrderType::Buy => 0,
+            OrderType::Sell => 1,
+            OrderType::BuyLimit => 2,
+            OrderType::SellLimit => 3,
+            OrderType::BuyStop => 4,
+            OrderType::SellStop => 5,
+        }
+    }
+    fn from_byte(b: u8) -> std::io::Result<Self> {
+        Ok(match b {
+            0 => OrderType::Buy,
+            1 => OrderType::Sell,
+            2 => OrderType::BuyLimit,
+            3 => OrderType::SellLimit,
+            4 => OrderType::BuyStop,
+            5 => OrderType::SellStop,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid OrderType discriminant {other}"),
+                ))
+            }
+        })
+    }
+}
+
+impl OrderState {
+    fn to_byte(self) -> u8 {
+        match self {
+            OrderState::Created => 0,
+            OrderState::Submitting => 1,
+            OrderState::Accepted => 2,
+            OrderState::PartiallyFilled => 3,
+            OrderState::Filled => 4,
+            OrderState::Cancelled => 5,
+            OrderState::Rejected => 6,
+            OrderState::Unknown => 7,
+            OrderState::Reconciled => 8,
+            OrderState::Mismatched => 9,
+        }
+    }
+    fn from_byte(b: u8) -> std::io::Result<Self> {
+        Ok(match b {
+            0 => OrderState::Created,
+            1 => OrderState::Submitting,
+            2 => OrderState::Accepted,
+            3 => OrderState::PartiallyFilled,
+            4 => OrderState::Filled,
+            5 => OrderState::Cancelled,
+            6 => OrderState::Rejected,
+            7 => OrderState::Unknown,
+            8 => OrderState::Reconciled,
+            9 => OrderState::Mismatched,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid OrderState discriminant {other}"),
+                ))
+            }
+        })
+    }
+}
+
+impl MismatchKind {
+    fn to_byte(self) -> u8 {
+        match self {
+            MismatchKind::Symbol => 0,
+            MismatchKind::Direction => 1,
+            MismatchKind::OrderType => 2,
+            MismatchKind::Volume => 3,
+            MismatchKind::Price => 4,
+            MismatchKind::StopLoss => 5,
+            MismatchKind::TakeProfit => 6,
+            MismatchKind::Magic => 7,
+        }
+    }
+    fn from_byte(b: u8) -> std::io::Result<Self> {
+        Ok(match b {
+            0 => MismatchKind::Symbol,
+            1 => MismatchKind::Direction,
+            2 => MismatchKind::OrderType,
+            3 => MismatchKind::Volume,
+            4 => MismatchKind::Price,
+            5 => MismatchKind::StopLoss,
+            6 => MismatchKind::TakeProfit,
+            7 => MismatchKind::Magic,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid MismatchKind discriminant {other}"),
+                ))
+            }
+        })
+    }
+}
+
+impl PositionState {
+    fn to_byte(self) -> u8 {
+        match self {
+            PositionState::Pending => 0,
+            PositionState::Open => 1,
+            PositionState::Closing => 2,
+            PositionState::Closed => 3,
+            PositionState::Unknown => 4,
+        }
+    }
+    fn from_byte(b: u8) -> std::io::Result<Self> {
+        Ok(match b {
+            0 => PositionState::Pending,
+            1 => PositionState::Open,
+            2 => PositionState::Closing,
+            3 => PositionState::Closed,
+            4 => PositionState::Unknown,
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid PositionState discriminant {other}"),
+                ))
+            }
+        })
+    }
+}
+
+impl RejectionEvidence {
+    fn to_byte(&self) -> u8 {
+        match self {
+            RejectionEvidence::NeverTransmitted => 0,
+            RejectionEvidence::PreflightRejected => 1,
+            RejectionEvidence::BrokerRetcode(_) => 2,
+            RejectionEvidence::ReconciledAbsent { .. } => 3,
+            RejectionEvidence::OperatorResolved { .. } => 4,
+        }
+    }
+    fn to_bytes<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_u8(w, self.to_byte())?;
+        match self {
+            RejectionEvidence::NeverTransmitted => {}
+            RejectionEvidence::PreflightRejected => {}
+            RejectionEvidence::BrokerRetcode(code) => write_i32(w, *code)?,
+            RejectionEvidence::ReconciledAbsent {
+                observations,
+                span_secs,
+            } => {
+                write_u32(w, *observations)?;
+                write_i64(w, *span_secs)?;
+            }
+            RejectionEvidence::OperatorResolved { note } => write_string(w, note)?,
+        }
+        Ok(())
+    }
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        let tag = read_u8(r)?;
+        Ok(match tag {
+            0 => RejectionEvidence::NeverTransmitted,
+            1 => RejectionEvidence::PreflightRejected,
+            2 => RejectionEvidence::BrokerRetcode(read_i32(r)?),
+            3 => RejectionEvidence::ReconciledAbsent {
+                observations: read_u32(r)?,
+                span_secs: read_i64(r)?,
+            },
+            4 => RejectionEvidence::OperatorResolved {
+                note: read_string(r)?,
+            },
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid RejectionEvidence discriminant {other}"),
+                ))
+            }
+        })
+    }
+}
+
+// ----- leaf types -----
+
+impl Fill {
+    fn to_bytes<W: Write>(self, w: &mut W) -> std::io::Result<()> {
+        write_u64(w, self.deal)?;
+        write_f64(w, self.volume)?;
+        write_f64(w, self.price)?;
+        write_i64(w, self.time)?;
+        write_i32(w, self.deal_type)?;
+        write_i32(w, self.deal_entry)?;
+        Ok(())
+    }
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            deal: read_u64(r)?,
+            volume: read_f64(r)?,
+            price: read_f64(r)?,
+            time: read_i64(r)?,
+            deal_type: read_i32(r)?,
+            deal_entry: read_i32(r)?,
+        })
+    }
+}
+
+impl AttributeMismatch {
+    fn to_bytes<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_u8(w, self.kind.to_byte())?;
+        write_string(w, &self.expected)?;
+        write_string(w, &self.actual)?;
+        Ok(())
+    }
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            kind: MismatchKind::from_byte(read_u8(r)?)?,
+            expected: read_string(r)?,
+            actual: read_string(r)?,
+        })
+    }
+}
+
+impl PositionRef {
+    fn to_bytes<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_u64(w, self.position_id)?;
+        write_string(w, &self.symbol)?;
+        write_option(w, &self.ticket, |w, v| write_u64(w, *v))?;
+        write_string(w, &self.client_order_id)?;
+        write_u8(w, self.direction.to_byte())?;
+        write_f64(w, self.volume)?;
+        write_f64(w, self.entry_price)?;
+        write_u64(w, self.magic)?;
+        Ok(())
+    }
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            position_id: read_u64(r)?,
+            symbol: read_string(r)?,
+            ticket: read_option(r, read_u64)?,
+            client_order_id: read_string(r)?,
+            direction: OrderType::from_byte(read_u8(r)?)?,
+            volume: read_f64(r)?,
+            entry_price: read_f64(r)?,
+            magic: read_u64(r)?,
+        })
+    }
+}
+
+// ----- TrackedOrder -----
+
+impl TrackedOrder {
+    /// Binary-serialize this order into `w`.
+    fn to_bytes<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_string(w, &self.client_order_id)?;
+        write_string(w, &self.wire_id)?;
+        write_string(w, &self.symbol)?;
+        write_u8(w, self.order_type.to_byte())?;
+        write_f64(w, self.requested_volume)?;
+        write_f64(w, self.requested_price)?;
+        write_f64(w, self.requested_stop_loss)?;
+        write_f64(w, self.requested_take_profit)?;
+        write_f64(w, self.filled_volume)?;
+        write_f64(w, self.remaining_volume)?;
+        write_f64(w, self.average_price)?;
+        write_u64(w, self.order_ticket)?;
+        write_u64(w, self.deal_ticket)?;
+        write_vec(w, &self.deal_tickets, |w, v| write_u64(w, *v))?;
+        write_u64(w, self.position_ticket)?;
+        write_u8(w, self.state.to_byte())?;
+        write_u64(w, self.magic)?;
+        write_i64(w, self.created_at)?;
+        write_i64(w, self.updated_at)?;
+        write_option(w, &self.error_message, |w, v| write_string(w, v))?;
+        write_u32(w, self.absent_observations)?;
+        write_option(w, &self.first_absent_at, |w, v| write_i64(w, *v))?;
+        write_vec(w, &self.mismatches, |w, v| v.to_bytes(w))?;
+        write_option(w, &self.rejection, |w, v| v.to_bytes(w))?;
+        write_u32(w, self.fills.len() as u32)?;
+        for (k, v) in &self.fills {
+            write_u64(w, *k)?;
+            v.to_bytes(w)?;
+        }
+        Ok(())
+    }
+
+    /// Deserialize a `TrackedOrder` from binary bytes.
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            client_order_id: read_string(r)?,
+            wire_id: read_string(r)?,
+            symbol: read_string(r)?,
+            order_type: OrderType::from_byte(read_u8(r)?)?,
+            requested_volume: read_f64(r)?,
+            requested_price: read_f64(r)?,
+            requested_stop_loss: read_f64(r)?,
+            requested_take_profit: read_f64(r)?,
+            filled_volume: read_f64(r)?,
+            remaining_volume: read_f64(r)?,
+            average_price: read_f64(r)?,
+            order_ticket: read_u64(r)?,
+            deal_ticket: read_u64(r)?,
+            deal_tickets: read_vec(r, read_u64)?,
+            position_ticket: read_u64(r)?,
+            state: OrderState::from_byte(read_u8(r)?)?,
+            magic: read_u64(r)?,
+            created_at: read_i64(r)?,
+            updated_at: read_i64(r)?,
+            error_message: read_option(r, read_string)?,
+            absent_observations: read_u32(r)?,
+            first_absent_at: read_option(r, read_i64)?,
+            mismatches: read_vec(r, AttributeMismatch::from_bytes)?,
+            rejection: read_option(r, RejectionEvidence::from_bytes)?,
+            fills: {
+                let fill_count = read_u32(r)? as usize;
+                let mut fills = BTreeMap::new();
+                for _ in 0..fill_count {
+                    let k = read_u64(r)?;
+                    let v = Fill::from_bytes(r)?;
+                    fills.insert(k, v);
+                }
+                fills
+            },
+        })
+    }
+}
+
+// Convenience wrappers usable from the parent module for WAL frame payloads.
+fn encode_tracked_order(order: &TrackedOrder) -> Vec<u8> {
+    let mut buf = Vec::new();
+    order.to_bytes(&mut buf).expect("infallible write to Vec");
+    buf
+}
+fn decode_tracked_order(bytes: &[u8]) -> std::io::Result<TrackedOrder> {
+    TrackedOrder::from_bytes(&mut &bytes[..])
+}
+fn decode_tracked_orders(bytes: &[u8]) -> std::io::Result<Vec<TrackedOrder>> {
+    read_vec(&mut &bytes[..], TrackedOrder::from_bytes)
+}
+fn encode_string_vec(items: &[String]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_vec(&mut buf, items, |w, s| write_string(w, s)).expect("infallible write to Vec");
+    buf
+}
+fn decode_string_vec(bytes: &[u8]) -> std::io::Result<Vec<String>> {
+    read_vec(&mut &bytes[..], read_string)
+}
+fn encode_position_record(pos: &PositionRef, state: &PositionState) -> Vec<u8> {
+    let mut buf = Vec::new();
+    pos.to_bytes(&mut buf).expect("infallible write to Vec");
+    write_u8(&mut buf, state.to_byte()).expect("infallible write to Vec");
+    buf
+}
+fn decode_position_record(bytes: &[u8]) -> std::io::Result<(PositionRef, PositionState)> {
+    let mut r = bytes;
+    Ok((
+        PositionRef::from_bytes(&mut r)?,
+        PositionState::from_byte(read_u8(&mut r)?)?,
+    ))
+}
+
+// ----- end of binary_serialization helpers -----
 
 fn io_err(what: &str, path: &Path, e: std::io::Error) -> Mt5Error {
     Mt5Error::PersistenceError(format!("{what} '{}': {e}", path.display()))
@@ -132,7 +618,7 @@ impl WalConfig {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+/// Header written at the start of every snapshot file.
 struct SnapshotEnvelope {
     format: String,
     version: u32,
@@ -141,8 +627,50 @@ struct SnapshotEnvelope {
     orders: Vec<TrackedOrder>,
     /// Persisted position-state transitions. All states are written; on load
     /// we apply last-write-wins and drop terminal states (Closed).
-    #[serde(default)]
     positions: HashMap<u64, (PositionRef, PositionState)>,
+}
+
+impl SnapshotEnvelope {
+    /// Serialize the envelope to a self-describing binary buffer (no `serde_json`).
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_string(&mut buf, &self.format).unwrap();
+        buf.write_all(&self.version.to_le_bytes()).unwrap();
+        buf.write_all(&self.generation.to_le_bytes()).unwrap();
+        buf.write_all(&self.saved_at.to_le_bytes()).unwrap();
+        write_vec(&mut buf, &self.orders, |buf, o| o.to_bytes(buf)).unwrap();
+        write_u32(&mut buf, self.positions.len() as u32).unwrap();
+        for (pos_ref, state) in self.positions.values() {
+            pos_ref.to_bytes(&mut buf).unwrap();
+            write_u8(&mut buf, state.to_byte()).unwrap();
+        }
+        buf
+    }
+
+    /// Deserialize an envelope from binary bytes. Returns `Err` on truncation or corruption.
+    fn from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        let mut rd = bytes;
+        let format = read_string(&mut rd)?;
+        let version = read_u32(&mut rd)?;
+        let generation = read_u64(&mut rd)?;
+        let saved_at = read_i64(&mut rd)?;
+        let orders = read_vec(&mut rd, TrackedOrder::from_bytes)?;
+        let mut positions: HashMap<u64, (PositionRef, PositionState)> = HashMap::new();
+        let pos_count = read_u32(&mut rd)? as usize;
+        for _ in 0..pos_count {
+            let pos_ref = PositionRef::from_bytes(&mut rd)?;
+            let state = PositionState::from_byte(read_u8(&mut rd)?)?;
+            positions.insert(pos_ref.position_id, (pos_ref, state));
+        }
+        Ok(Self {
+            format,
+            version,
+            generation,
+            saved_at,
+            orders,
+            positions,
+        })
+    }
 }
 
 struct WalInner {
@@ -269,14 +797,17 @@ impl WalOrderStore {
         }
 
         // Check for legacy JSON migration if WAL doesn't exist yet
-        let json_path = path.with_extension("json");
-        if config.migrate_legacy_json && !path.exists() && json_path.exists() {
-            tracing::info!(
-                legacy_json = %json_path.display(),
-                wal_path = %path.display(),
-                "Found legacy orders.json; initiating migration to WAL journal"
-            );
-            migrate_json_to_wal(&json_path, &path)?;
+        #[cfg(feature = "json-journal")]
+        {
+            let json_path = path.with_extension("json");
+            if config.migrate_legacy_json && !path.exists() && json_path.exists() {
+                tracing::info!(
+                    legacy_json = %json_path.display(),
+                    wal_path = %path.display(),
+                    "Found legacy orders.json; initiating migration to WAL journal"
+                );
+                migrate_json_to_wal(&json_path, &path)?;
+            }
         }
 
         let mut file = OpenOptions::new()
@@ -497,8 +1028,7 @@ impl WalOrderStore {
             orders: orders.to_vec(),
             positions: positions.clone(),
         };
-        let bytes = serde_json::to_vec_pretty(&envelope)
-            .map_err(|e| Mt5Error::PersistenceError(format!("serialize snapshot failed: {e}")))?;
+        let bytes = envelope.to_bytes();
 
         let tmp_snap = snap_path.with_extension("snap.tmp");
         {
@@ -563,7 +1093,7 @@ impl WalOrderStore {
         // 1. Read snapshot if it exists
         if snap_path.exists() {
             let bytes = fs::read(snap_path).map_err(|e| io_err("read snapshot", snap_path, e))?;
-            let envelope: SnapshotEnvelope = serde_json::from_slice(&bytes).map_err(|e| {
+            let envelope = SnapshotEnvelope::from_bytes(&bytes).map_err(|e| {
                 Mt5Error::PersistenceError(format!(
                     "Snapshot '{}' is corrupt: {e}. Refusing to start with corrupt state.",
                     snap_path.display()
@@ -672,46 +1202,42 @@ impl WalOrderStore {
 
                     match rec_type {
                         REC_INTENT | REC_UPDATE => {
-                            let order: TrackedOrder =
-                                serde_json::from_slice(&payload).map_err(|e| {
-                                    Mt5Error::PersistenceError(format!(
-                                        "Failed to deserialize order in WAL '{}': {e}",
-                                        wal_path.display()
-                                    ))
-                                })?;
+                            let order = decode_tracked_order(&payload).map_err(|e| {
+                                Mt5Error::PersistenceError(format!(
+                                    "Failed to deserialize order in WAL '{}': {e}",
+                                    wal_path.display()
+                                ))
+                            })?;
                             orders_map.insert(order.client_order_id.clone(), order);
                         }
                         REC_SNAPSHOT => {
-                            let orders: Vec<TrackedOrder> = serde_json::from_slice(&payload)
-                                .map_err(|e| {
-                                    Mt5Error::PersistenceError(format!(
-                                        "Failed to deserialize snapshot in WAL '{}': {e}",
-                                        wal_path.display()
-                                    ))
-                                })?;
+                            let orders = decode_tracked_orders(&payload).map_err(|e| {
+                                Mt5Error::PersistenceError(format!(
+                                    "Failed to deserialize snapshot in WAL '{}': {e}",
+                                    wal_path.display()
+                                ))
+                            })?;
                             orders_map.clear();
                             for o in orders {
                                 orders_map.insert(o.client_order_id.clone(), o);
                             }
                         }
                         REC_PRUNE => {
-                            let retain_ids: Vec<String> = serde_json::from_slice(&payload)
-                                .map_err(|e| {
-                                    Mt5Error::PersistenceError(format!(
-                                        "Failed to deserialize prune list in WAL '{}': {e}",
-                                        wal_path.display()
-                                    ))
-                                })?;
+                            let retain_ids = decode_string_vec(&payload).map_err(|e| {
+                                Mt5Error::PersistenceError(format!(
+                                    "Failed to deserialize prune list in WAL '{}': {e}",
+                                    wal_path.display()
+                                ))
+                            })?;
                             orders_map.retain(|k, _| retain_ids.contains(k));
                         }
                         REC_POSITION => {
-                            let record: (PositionRef, PositionState) =
-                                serde_json::from_slice(&payload).map_err(|e| {
-                                    Mt5Error::PersistenceError(format!(
-                                        "Failed to deserialize position state in WAL '{}': {e}",
-                                        wal_path.display()
-                                    ))
-                                })?;
+                            let record = decode_position_record(&payload).map_err(|e| {
+                                Mt5Error::PersistenceError(format!(
+                                    "Failed to deserialize position state in WAL '{}': {e}",
+                                    wal_path.display()
+                                ))
+                            })?;
                             // Apply last-write-wins: later records override earlier ones
                             position_states.insert(record.0.position_id, record);
                         }
@@ -766,23 +1292,20 @@ impl OrderStore for WalOrderStore {
     }
 
     fn record_intent(&self, order: &TrackedOrder) -> Result<()> {
-        let bytes = serde_json::to_vec(order)
-            .map_err(|e| Mt5Error::PersistenceError(format!("serialize intent failed: {e}")))?;
+        let bytes = encode_tracked_order(order);
         let mut inner = self.inner.lock_recover();
         let sync = inner.config.sync_intent;
         Self::append_entry(&mut inner, REC_INTENT, &bytes, sync)
     }
 
     fn record_update(&self, order: &TrackedOrder) -> Result<()> {
-        let bytes = serde_json::to_vec(order)
-            .map_err(|e| Mt5Error::PersistenceError(format!("serialize update failed: {e}")))?;
+        let bytes = encode_tracked_order(order);
         let mut inner = self.inner.lock_recover();
         Self::append_entry(&mut inner, REC_UPDATE, &bytes, false)
     }
 
     fn prune(&self, keep_client_order_ids: &[String]) -> Result<()> {
-        let bytes = serde_json::to_vec(keep_client_order_ids)
-            .map_err(|e| Mt5Error::PersistenceError(format!("serialize prune failed: {e}")))?;
+        let bytes = encode_string_vec(keep_client_order_ids);
         let mut inner = self.inner.lock_recover();
         Self::append_entry(&mut inner, REC_PRUNE, &bytes, true)?;
         Self::compact_inner(&mut inner)?;
@@ -815,9 +1338,7 @@ impl WalOrderStore {
 
     /// Persist a position-state transition (write-ahead record).
     pub fn record_position(&self, pos: &PositionRef, state: PositionState) -> Result<()> {
-        let bytes = serde_json::to_vec(&(pos.clone(), state)).map_err(|e| {
-            Mt5Error::PersistenceError(format!("serialize position state failed: {e}"))
-        })?;
+        let bytes = encode_position_record(pos, &state);
         let mut inner = self.inner.lock_recover();
         Self::append_entry(&mut inner, REC_POSITION, &bytes, false)
     }
@@ -827,12 +1348,13 @@ impl WalOrderStore {
 ///
 /// Reads the legacy JSON envelope and checksum, writes an initial snapshot file
 /// (`orders.snap`), creates `orders.wal`, and renames `orders.json` to `orders.json.bak`.
+#[cfg(feature = "json-journal")]
 pub fn migrate_json_to_wal(json_path: &Path, wal_path: &Path) -> Result<usize> {
     if !json_path.exists() {
         return Ok(0);
     }
 
-    let json_store = JsonFileStore::new(json_path);
+    let json_store = crate::journal::JsonFileStore::new(json_path);
     let orders = json_store.load()?;
     let count = orders.len();
 
@@ -869,12 +1391,13 @@ pub fn migrate_json_to_wal(json_path: &Path, wal_path: &Path) -> Result<usize> {
 }
 
 /// Convert a WAL store back to a standalone legacy JSON file.
+#[cfg(feature = "json-journal")]
 pub fn wal_to_json(wal_path: &Path, json_path: &Path) -> Result<usize> {
     let snap_path = wal_path.with_extension("snap");
     let (orders, _position_states) = WalOrderStore::load_from_disk(wal_path, &snap_path)?;
     let count = orders.len();
 
-    let json_store = JsonFileStore::new(json_path);
+    let json_store = crate::journal::JsonFileStore::new(json_path);
     json_store.save(&orders)?;
     Ok(count)
 }
@@ -1088,6 +1611,7 @@ mod tests {
         let _ = fs::remove_dir_all(wal_path.parent().unwrap());
     }
 
+    #[cfg(feature = "json-journal")]
     #[test]
     fn test_migrate_json_to_wal_and_back() {
         let dir = std::env::temp_dir().join(format!("mt5_wal_mig_{}", std::process::id()));
@@ -1097,7 +1621,7 @@ mod tests {
 
         let order1 = intent("json-order-1");
         let order2 = intent("json-order-2");
-        let json_store = JsonFileStore::new(&json_path);
+        let json_store = crate::journal::JsonFileStore::new(&json_path);
         json_store.save(&[order1, order2]).unwrap();
 
         // Migrate JSON to WAL
@@ -1116,7 +1640,7 @@ mod tests {
         let roundtrip_json = dir.join("roundtrip.json");
         let count2 = wal_to_json(&wal_path, &roundtrip_json).unwrap();
         assert_eq!(count2, 2);
-        let rt_store = JsonFileStore::new(&roundtrip_json);
+        let rt_store = crate::journal::JsonFileStore::new(&roundtrip_json);
         assert_eq!(rt_store.load().unwrap().len(), 2);
 
         drop(wal_store);

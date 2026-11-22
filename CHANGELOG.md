@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SharedOrderManager::strategy_magic` and `magic` no longer acquire the manager lock; the
   strategy magic is immutable after construction.
 
+### Changed
+
+- **WAL feature split** (A-11): the `wal` feature now enables the binary WAL without
+  `serde_json`. `JsonFileStore`, `migrate_json_to_wal`, and `wal_to_json` moved to the new
+  `json-journal` feature (`serde_json` remains an alias for `json-journal`). Use
+  `--no-default-features --features wal` for WAL without JSON.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

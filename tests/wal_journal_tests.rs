@@ -4,7 +4,9 @@
 use mt5_bridge::journal::OrderStore;
 use mt5_bridge::position_book::{PositionRef, PositionState};
 use mt5_bridge::types::{OrderRequest, OrderState, OrderType, TrackedOrder};
-use mt5_bridge::wal::{migrate_json_to_wal, wal_to_json, WalConfig, WalOrderStore};
+#[cfg(feature = "json-journal")]
+use mt5_bridge::wal::{migrate_json_to_wal, wal_to_json};
+use mt5_bridge::wal::{WalConfig, WalOrderStore};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -246,6 +248,7 @@ fn test_wal_position_state_persistence() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(feature = "json-journal")]
 #[test]
 fn test_wal_and_json_migration() {
     let wal_path = temp_wal_path("mig_wal");

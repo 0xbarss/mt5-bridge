@@ -71,7 +71,7 @@ pub mod session;
 pub mod sync;
 pub mod types;
 
-#[cfg(feature = "serde_json")]
+#[cfg(feature = "wal")]
 pub mod wal;
 
 #[cfg(feature = "async")]
@@ -89,9 +89,9 @@ pub use gateway::{
     BlockingExecutor, Connector, FixedConnector, GatewayConfig, Mt5Gateway, Mt5GatewayHandle,
     P1Command, P2Command, P3Command,
 };
+#[cfg(feature = "json-journal")]
+pub use journal::JsonFileStore;
 pub use journal::OrderStore;
-#[cfg(feature = "serde_json")]
-pub use journal::{migrate_json_to_wal, wal_to_json, JsonFileStore, WalConfig, WalOrderStore};
 pub use position_book::{
     BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,
     PositionTransition,
@@ -110,6 +110,10 @@ pub use types::{
     SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeStatus, WorkingOrder,
     MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
 };
+#[cfg(all(feature = "wal", feature = "json-journal"))]
+pub use wal::{migrate_json_to_wal, wal_to_json};
+#[cfg(feature = "wal")]
+pub use wal::{WalConfig, WalOrderStore};
 
 #[cfg(feature = "async")]
 pub use stream::{

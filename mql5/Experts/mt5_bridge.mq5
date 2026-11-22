@@ -2628,7 +2628,7 @@ void HandlePing(long h) {
 // Returns the total number of symbols available in Market Watch.
 // Response: status = total count, no payload.
 void HandleSymbolsTotal(long h) {
-    int total = SymbolsTotal();
+    int total = SymbolsTotal(false);
     uchar empty[1];
     SendResponse(h, total, empty, 0);
 }
@@ -2648,7 +2648,7 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
     }
     if (page_size == 0) page_size = 1000;
 
-    int total = SymbolsTotal();
+    int total = SymbolsTotal(false);
     uchar data[];
     int start = (int)page * (int)page_size;
     int end = MathMin(start + (int)page_size, total);
@@ -2659,7 +2659,7 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
     }
 
     for (int i = start; i < end; i++) {
-        string sym = SymbolName(i);
+        string sym = SymbolName(i, false);
         if (StringLen(sym) == 0) continue;
 
         if (!EnsureSymbolAvailable(sym)) continue;
@@ -2731,6 +2731,12 @@ void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
 //   [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
 //   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
 // The stream is terminated by a record with id == 0.
+// NOTE (build 6283): CalendarValueHistory() signature is
+//   (MqlCalendarValue&[], datetime, datetime, const string, const string)
+// MqlCalendarValue exposes id/time/event_id/actual_value/forecast_value/
+// prev_value on 6283. Each event is enriched via CalendarEventById() for
+// name/importance/country_id, and country name/currency are resolved from
+// CalendarCountries() by matching country_id.
 void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
     int off = 0;
     ulong from = 0, to = 0;
@@ -2740,72 +2746,80 @@ void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
         return;
     }
 
-    string country_filter[];
-    string currency_filter[];
+    // Event values in the requested time window: id, time, actual_value,
+    // forecast_value, prev_value (MqlCalendarValue exposes these on build 6283).
     MqlCalendarValue values[];
-    int total = CalendarValueHistory(country_filter, currency_filter,
-                                     (datetime)from, (datetime)to, values);
+    int total = CalendarValueHistory(values, (datetime)from, (datetime)to, "", "");
     if (total < 0) {
         SendError(h);
         return;
     }
 
+    // Country lookup table: country_id -> {name, code, currency}.
+    MqlCalendarCountry countries[];
+    int ctotal = CalendarCountries(countries);
+
     uchar data[];
     for (int i = 0; i < total; i++) {
+        // Enrich each event value with metadata: name (title), importance,
+        // country_id (MqlCalendarEvent exposes these on build 6283).
+        MqlCalendarEvent event;
+        bool have_event = CalendarEventById(values[i].event_id, event);
+
+        // Resolve country name and currency from the country lookup table.
+        string country = "";
+        string currency = "";
+        for (int k = 0; k < ctotal; k++) {
+            if (countries[k].id == event.country_id) {
+                country = countries[k].name;
+                currency = countries[k].currency;
+                break;
+            }
+        }
+
         PackU64(data, (ulong)values[i].id);
         PackI64(data, (long)values[i].time);
-        PackStr(data, values[i].country);
-        PackStr(data, values[i].currency);
-        PackU8(data, (uchar)values[i].importance);
-        PackStr(data, values[i].name);
-        PackF64(data, values[i].actual);
-        PackU8(data, values[i].actual != 0.0 ? 1 : 0);
-        PackF64(data, values[i].forecast);
-        PackU8(data, values[i].forecast != 0.0 ? 1 : 0);
-        PackF64(data, values[i].previous);
-        PackU8(data, values[i].previous != 0.0 ? 1 : 0);
+        PackStr(data, country);
+        PackStr(data, currency);
+        PackU8(data, (uchar)(have_event ? event.importance : 0));
+        PackStr(data, have_event ? event.name : "");
+        PackF64(data, values[i].HasActualValue() ? values[i].GetActualValue() : 0.0);
+        PackU8(data, (uchar)(values[i].HasActualValue() ? 1 : 0));
+        PackF64(data, values[i].HasForecastValue() ? values[i].GetForecastValue() : 0.0);
+        PackU8(data, (uchar)(values[i].HasForecastValue() ? 1 : 0));
+        PackF64(data, values[i].HasPreviousValue() ? values[i].GetPreviousValue() : 0.0);
+        PackU8(data, (uchar)(values[i].HasPreviousValue() ? 1 : 0));
     }
     // End-of-stream terminator: id == 0.
     PackU64(data, 0);
     SendResponse(h, total, data, (uint)ArraySize(data));
 }
 
-// Returns the countries that have calendar events. MT5 has no dedicated
-// "enumerate calendar countries" call, so we scan a wide history window and
-// de-duplicate the country field of every event.
-// Response: status = country count, payload = [u32 len][bytes] per country,
-// terminated by len == 0.
+// Returns the countries that have calendar events. build 6283 exposes
+// CalendarCountries() which returns MqlCalendarCountry[] with real name/code/
+// currency/currency_symbol/url_name fields.
+// Response: status = country count, payload = per country:
+//   [u32 name_len][name][u32 code_len][code][u32 currency_len][currency]
+//   [u32 currency_symbol_len][currency_symbol][u32 url_name_len][url_name],
+// terminated by name_len == 0.
 void HandleCalendarCountries(long h) {
-    datetime now = TimeCurrent();
-    datetime from = now - 2 * 365 * 24 * 3600;
-    datetime to = now + 2 * 365 * 24 * 3600;
-
-    string country_filter[];
-    string currency_filter[];
-    MqlCalendarValue values[];
-    int total = CalendarValueHistory(country_filter, currency_filter, from, to, values);
+    MqlCalendarCountry countries[];
+    int total = CalendarCountries(countries);
     if (total < 0) {
         SendError(h);
         return;
     }
 
-    string countries[];
-    for (int i = 0; i < total; i++) {
-        string c = values[i].country;
-        if (StringLen(c) == 0) continue;
-        bool seen = false;
-        for (int k = 0; k < ArraySize(countries); k++) {
-            if (countries[k] == c) { seen = true; break; }
-        }
-        if (!seen) { int n=ArraySize(countries); ArrayResize(countries, n+1); countries[n]=c; }
-    }
-
     uchar data[];
-    for (int i = 0; i < ArraySize(countries); i++) {
-        PackStr(data, countries[i]);
+    for (int i = 0; i < total; i++) {
+        PackStr(data, countries[i].name);
+        PackStr(data, countries[i].code);
+        PackStr(data, countries[i].currency);
+        PackStr(data, countries[i].currency_symbol);
+        PackStr(data, countries[i].url_name);
     }
-    PackU32(data, 0); // end-of-stream terminator
-    SendResponse(h, ArraySize(countries), data, (uint)ArraySize(data));
+    PackU32(data, 0); // end-of-stream terminator (empty name)
+    SendResponse(h, total, data, (uint)ArraySize(data));
 }
 
 // Returns bridge-side statistics. The DLL tracks the actual counters

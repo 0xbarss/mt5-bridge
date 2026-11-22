@@ -16,6 +16,36 @@ fn read(rel: &str) -> String {
         .replace("\r\n", "\n")
 }
 
+/// Full EA source as the MQL5 preprocessor sees it: the main `.mq5` plus every
+/// `Include/Mt5Bridge/*.mqh` it pulls in, concatenated in a deterministic order.
+///
+/// The EA was split into modules in `fuzz/cargo-fuzz-targets` (commit
+/// `feat(mql5): split EA into modules`), so the wire `#define`s and several
+/// handlers now live under `mql5/Include/Mt5Bridge/` rather than in the main file.
+fn ea_source() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut out = fs::read_to_string(format!("{manifest_dir}/mql5/Experts/mt5_bridge.mq5"))
+        .unwrap_or_else(|e| panic!("cannot read EA: {e}"))
+        .replace("\r\n", "\n");
+    let mut includes: Vec<std::path::PathBuf> =
+        fs::read_dir(format!("{manifest_dir}/mql5/Include/Mt5Bridge"))
+            .expect("read Mt5Bridge include dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "mqh"))
+            .collect();
+    includes.sort();
+    for inc in includes {
+        out.push('\n');
+        out.push_str(
+            &fs::read_to_string(&inc)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", inc.display()))
+                .replace("\r\n", "\n"),
+        );
+    }
+    out
+}
+
 /// Value of `#define NAME <int>` (first token after the name; trailing comments ignored).
 fn define(src: &str, name: &str) -> u64 {
     for line in src.lines() {
@@ -56,7 +86,7 @@ fn cpp_enum(src: &str, name: &str) -> u64 {
 #[test]
 fn protocol_version_agrees_across_rust_dll_and_ea() {
     let h = read("bridge_dll/mt5_bridge.h");
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     assert_eq!(
         define(&h, "MT5_BRIDGE_PROTOCOL_VERSION"),
         PROTOCOL_VERSION as u64,
@@ -72,7 +102,7 @@ fn protocol_version_agrees_across_rust_dll_and_ea() {
 #[test]
 fn command_ids_agree_across_rust_dll_and_ea() {
     let cpp = read("bridge_dll/mt5_bridge.cpp");
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     let table = [
         ("CMD_INIT", ProtocolCmd::Init),
         ("CMD_SHUTDOWN", ProtocolCmd::Shutdown),
@@ -237,7 +267,7 @@ fn deal_struct_field_order_is_identical_in_the_dll_header() {
 
 #[test]
 fn ea_token_format_matches_the_rust_wire_id() {
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     assert_eq!(define(&ea, "WIRE_ID_LEN"), WIRE_ID_LEN as u64);
 
     // The EA's IsWireTokenChar must accept exactly the Crockford alphabet the Rust side emits:
@@ -270,7 +300,7 @@ fn ea_token_format_matches_the_rust_wire_id() {
 fn dll_deals_request_layout_matches_the_ea_handler() {
     // Request order is from, to, magic, symbol, capacity on both sides.
     let cpp = read("bridge_dll/mt5_bridge.cpp");
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     let dll = &cpp[cpp.find("int DealsGet(").unwrap()..];
     let dll = &dll[..dll.find("\n}\n").unwrap()];
     let order: Vec<usize> = [
@@ -333,7 +363,7 @@ fn dll_deals_request_layout_matches_the_ea_handler() {
 
 #[test]
 fn book_event_timestamp_uses_server_time_msc_not_uptime() {
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     let book_fn = ea
         .split("void OnBookEvent(")
         .nth(1)
@@ -376,7 +406,7 @@ fn synthetic_book_event_with_epoch_ms_round_trips() {
 
 #[test]
 fn rust_ea_default_magic_matches_ea_input() {
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     let value = ea
         .lines()
         .find(|l| l.contains("InpMagicNumber") && l.trim_start().starts_with("input"))
@@ -389,7 +419,7 @@ fn rust_ea_default_magic_matches_ea_input() {
 
 #[test]
 fn rust_ea_enforce_magic_defaults_to_true() {
-    let ea = read("mql5/Experts/mt5_bridge.mq5");
+    let ea = ea_source();
     let value = ea
         .lines()
         .find(|l| l.contains("InpEnforceMagicNumber") && l.trim_start().starts_with("input"))

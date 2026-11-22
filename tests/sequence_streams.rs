@@ -135,3 +135,63 @@ async fn test_tick_subscription_observes_sequence_and_gaps() {
     assert_eq!(sub.last_seq(), Some(5));
     assert_eq!(sub.gaps(), 1);
 }
+
+/// 1,000 subscribe/unsubscribe cycles must leave the tick sender map empty:
+/// no unbounded growth in the sender maps.
+#[tokio::test]
+async fn test_thousand_subscribe_unsubscribe_cycles_leave_no_active_tick_symbols() {
+    let bus = EventBus::new(64);
+    for i in 0..1000 {
+        let symbol = format!("SYM{}", i % 10);
+        let rx = bus.subscribe_ticks(&symbol);
+        drop(rx);
+        bus.remove_tick_sender(&symbol);
+    }
+    assert!(
+        bus.active_tick_symbols().is_empty(),
+        "tick sender map must not grow across subscribe/unsubscribe cycles"
+    );
+}
+
+/// An event pushed immediately after subscribe must be received: subscribing
+/// the bus before the EA acknowledges removes the startup race that could
+/// otherwise drop early ticks.
+#[tokio::test]
+async fn test_event_sent_immediately_after_subscribe_is_received() {
+    let bus = EventBus::new(64);
+    let rx = bus.subscribe_ticks("EURUSD");
+    let mut sub = TickSubscription::new("EURUSD", StreamMode::Latest, rx);
+
+    bus.dispatch_tick(Tick {
+        symbol: "EURUSD".into(),
+        time: 1710000000,
+        time_msc: 1710000000000,
+        bid: 1.0850,
+        ask: 1.0851,
+        last: 1.0850,
+        volume: 1,
+        flags: 6,
+        event_seq: 1,
+    });
+
+    let tick = sub.recv().await.expect("tick expected");
+    assert_eq!(tick.event_seq, 1);
+}
+
+/// `prune()` sweeps idle senders from all maps so symbols with no remaining
+/// receivers do not linger indefinitely.
+#[test]
+fn test_prune_removes_idle_tick_senders() {
+    let bus = EventBus::new(64);
+
+    let _rx_a1 = bus.subscribe_ticks("A");
+    let _rx_a2 = bus.subscribe_ticks("A");
+    let _rx_b = bus.subscribe_ticks("B");
+    drop(_rx_a2);
+    drop(_rx_b);
+
+    bus.prune();
+
+    assert!(bus.active_tick_symbols().contains(&"A".to_string()));
+    assert!(!bus.active_tick_symbols().contains(&"B".to_string()));
+}

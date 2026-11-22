@@ -188,6 +188,49 @@ impl EventBus {
             }
         }
     }
+
+    /// Remove the tick sender for `symbol` when no subscribers remain.
+    ///
+    /// Callers may invoke this after the EA acknowledges an unsubscribe so the
+    /// internal tick sender map does not grow indefinitely.
+    pub fn remove_tick_sender(&self, symbol: &str) {
+        let mut map = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if map.get(symbol).is_some_and(|tx| tx.receiver_count() == 0) {
+            map.remove(symbol);
+        }
+    }
+
+    /// Periodic sweep: remove tick, book, and bar senders that have no remaining receivers.
+    ///
+    /// Intended for scheduled maintenance so that symbols whose subscriptions have all
+    /// been dropped do not linger in the internal maps forever. Each map is drained
+    /// independently under its own lock, so a long-held lock on one stream kind does not
+    /// block sweeping the others.
+    pub fn prune(&self) {
+        let mut ticks = self
+            .ticks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ticks.retain(|_, tx| tx.receiver_count() > 0);
+        drop(ticks);
+
+        let mut books = self
+            .books
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        books.retain(|_, tx| tx.receiver_count() > 0);
+        drop(books);
+
+        let mut bars = self
+            .bars
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        bars.retain(|_, tx| tx.receiver_count() > 0);
+        drop(bars);
+    }
 }
 
 impl Default for EventBus {

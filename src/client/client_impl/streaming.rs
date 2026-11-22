@@ -23,19 +23,20 @@ impl Mt5Client {
             .fn_subscribe_ticks
             .ok_or(Mt5Error::UnsupportedFeature("SubscribeTicks"))?;
         let sym_c = CString::new(symbol.trim())?;
+        let symbol = symbol.trim();
+
+        // Subscribe the bus first so a tick pushed between bus registration and the
+        // EA acknowledgment cannot be lost, then ask the EA to start pushing.
+        let rx = self.event_bus.subscribe_ticks(symbol);
         let ret = unsafe { fn_sub(sym_c.as_ptr()) };
         if ret != 1 {
+            self.event_bus.remove_tick_sender(symbol);
             return Err(Mt5Error::Other(format!(
                 "SubscribeTicks failed for {symbol} (status={ret})"
             )));
         }
-        let rx = self.event_bus.subscribe_ticks(symbol.trim());
-        self.register_tick_subscription(symbol.trim());
-        Ok(crate::stream::TickSubscription::new(
-            symbol.trim(),
-            mode,
-            rx,
-        ))
+        self.register_tick_subscription(symbol);
+        Ok(crate::stream::TickSubscription::new(symbol, mode, rx))
     }
 
     /// Unsubscribe from real-time pushed ticks for a symbol (protocol v5+).
@@ -51,6 +52,7 @@ impl Mt5Client {
             )));
         }
         self.unregister_tick_subscription(symbol.trim());
+        self.event_bus.remove_tick_sender(symbol.trim());
         Ok(())
     }
 

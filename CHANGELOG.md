@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `OrderSnapshot` is re-exported from the crate root.
 - `tests/failure_injection.rs`: added a slow-backend test proving reads return immediately
   while a reconciliation pass holds the manager lock.
+- **Subscription race fix and sender-map pruning** (A-12):
+  - `subscribe_ticks` subscribes the `EventBus` before the EA so a tick pushed between
+    bus registration and EA acknowledgment cannot be lost; a failed EA subscribe removes
+    the tick sender again.
+  - `unsubscribe_ticks` removes the tick sender after the EA acknowledges so the sender
+    map does not grow unboundedly.
+  - `EventBus::remove_tick_sender()` drops an idle tick sender and `EventBus::prune()`
+    sweeps idle senders from the tick, book, and bar maps for periodic maintenance.
 
 ### Changed
 

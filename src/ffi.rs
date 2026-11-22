@@ -1,7 +1,8 @@
 //! Low-level C FFI bindings and packed struct layouts matching `mt5_bridge.h`.
 //!
 //! All structs are marked `#[repr(C, packed)]` to match the `#pragma pack(push, 1)`
-//! packing in the C/C++ DLL and MQL5 serialiser.
+//! packing in the C/C++ DLL and MQL5 serialiser. When the `schema` feature is
+//! enabled, they additionally derive `schemars::JsonSchema` for JSON Schema export.
 
 use static_assertions::{assert_eq_size, const_assert_eq};
 use std::os::raw::{c_char, c_double, c_int};
@@ -11,6 +12,7 @@ use std::os::raw::{c_char, c_double, c_int};
 /// Matches the C++ side, which asserts `sizeof(Mt5SymInfo) == 76` in
 /// `mt5_bridge.cpp`. Fields: seven `f64` price/lot fields, one `i32` digits,
 /// then `bid` and `ask`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5SymInfo {
@@ -30,6 +32,7 @@ pub struct Mt5SymInfo {
 
 /// Wire format for OHLCV bar rate (60 bytes).
 /// Corresponds directly to MT5 `MqlRates`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5Rate {
@@ -45,6 +48,7 @@ pub struct Mt5Rate {
 
 /// Wire format for price tick (44 bytes).
 /// Corresponds directly to MT5 `MqlTick`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5Tick {
@@ -57,6 +61,7 @@ pub struct Mt5Tick {
 }
 
 /// Wire format for order execution results (44 bytes).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Mt5TradeResult {
@@ -69,6 +74,7 @@ pub struct Mt5TradeResult {
 }
 
 /// Wire format for open position (148 bytes).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5Position {
@@ -108,6 +114,7 @@ impl Default for Mt5Position {
 }
 
 /// Wire format for working pending order (140 bytes).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5Order {
@@ -145,6 +152,7 @@ impl Default for Mt5Order {
 }
 
 /// Wire format for a completed deal from MT5 history (152 bytes).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5Deal {
@@ -186,6 +194,7 @@ impl Default for Mt5Deal {
 }
 
 /// Wire format for packet header (16 bytes, protocol v6+).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketHdr {
@@ -198,6 +207,7 @@ pub struct PacketHdr {
 }
 
 /// Asynchronous market data tick event pushed by the EA (88 bytes, protocol v6+).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5TickEvent {
@@ -229,6 +239,7 @@ impl Default for Mt5TickEvent {
 }
 
 /// Asynchronous trade transaction event pushed by the EA (176 bytes, protocol v6+).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5TradeEvent {
@@ -280,6 +291,7 @@ impl Default for Mt5TradeEvent {
 }
 
 /// Asynchronous depth-of-market book event pushed by the EA (72 bytes, protocol v6+).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5BookEvent {
@@ -307,6 +319,7 @@ impl Default for Mt5BookEvent {
 }
 
 /// Asynchronous bar event pushed by the EA upon bar close (96 bytes, protocol v7+).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mt5BarEvent {
@@ -343,6 +356,7 @@ impl Default for Mt5BarEvent {
 ///
 /// Returned by `CMD_STATS` (27). Mirrors the `Mt5Stats` struct in
 /// `bridge_dll/mt5_bridge.h`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mt5Stats {

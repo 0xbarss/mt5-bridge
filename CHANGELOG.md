@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Async `run` method offloads retries via `tokio::time::sleep` (requires the
     `async` feature).
 
+- **Model schema export**:
+  - New `schema` feature with `schemars`-generated JSON Schema for every packed
+    wire-protocol type.
+  - New `src/schema.rs` module printing wire sizes and per-field byte offsets using
+    `std::mem::size_of!` and an MSRV-safe offset helper.
+  - New `mt5-bridge schema` CLI command printing the layout report and JSON Schema
+    (requires the `cli` and `schema` features).
+  - `tests/protocol_docs.rs` snapshot test validates generated sizes and offsets
+    against the documented wire layout (requires the `schema` feature).
+
 - **Structured audit log with hash chaining**:
   - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
     `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.

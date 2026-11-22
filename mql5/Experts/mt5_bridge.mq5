@@ -85,7 +85,6 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 // INVALID_HANDLE is a built-in MQL5 constant (-1); no redefinition needed.
 #define ERROR_BROKEN_PIPE       109
 #define WAIT_OBJECT_0           0
-#define TAKEOVER_POLL_MS        50
 #define TIMER_INTERVAL_MS       50
 #define MAX_PAYLOAD_SIZE        16777216 // 16 MB payload upper bound
 // Wire protocol handshake version.
@@ -243,6 +242,13 @@ long g_takeover_event = 0;   // Win32 event handle; 0 = not created
 uint g_stale_cleanup_at = 0; // GetTickCount() deadline for chart cleanup; 0 = not scheduled
 bool g_stale_charts_closed = false;
 bool g_running = false;
+
+// Initialization state. The pipe bind is retried on the timer thread so that
+// OnInit returns immediately instead of blocking for the takeover timeout.
+enum ENUM_INIT_STATE { INIT_WAIT_TAKEOVER, INIT_READY };
+ENUM_INIT_STATE g_init_state = INIT_WAIT_TAKEOVER;
+ulong g_takeover_start = 0;   // GetTickCount() when takeover waiting began
+
 bool g_authenticated = false;
 string g_pipe_path = "";
 
@@ -2807,45 +2813,51 @@ int OnInit() {
     long prev_gen = (long)GlobalVariableGet(GenerationVarName());
     bool may_takeover = (my_gen > 0 && my_gen > prev_gen);
 
-    g_server = CreatePipeHandle();
+    g_takeover_start = GetTickCount();
+    g_init_state = INIT_WAIT_TAKEOVER;
 
-    if (g_server == INVALID_HANDLE) {
-        if (may_takeover && g_takeover_event != 0) {
-            Print("MT5Bridge: existing instance detected (generation ", prev_gen,
-                  "); requesting takeover with generation ", my_gen);
-            SetEvent(g_takeover_event);
-
-            int timeout = (InpTakeoverTimeoutMs > 0) ? InpTakeoverTimeoutMs : 5000;
-            int waited = 0;
-            while (waited < timeout) {
-                Sleep(TAKEOVER_POLL_MS);
-                waited += TAKEOVER_POLL_MS;
-                g_server = CreatePipeHandle();
-                if (g_server != INVALID_HANDLE) break;
-            }
-            // Cancel a takeover that no live instance acknowledged, otherwise an
-            // instance that starts later could observe a stale signal.
-            ResetEvent(g_takeover_event);
-
-            if (g_server == INVALID_HANDLE) {
-                Print("MT5Bridge: takeover timed out after ", waited,
-                      "ms — existing instance did not release the pipe");
-                return INIT_FAILED;
-            }
-            Print("MT5Bridge: takeover complete after ", waited, "ms");
-        } else {
-            Print("MT5Bridge: CreateNamedPipe failed — another instance owns the pipe (generation ",
-                  prev_gen, "); this instance (generation ", my_gen,
-                  ") will not take over. Set InpConfigGeneration higher to refresh it.");
-            return INIT_FAILED;
-        }
+    // Try to bind the pipe once without blocking. If it is free, finish
+    // initialization immediately; otherwise ask the owner to release it and let
+    // the timer retry the bind so OnInit returns right away (non-blocking
+    // takeover — OnInit never sleeps for the takeover timeout).
+    if (BindPipe(my_gen)) {
+        g_init_state = INIT_READY;
+        return CompleteInitialization();
     }
 
+    if (!may_takeover) {
+        Print("MT5Bridge: CreateNamedPipe failed — another instance owns the pipe (generation ",
+              prev_gen, "); this instance (generation ", my_gen,
+              ") will not take over. Set InpConfigGeneration higher to refresh it.");
+        return INIT_FAILED;
+    }
+
+    Print("MT5Bridge: existing instance detected (generation ", prev_gen,
+          "); requesting takeover with generation ", my_gen);
+    SetEvent(g_takeover_event);
+
+    int timer_ms = (InpTimerIntervalMs > 0) ? InpTimerIntervalMs : 1;
+    EventSetMillisecondTimer(timer_ms);
+    Print("MT5Bridge: awaiting pipe release (timeout=", InpTakeoverTimeoutMs,
+          "ms) — waiting for Rust client");
+    return INIT_SUCCEEDED;
+}
+
+// Bind the named pipe once and, on success, record this instance's generation.
+// Returns true when this instance now owns the pipe.
+bool BindPipe(long my_gen) {
+    g_server = CreatePipeHandle();
+    if (g_server == INVALID_HANDLE) return false;
     // Record this instance's generation so a later start can decide whether it
     // is newer. Always write it (including 0) so a stale value cannot block a
     // legitimate refresh.
     GlobalVariableSet(GenerationVarName(), (double)my_gen);
+    return true;
+}
 
+// Finish pipe-server initialization after the bind succeeds: mark the EA
+// running, schedule optional stale-chart cleanup, and arm the timer.
+int CompleteInitialization() {
     g_running = true;
     g_authenticated = false;
     // Give a concurrent takeover time to settle before removing other charts,
@@ -2912,6 +2924,24 @@ void OnTimer() {
         ReleasePipeServer();
         ExpertRemove();
         return;
+    }
+
+    // While waiting for the current owner to release the pipe, retry the bind
+    // on each timer tick. OnInit never blocks for this (non-blocking takeover).
+    if (g_init_state == INIT_WAIT_TAKEOVER) {
+        uint elapsed = (uint)(GetTickCount() - g_takeover_start);
+        uint timeout = (InpTakeoverTimeoutMs > 0) ? (uint)InpTakeoverTimeoutMs : 5000;
+        if (BindPipe(InpConfigGeneration)) {
+            g_init_state = INIT_READY;
+            CompleteInitialization();
+            Print("MT5Bridge: takeover complete");
+        } else if (elapsed > timeout) {
+            Print("MT5Bridge: takeover timed out after ", timeout,
+                  "ms — existing instance did not release the pipe");
+            if (g_takeover_event != 0) ResetEvent(g_takeover_event);
+            ExpertRemove();
+            return;
+        }
     }
 
     if (!g_running || g_server == INVALID_HANDLE) return;

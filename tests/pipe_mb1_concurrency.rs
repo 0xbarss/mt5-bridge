@@ -164,6 +164,7 @@ fn test_shared_order_manager_high_concurrency_stress() {
                 let cid = format!("t{}-ord-{}", t_id, i);
                 let req = OrderRequest::buy("EURUSD", 0.10)
                     .price(1.08500)
+                    .stop_loss(1.08000)
                     .client_order_id(&cid);
 
                 let res = mgr.submit_order(&*be, req);

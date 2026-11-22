@@ -528,7 +528,11 @@ pub fn manager() -> OrderManager {
 }
 
 pub fn buy(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
-    OrderRequest::buy(symbol, vol).client_order_id(cid)
+    // Every order submitted by these tests carries a stop loss so it passes the
+    // default `SafetyPolicy::require_stop_loss` check in `OrderManager::submit_order`.
+    OrderRequest::buy(symbol, vol)
+        .stop_loss(1.0800)
+        .client_order_id(cid)
 }
 
 /// Unique scratch directory under the OS temp dir (no external crate needed).

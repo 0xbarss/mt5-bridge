@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on `MT5_ERR_BUFFER_TOO_SMALL`.
   - `bridge_dll/mt5_bridge.h` / `bridge_dll/mt5_bridge.cpp`: `MT5_ERR_BUFFER_TOO_SMALL`
     defined and `PollEvent` no longer truncates payloads.
+- **Stop-loss policy at the manager layer**:
+  - `SafetyPolicy` gains `require_stop_loss` (default `true`).
+  - `OrderManager::submit_order` rejects any request without a stop loss before it ever
+    reaches the backend, so no custom backend can receive an unprotected order by default.
+  - Opt out with `require_stop_loss = false` for strategies that manage protection
+    externally (not recommended).
 
 ### Changed
 

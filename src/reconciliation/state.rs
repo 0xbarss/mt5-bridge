@@ -56,6 +56,12 @@ pub struct SafetyPolicy {
     pub require_deal_history: bool,
     /// Which submissions to block while any order is unresolved. Default: [`UnknownBlockScope::Strategy`].
     pub unknown_block_scope: UnknownBlockScope,
+    /// If `true` (default), [`OrderManager::submit_order`](crate::reconciliation::OrderManager::submit_order)
+    /// rejects any request without a stop loss (`stop_loss <= 0.0`) before it ever reaches the backend, so no custom
+    /// backend can receive an unprotected order by default. Strategies that manage their
+    /// own protection externally can set this to `false` — not recommended, because the
+    /// broker terminal itself may still accept unprotected orders.
+    pub require_stop_loss: bool,
 }
 
 impl Default for SafetyPolicy {
@@ -65,6 +71,7 @@ impl Default for SafetyPolicy {
             min_absent_secs: 30,
             require_deal_history: true,
             unknown_block_scope: UnknownBlockScope::Strategy,
+            require_stop_loss: true,
         }
     }
 }

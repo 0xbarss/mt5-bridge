@@ -456,7 +456,9 @@ impl OrderManager {
     /// Submit a trading order with idempotency protection and lifecycle state tracking.
     ///
     /// Sequence (all under the caller's exclusive `&mut self` — see the concurrency contract):
-    /// 1. Validate the request (invalid requests never touch state).
+    /// 1. Validate the request; when [`SafetyPolicy::require_stop_loss`] is set (the default),
+    ///    the request must also carry a stop loss, otherwise it is rejected before any state is
+    ///    touched and before the backend is called (invalid requests never touch state).
     /// 2. Idempotency & Magic: a repeated `client_order_id` returns the existing record and never
     ///    re-contacts the broker. If `req.magic` is `None` (or 0), it is assigned `strategy_magic`.
     ///    Any non-matching magic number is rejected with [`Mt5Error::OwnershipMismatch`].
@@ -471,6 +473,9 @@ impl OrderManager {
         mut req: OrderRequest,
     ) -> Result<TrackedOrder> {
         req.validate()?;
+        if self.policy.require_stop_loss {
+            req.validate_for_submit()?;
+        }
         let cid = req
             .client_order_id
             .clone()
@@ -1382,5 +1387,111 @@ mod tests {
             }
             other => panic!("expected OwnershipMismatch, got {other:?}"),
         }
+    }
+
+    /// Backend that records whether `order_send` was invoked and reports a filled deal.
+    #[derive(Default)]
+    struct RecordingBackend {
+        sends: std::sync::Mutex<Vec<OrderRequest>>,
+    }
+
+    impl RecordingBackend {
+        fn sent(&self) -> Vec<OrderRequest> {
+            self.sends.lock().unwrap().clone()
+        }
+    }
+
+    impl TradingBackend for RecordingBackend {
+        fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+            self.sends.lock().unwrap().push(req.clone());
+            Ok(TradeResult {
+                retcode: 10009,
+                deal: 101,
+                order: 101,
+                position: 101,
+                volume: req.volume,
+                price: req.price,
+            })
+        }
+
+        fn order_close_with_magic(&self, _ticket: u64, _magic: u64) -> Result<TradeResult> {
+            Err(Mt5Error::Other(
+                "recording backend: close not used".to_string(),
+            ))
+        }
+
+        fn order_modify_with_magic(
+            &self,
+            _ticket: u64,
+            _magic: u64,
+            _stop_loss: Level,
+            _take_profit: Level,
+        ) -> Result<TradeResult> {
+            Err(Mt5Error::Other(
+                "recording backend: modify not used".to_string(),
+            ))
+        }
+
+        fn positions_filtered(
+            &self,
+            _magic: Option<u64>,
+            _symbol: Option<&str>,
+        ) -> Result<Vec<Position>> {
+            Ok(vec![])
+        }
+
+        fn pending_orders_filtered(
+            &self,
+            _magic: Option<u64>,
+            _symbol: Option<&str>,
+        ) -> Result<Vec<WorkingOrder>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn submit_order_rejects_missing_stop_loss_before_backend_is_called() {
+        let magic = StrategyMagic::new(20240101).expect("valid magic");
+        let backend = RecordingBackend::default();
+        let mut manager = OrderManager::new(magic); // default policy: require_stop_loss = true
+
+        let res = manager.submit_order(&backend, OrderRequest::buy("EURUSD", 0.1));
+        assert!(res.is_err());
+
+        // Nothing was journaled and the backend was never called: rejection happens ahead of the wire.
+        assert!(manager.tracked_orders().is_empty());
+        assert!(manager.unresolved_orders().is_empty());
+        assert!(backend.sent().is_empty());
+    }
+
+    #[test]
+    fn submit_order_allows_unprotected_order_when_require_stop_loss_is_disabled() {
+        let magic = StrategyMagic::new(20240101).expect("valid magic");
+        let backend = RecordingBackend::default();
+        let policy = SafetyPolicy {
+            require_stop_loss: false,
+            ..Default::default()
+        };
+        let mut manager = OrderManager::with_policy(magic, policy);
+
+        let tracked = manager
+            .submit_order(&backend, OrderRequest::buy("EURUSD", 0.1))
+            .expect("unprotected order must be allowed when the policy is opted out");
+        assert_eq!(tracked.state, OrderState::Filled);
+        assert_eq!(backend.sent().len(), 1);
+        assert_eq!(backend.sent()[0].stop_loss, 0.0);
+    }
+
+    #[test]
+    fn submit_order_with_stop_loss_passes_under_default_policy() {
+        let magic = StrategyMagic::new(20240101).expect("valid magic");
+        let backend = RecordingBackend::default();
+        let mut manager = OrderManager::new(magic);
+
+        let tracked = manager
+            .submit_order(&backend, OrderRequest::buy("EURUSD", 0.1).stop_loss(1.0850))
+            .expect("protected order must be allowed");
+        assert_eq!(tracked.state, OrderState::Filled);
+        assert_eq!(backend.sent().len(), 1);
     }
 }

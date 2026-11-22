@@ -270,6 +270,7 @@ fn non_ascii_ids_and_comments_never_panic_at_any_truncation_boundary() {
         .submit_order(
             &broker,
             OrderRequest::buy("EURUSD", 0.1)
+                .stop_loss(1.0800)
                 .client_order_id("ID-日本語-🚀-é")
                 .comment("コメント日本語コメント日本語"),
         )
@@ -614,8 +615,9 @@ fn partially_filled_limit_order_with_a_working_remainder() {
     let broker = MockBroker::new();
     broker.push_fault(Fault::LoseBeforeExecution);
     let mut mgr = manager();
-    let req =
-        OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800).client_order_id("lim-1");
+    let req = OrderRequest::pending("EURUSD", OrderType::BuyLimit, 1.0, 1.0800)
+        .stop_loss(1.0800)
+        .client_order_id("lim-1");
     let _ = mgr.submit_order(&broker, req);
 
     broker.inject_deal(entry_deal(9201, 8201, 7201, "lim-1", 0.4, 1.0800));
@@ -627,7 +629,7 @@ fn partially_filled_limit_order_with_a_working_remainder() {
         volume_initial: 1.0,
         volume_current: 0.6,
         price_open: 1.0800,
-        stop_loss: 0.0,
+        stop_loss: 1.0800,
         take_profit: 0.0,
         price_current: 1.0805,
         symbol: "EURUSD".to_string(),
@@ -656,7 +658,7 @@ fn netting_account_fill_is_attributed_by_deals_not_the_merged_position_volume() 
         magic: MAGIC,
         volume: 0.8,
         price_open: 1.0700,
-        stop_loss: 0.0,
+        stop_loss: 1.0800,
         take_profit: 0.0,
         price_current: 1.0850,
         profit: 0.0,
@@ -1082,7 +1084,11 @@ fn retry_order_is_refused_until_the_original_is_definitively_not_placed() {
 
     // Unknown → refused
     let err = mgr
-        .retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "R",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800),
+        )
         .unwrap_err();
     assert!(matches!(err, Mt5Error::RetryNotAllowed { .. }), "{err:?}");
 
@@ -1090,7 +1096,11 @@ fn retry_order_is_refused_until_the_original_is_definitively_not_placed() {
     mgr.reconcile(&broker).unwrap();
     assert_eq!(mgr.get_order("R").unwrap().state, OrderState::Rejected);
     let retried = mgr
-        .retry_order(&broker, "R", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "R",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800),
+        )
         .unwrap();
     assert_eq!(retried.client_order_id, "R-r1");
     assert_eq!(retried.state, OrderState::Filled);
@@ -1098,12 +1108,20 @@ fn retry_order_is_refused_until_the_original_is_definitively_not_placed() {
 
     // a filled order must not be "retried" into double exposure
     let err = mgr
-        .retry_order(&broker, "R-r1", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "R-r1",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800),
+        )
         .unwrap_err();
     assert!(matches!(err, Mt5Error::RetryNotAllowed { .. }));
     // unknown previous id / changed intent
     assert!(mgr
-        .retry_order(&broker, "ghost", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "ghost",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800)
+        )
         .is_err());
 }
 
@@ -1115,16 +1133,32 @@ fn retry_order_must_preserve_symbol_and_direction_and_numbers_attempts() {
     let mut mgr = manager();
     let _ = mgr.submit_order(&broker, buy("EURUSD", 0.5, "Q"));
     assert!(mgr
-        .retry_order(&broker, "Q", OrderRequest::sell("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "Q",
+            OrderRequest::sell("EURUSD", 0.5).stop_loss(1.0800)
+        )
         .is_err());
     assert!(mgr
-        .retry_order(&broker, "Q", OrderRequest::buy("GBPUSD", 0.5))
+        .retry_order(
+            &broker,
+            "Q",
+            OrderRequest::buy("GBPUSD", 0.5).stop_loss(1.0800)
+        )
         .is_err());
     assert!(mgr
-        .retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "Q",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800)
+        )
         .is_err()); // rejected again (fault #2)
     let third = mgr
-        .retry_order(&broker, "Q", OrderRequest::buy("EURUSD", 0.5))
+        .retry_order(
+            &broker,
+            "Q",
+            OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0800),
+        )
         .unwrap();
     assert_eq!(
         third.client_order_id, "Q-r2",

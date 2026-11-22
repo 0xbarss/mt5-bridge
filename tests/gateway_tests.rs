@@ -227,7 +227,9 @@ fn test_manager() -> OrderManager {
 }
 
 fn buy_order(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
-    OrderRequest::buy(symbol, vol).client_order_id(cid)
+    OrderRequest::buy(symbol, vol)
+        .stop_loss(1.0800)
+        .client_order_id(cid)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

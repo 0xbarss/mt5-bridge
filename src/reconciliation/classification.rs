@@ -26,7 +26,10 @@ pub(crate) fn classify_send_error(
                 Some(RejectionEvidence::BrokerRetcode(*retcode as i32)),
                 format!("retcode {retcode}: {description}"),
             ),
-            RetcodeClass::Ambiguous | RetcodeClass::Executed => (
+            RetcodeClass::Ambiguous
+            | RetcodeClass::Accepted
+            | RetcodeClass::Filled
+            | RetcodeClass::PartiallyFilled => (
                 OrderState::Unknown,
                 None,
                 format!("ambiguous retcode {retcode}: {description}"),

@@ -72,6 +72,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `json-journal` feature (`serde_json` remains an alias for `json-journal`). Use
   `--no-default-features --features wal` for WAL without JSON.
 
+### Changed
+
+- **Retcode classification split**: `RetcodeClass::Executed` replaced by `Accepted`
+  (`TRADE_RETCODE_PLACED` = 10008), `Filled` (`TRADE_RETCODE_DONE` = 10009), and
+  `PartiallyFilled` (`TRADE_RETCODE_DONE_PARTIAL` = 10010). Pending-order placement is
+  no longer counted as a fill. `classify_retcode` now maps each retcode to its own
+  variant; `DefinitivelyNotExecuted` and `Ambiguous` are unchanged.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

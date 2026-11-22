@@ -82,7 +82,7 @@ pub mod stream;
 pub use backend::TradingBackend;
 pub use client::Mt5Client;
 pub use constants::*;
-pub use error::{mt5_retcode_description, Mt5Error, Result};
+pub use error::{classify_retcode, mt5_retcode_description, Mt5Error, Result, RetcodeClass};
 pub use ffi::PROTOCOL_VERSION;
 #[cfg(feature = "async")]
 pub use gateway::{

@@ -1047,6 +1047,22 @@ fn test_mt5_retcode_descriptions() {
 }
 
 #[test]
+fn test_classify_retcode_split() {
+    use mt5_bridge::RetcodeClass::*;
+
+    // 10008 PLACED => Accepted (pending order, not a fill)
+    assert_eq!(classify_retcode(10008), Accepted);
+    // 10009 DONE => Filled (immediate deal)
+    assert_eq!(classify_retcode(10009), Filled);
+    // 10010 DONE_PARTIAL => PartiallyFilled
+    assert_eq!(classify_retcode(10010), PartiallyFilled);
+    // 10004 REQUOTE => DefinitivelyNotExecuted
+    assert_eq!(classify_retcode(10004), DefinitivelyNotExecuted);
+    // 10012 TIMEOUT => Ambiguous
+    assert_eq!(classify_retcode(10012), Ambiguous);
+}
+
+#[test]
 fn test_mt5_error_display_formatting() {
     let err_unkn = Mt5Error::UnknownExecutionState {
         symbol: "EURUSD".to_string(),

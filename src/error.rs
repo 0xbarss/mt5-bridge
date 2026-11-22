@@ -178,20 +178,31 @@ pub enum Mt5Error {
 }
 
 /// Classification of MT5 trade return codes according to execution certainty.
+///
+/// Distinguishes "accepted/placed" (pending order working in the book) from
+/// "filled" (immediate deal executed). Pending-order placement is not counted
+/// as a fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetcodeClass {
-    /// Definitive positive execution.
-    Executed,
+    /// Order placed and working in the MT5 order book (`TRADE_RETCODE_PLACED` = 10008).
+    /// A pending order placement; not an immediate fill.
+    Accepted,
+    /// Order executed in full as an immediate deal (`TRADE_RETCODE_DONE` = 10009).
+    Filled,
+    /// Order partially executed (`TRADE_RETCODE_DONE_PARTIAL` = 10010).
+    PartiallyFilled,
     /// Definitive failure: order was proven NOT executed at the broker.
     DefinitivelyNotExecuted,
     /// Ambiguous outcome: execution cannot be determined from retcode alone.
     Ambiguous,
 }
 
-/// Classify an MT5 trade retcode into Executed, DefinitivelyNotExecuted, or Ambiguous.
+/// Classify an MT5 trade retcode into one of [`RetcodeClass`] variants.
 pub fn classify_retcode(retcode: u32) -> RetcodeClass {
     match retcode {
-        10008..=10010 => RetcodeClass::Executed,
+        10008 => RetcodeClass::Accepted,
+        10009 => RetcodeClass::Filled,
+        10010 => RetcodeClass::PartiallyFilled,
         10004 | 10006 | 10007 | 10013 | 10014 | 10015 | 10016 | 10017 | 10018 | 10019 | 10020
         | 10021 | 10022 | 10024 | 10026 | 10027 | 10028 | 10029 | 10030 | 10032 | 10033 | 10034
         | 10035 | 10036 | 10038 | 10039 | 10040 | 10042 | 10043 | 10044 | 10045 | 10046 => {

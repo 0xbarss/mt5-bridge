@@ -65,6 +65,7 @@ pub mod constants;
 pub mod error;
 pub mod ffi;
 pub mod journal;
+pub mod market;
 pub mod position_book;
 pub mod reconciliation;
 pub mod risk;
@@ -96,6 +97,7 @@ pub use gateway::{
 #[cfg(feature = "json-journal")]
 pub use journal::JsonFileStore;
 pub use journal::OrderStore;
+pub use market::{BarAggregator, BarCache, BarKind};
 pub use position_book::{
     BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,
     PositionTransition,

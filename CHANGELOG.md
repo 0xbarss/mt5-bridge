@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GatewayConfig::reconciler_config` wires a reconciler into the gateway; `event_seq`
     gaps and `Unknown` order events trigger immediate passes.
 
+- **Market-data bar aggregation and cache**:
+  - New `src/market` module with `BarAggregator` and `BarCache`.
+  - `BarAggregator` folds [`Tick`]s into [`Bar`]s for time-based, tick-count, volume,
+    and range bar kinds (`BarKind::Time`, `TickCount`, `Volume`, `Range`).
+  - `BarCache` is a bounded, TTL-backed cache keyed by `(symbol, timeframe)` for serving
+    repeated `copy_bars` calls from memory, with per-key size bounds and expiry.
+
 ### Changed
 
 - `Mt5Error::AlreadyConnected` now reads "a client is already connected in this process;

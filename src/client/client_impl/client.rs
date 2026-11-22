@@ -14,6 +14,28 @@ use std::time::{Duration, Instant};
 /// Under the hood, all requests are serialized and sent over a Windows Named Pipe
 /// (`\\.\pipe\mt5bridge` or the name configured in `MT5_PIPE_NAME`) to the
 /// `mt5_bridge.mq5` Expert Advisor running inside MetaTrader 5.
+///
+/// # One client per process
+///
+/// Only one live `Mt5Client` may exist per process. The loaded DLL keeps the
+/// pipe connection, subscriptions, and event state in process-global variables,
+/// so a second [`Mt5Client::connect`] while a client is alive fails with
+/// [`Mt5Error::AlreadyConnected`].
+///
+/// To talk to several MetaTrader terminals at the same time, run one process
+/// per terminal and point each process at its own EA pipe through the
+/// `MT5_PIPE_NAME` environment variable. The variable is read when the client
+/// connects (and when the DLL initializes), not on every request; changing it
+/// after a successful connect does not move the live connection.
+///
+/// ```text
+/// MT5_PIPE_NAME=mt5bridge_account1 ./my_bot_account1
+/// MT5_PIPE_NAME=mt5bridge_account2 ./my_bot_account2
+/// ```
+///
+/// Dropping the client or calling [`Mt5Client::shutdown`] releases the slot, so
+/// a later client can connect in the same process. Use
+/// [`Mt5Client::process_connection_count`] to inspect the slot for diagnostics.
 pub struct Mt5Client {
     pub(crate) _lib: libloading::Library,
     pub(crate) fn_init: FnInit,
@@ -96,6 +118,23 @@ impl Drop for ActiveGuard {
 }
 
 impl Mt5Client {
+    /// Returns the number of live `Mt5Client` connections in this process.
+    ///
+    /// Only one client may be connected per process (see the [type-level
+    /// documentation](Self)), so this returns either `0` or `1`. It is intended
+    /// for diagnostics, health endpoints, and tests that need to confirm the
+    /// process-wide connection slot is free.
+    ///
+    /// ```
+    /// use mt5_bridge::Mt5Client;
+    ///
+    /// // Doctests run in a fresh process with no live client.
+    /// assert_eq!(Mt5Client::process_connection_count(), 0);
+    /// ```
+    pub fn process_connection_count() -> usize {
+        usize::from(CLIENT_ACTIVE.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     /// Session tracking connectivity, subscriptions, and reconciliation state.
     pub fn session(&self) -> Arc<Mutex<crate::session::Mt5Session>> {
         Arc::clone(&self.session)

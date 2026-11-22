@@ -133,7 +133,23 @@ pub enum Mt5Error {
     #[error("Server authentication failed or pipe peer verification failed")]
     ServerAuthFailed,
 
-    #[error("Another Mt5Client is already active in this process; multiple concurrent instances share DLL globals and are not permitted")]
+    /// Another [`Mt5Client`](crate::Mt5Client) is already connected in this process.
+    ///
+    /// The bridge keeps its pipe connection, subscriptions, and event state in
+    /// process-global DLL variables, so at most one client may be live per
+    /// process. Run one process per MetaTrader terminal and select each
+    /// terminal's pipe with the `MT5_PIPE_NAME` environment variable (read at
+    /// connect time). A multiplexing router is planned.
+    ///
+    /// ```
+    /// use mt5_bridge::Mt5Error;
+    ///
+    /// assert_eq!(
+    ///     Mt5Error::AlreadyConnected.to_string(),
+    ///     "a client is already connected in this process; use one process per terminal or the router (planned)"
+    /// );
+    /// ```
+    #[error("a client is already connected in this process; use one process per terminal or the router (planned)")]
     AlreadyConnected,
 
     #[error("Positions query snapshot truncated: received {returned} items out of {total} total matching positions")]

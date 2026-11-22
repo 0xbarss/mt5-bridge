@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One-client-per-process diagnostics** (A-10):
+  - `Mt5Client::process_connection_count()` reports the number of live clients in the
+    current process (`0` or `1`).
+  - Rustdoc and README now state that only one client may be live per process, that
+    multi-terminal setups require one process per terminal, and that `MT5_PIPE_NAME` is
+    read at connect time.
 - **Lock-free reconciliation reads** (A-09):
   - `SharedOrderManager` publishes an `OrderSnapshot` through `arc-swap` after every mutation.
   - `get_order`, `export_orders`, `lifecycle`, and the new `snapshot()` read the published
@@ -21,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Mt5Error::AlreadyConnected` now reads "a client is already connected in this process;
+  use one process per terminal or the router (planned)".
 - `SharedOrderManager::strategy_magic` and `magic` no longer acquire the manager lock; the
   strategy magic is immutable after construction.
 

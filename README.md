@@ -491,6 +491,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+> [!IMPORTANT]
+> **One client per process.** The bridge keeps its pipe connection and subscription
+> state in process-global DLL variables, so at most one `Mt5Client` may be live per
+> process. A second `connect*` call while a client is alive returns
+> `Mt5Error::AlreadyConnected`. To use several MT5 terminals, run one process per
+> terminal and select its pipe with `MT5_PIPE_NAME` (see
+> [Multi-Instance / Multi-Account Support](#multi-instance--multi-account-support)).
+> `MT5_PIPE_NAME` is read at connect time, so set it before calling `connect*`;
+> changing it afterwards does not move an existing connection.
+> `Mt5Client::process_connection_count()` reports whether the process slot is occupied.
+
 *Zero-Config Environment Variables:*
 Instead of hardcoding credentials, the client can automatically read:
 - `MT5_PIPE_SECRET` or `MT5_PASSWORD` (pipe authentication secret token)
@@ -1070,6 +1081,7 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | :--- | :--- | :--- |
 | [`connect`](src/client/mod.rs) | `pub fn connect(login: i64, password: &str, server: &str) -> Result<Self>` | Connects to MT5. Resolves `mt5_bridge.dll` via `MT5_DLL_PATH` environment variable, or checks adjacent to executable / current working directory. |
 | [`connect_with_dll`](src/client/mod.rs) | `pub fn connect_with_dll(dll_path: impl AsRef<Path>, login: i64, password: &str, server: &str) -> Result<Self>` | Connects by loading the bridge DLL from an explicit file path. |
+| [`process_connection_count`](src/client/mod.rs) | `pub fn process_connection_count() -> usize` | Returns the number of live clients in this process (`0` or `1`). Intended for diagnostics and health checks. |
 | [`set_symbol_cache_ttl`](src/client/mod.rs) | `pub fn set_symbol_cache_ttl(&mut self, ttl: Duration)` | Overrides the in-memory cache time-to-live for `symbol_info` lookups (default: 60 seconds). |
 | [`shutdown`](src/client/mod.rs) | `pub fn shutdown(&self) -> Result<()>` | Gracefully disconnects from the MT5 pipe server. Automatically called when the client is dropped (`Drop`). |
 
@@ -1449,6 +1461,7 @@ All client methods return [`Result<T, Mt5Error>`](src/error.rs).
 | `PositionsFailed(status)` | Failed to query active open positions. |
 | `OrdersFailed(status)` | Failed to query working pending orders. |
 | `ReconciliationError(message)` | State mismatch or error during broker reconciliation pass. |
+| `AlreadyConnected` | Another client is already connected in this process; run one process per MT5 terminal. |
 | `UnsupportedFeature(name)` | DLL lacks optional export. |
 | `InvalidTimeRange { start, end }` | Query start timestamp is greater than end timestamp. |
 | `ChannelDisconnected` | Async stream receiver or sender disconnected. |
@@ -1479,8 +1492,35 @@ To connect to multiple MT5 terminals simultaneously on the same machine:
    MT5_PIPE_NAME=mt5bridge_account2 ./my_bot_account2 &
    ```
 
-> [!NOTE]
-> `mt5-bridge` enforces single-connection-per-process semantics via a process-level atomic guard (`CLIENT_ACTIVE`). To interact with multiple terminals simultaneously, run one dedicated process per MT5 terminal.
+> [!IMPORTANT]
+> **One client per process.** `mt5-bridge` enforces single-connection-per-process
+> semantics via a process-level atomic guard (`CLIENT_ACTIVE`): a second client in
+> the same process fails with `Mt5Error::AlreadyConnected`. This is required because
+> the DLL stores its pipe connection and subscription state in process globals. To
+> interact with multiple terminals simultaneously, run one dedicated process per MT5
+> terminal.
+>
+> `MT5_PIPE_NAME` is read at connect time (and by the DLL during initialization),
+> not on every request. Set it before calling `connect*`; changing it after a
+> successful connect does not move the live connection. Dropping the client or
+> calling `shutdown()` releases the slot so a new client can connect later in the
+> same process. `Mt5Client::process_connection_count()` returns `0` or `1` and is
+> intended for diagnostics and health endpoints.
+
+```rust,no_run
+use mt5_bridge::Mt5Client;
+
+# fn main() -> Result<(), mt5_bridge::Mt5Error> {
+assert_eq!(Mt5Client::process_connection_count(), 0);
+
+let client = Mt5Client::connect_with_secret("my_pipe_secret")?;
+assert_eq!(Mt5Client::process_connection_count(), 1);
+
+drop(client); // Releases the process-wide slot.
+assert_eq!(Mt5Client::process_connection_count(), 0);
+# Ok(())
+# }
+```
 
 ---
 

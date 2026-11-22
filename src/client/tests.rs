@@ -2,7 +2,7 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use crate::client::client_impl::client::{Mt5Client, CLIENT_ACTIVE};
+use crate::client::client_impl::client::{ActiveGuard, Mt5Client, CLIENT_ACTIVE};
 use crate::client::pipe::validate_pipe_name;
 use crate::client::validate_dll_path;
 use crate::error::Mt5Error;
@@ -122,6 +122,67 @@ fn dll_load_failure_releases_client_active() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn process_connection_count_reflects_the_process_slot() {
+    let _lock = with_client_lock();
+    assert_eq!(Mt5Client::process_connection_count(), 0);
+
+    CLIENT_ACTIVE.store(true, Ordering::SeqCst);
+    let slot = ActiveGuard::arm();
+    assert_eq!(Mt5Client::process_connection_count(), 1);
+
+    drop(slot);
+    assert_eq!(Mt5Client::process_connection_count(), 0);
+}
+
+#[test]
+fn second_connection_is_rejected_while_the_slot_is_held() {
+    let _lock = with_client_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "mt5_bridge_already_connected_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("test temp dir must be creatable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("test temp dir permissions must be settable");
+    }
+    let dummy = dir.join("mt5_bridge.dll");
+    std::fs::write(&dummy, b"not a real dll").expect("dummy dll must be writable");
+
+    CLIENT_ACTIVE.store(true, Ordering::SeqCst);
+    let slot = ActiveGuard::arm();
+
+    let err = match Mt5Client::connect_with_dll(&dummy, 0, "", "") {
+        Ok(_) => panic!("a second client must not connect while the slot is held"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, Mt5Error::AlreadyConnected),
+        "expected AlreadyConnected, got {err:?}"
+    );
+    assert_eq!(Mt5Client::process_connection_count(), 1);
+
+    drop(slot);
+    assert_eq!(Mt5Client::process_connection_count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn already_connected_error_names_the_workaround() {
+    let message = Mt5Error::AlreadyConnected.to_string();
+    assert!(
+        message.contains("one process per terminal"),
+        "error message must name the supported workaround, got: {message}"
+    );
+    assert!(
+        message.contains("router (planned)"),
+        "error message must mention the planned router, got: {message}"
+    );
 }
 
 #[test]

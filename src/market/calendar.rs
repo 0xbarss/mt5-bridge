@@ -5,7 +5,7 @@
 //!   - `CMD_CALENDAR_COUNTRIES` (26): countries that have calendar events
 //!
 //! The DLL and the MQL5 EA pack each event as a little-endian record:
-//!   [u64 id][i64 time][u32 country_len][country][u32 currency_len][currency]
+//!   [u64 id][i64 time][u32 country_len]\[country\][u32 currency_len]\[currency\]
 //!   [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
 //!   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
 //!

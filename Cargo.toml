@@ -26,6 +26,7 @@ hex = "0.4"
 dunce = "1.0"
 arc-swap = "1.7"
 prometheus = { version = "0.13", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
 
 [features]
 default = ["async", "serde_json", "wal"]
@@ -34,11 +35,14 @@ wal = []
 json-journal = ["dep:serde_json"]
 serde_json = ["json-journal"]
 metrics = ["dep:prometheus"]
+cli = ["dep:clap"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 doc-comment = "0.3"
+assert_cmd = "2"
+predicates = "3"
 
 [[bench]]
 name = "benchmarks"
@@ -75,3 +79,8 @@ required-features = ["async"]
 [[example]]
 name = "10_wal_order_store"
 required-features = ["wal"]
+
+[[bin]]
+name = "mt5-bridge"
+path = "src/bin/mt5-bridge.rs"
+required-features = ["cli"]

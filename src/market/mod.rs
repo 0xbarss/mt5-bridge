@@ -5,7 +5,7 @@
 //! from pushed book events, and for caching recently fetched bars so repeated
 //! `copy_bars` calls can be served from memory.
 //!
-//! - [`BarAggregator`] — consume [`Tick`]s and emit [`Bar`]s for time,
+//! - [`BarAggregator`] — consume [`crate::types::Tick`]s and emit [`crate::types::Bar`]s for time,
 //!   tick-count, volume, and range bar kinds.
 //! - [`BarCache`] — bounded, TTL-backed cache keyed by `(symbol, timeframe)`.
 //! - [`SymbolRegistry`] — refreshable in-memory cache of MT5 symbols discovered

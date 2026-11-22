@@ -4,8 +4,10 @@
 //! Metrics are registered against a global process-wide registry and can be
 //! exported in prometheus text format via [`crate::telemetry::prometheus::encode`].
 
-use prometheus::{IntCounter, IntGauge, Registry};
+use ::prometheus::{IntCounter, IntGauge, Registry};
 use std::sync::OnceLock;
+
+pub mod prometheus;
 
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 

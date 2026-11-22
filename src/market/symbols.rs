@@ -1,7 +1,7 @@
 //! Symbol universe discovery and registry.
 //!
 //! Provides [`SymbolRegistry`] — an in-memory, refreshable cache of MT5 symbols
-//! fetched via [`Mt5Client::symbols`]/[`Mt5Client::symbols_filtered`] — plus
+//! fetched via [`crate::Mt5Client::symbols`]/[`crate::Mt5Client::symbols_filtered`] — plus
 //! helper methods for filtering and selecting symbols in Market Watch.
 
 use crate::error::{Mt5Error, Result};

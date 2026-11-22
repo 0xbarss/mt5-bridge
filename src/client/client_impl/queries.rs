@@ -301,7 +301,7 @@ impl Mt5Client {
     /// Query the countries that have economic calendar events.
     ///
     /// Returns country names (e.g. `"US"`, `"EU"`, `"JP"`) suitable for pairing
-    /// with [`NewsFilter::currencies`] gating.
+    /// with [`crate::NewsFilter::currencies`] gating.
     pub fn calendar_countries(&self) -> Result<Vec<String>> {
         let fn_calendar_countries = self
             .fn_calendar_countries

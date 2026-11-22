@@ -1,8 +1,8 @@
 use crate::ffi::Mt5Stats;
 
-/// High-level bridge statistics snapshot returned by [`Mt5Client::stats`](crate::Mt5Client::stats).
+/// High-level bridge statistics snapshot returned by [`crate::Mt5Client::stats`].
 ///
-/// Mirrors the wire-packed [`Mt5Stats`](crate::ffi::Mt5Stats) struct returned by
+/// Mirrors the wire-packed [`Mt5Stats`] struct returned by
 /// `CMD_STATS` (27). All counters are monotonic since the bridge DLL was loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStats {
@@ -29,7 +29,7 @@ pub struct BridgeStats {
 }
 
 impl BridgeStats {
-    /// Decodes a wire-packed [`Mt5Stats`](crate::ffi::Mt5Stats) into [`BridgeStats`].
+    /// Decodes a wire-packed [`crate::ffi::Mt5Stats`] into [`BridgeStats`].
     pub fn from_raw(raw: Mt5Stats) -> Self {
         Self {
             uptime_secs: raw.uptime_secs,

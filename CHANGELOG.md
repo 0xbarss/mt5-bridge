@@ -134,6 +134,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       `prometheus::encode()` text-format export (`src/telemetry/`).
     - Verified in `tests/protocol_consistency.rs`.
 
+- **Health/readiness endpoint and doctor CLI**:
+  - New `src/health` module with `HealthReport`, per-check `HealthStatus`, and
+    `doctor()` aggregating DLL, pipe auth, protocol, account, reconciliation,
+    WAL, and bridge statistics checks. The library remains free of CLI
+    dependencies.
+  - New `src/bin/mt5-bridge` binary (behind the `cli` feature) with `doctor`,
+    `stats`, `tail`, `replay`, and `wal verify` subcommands, built with clap.
+  - New `cli` feature and optional `clap` dependency; `assert_cmd` integration
+    tests cover argument parsing and `--help`.
+
 ### Changed
 
 - `Mt5Error::AlreadyConnected` now reads "a client is already connected in this process;

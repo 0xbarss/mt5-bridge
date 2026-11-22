@@ -64,6 +64,7 @@ pub mod client;
 pub mod constants;
 pub mod error;
 pub mod ffi;
+pub mod health;
 pub mod journal;
 pub mod market;
 pub mod position_book;
@@ -102,6 +103,7 @@ pub use gateway::{
     BlockingExecutor, Connector, FixedConnector, GatewayConfig, Mt5Gateway, Mt5GatewayHandle,
     P1Command, P2Command, P3Command,
 };
+pub use health::{HealthCheck, HealthReport, HealthStatus};
 #[cfg(feature = "json-journal")]
 pub use journal::JsonFileStore;
 pub use journal::OrderStore;

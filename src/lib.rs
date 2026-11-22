@@ -81,7 +81,9 @@ pub mod gateway;
 #[cfg(feature = "async")]
 pub mod stream;
 
-pub use backend::TradingBackend;
+pub use backend::{
+    DryRunBackend, DryRunConfig, FillModel, ReplayBackend, ReplayInput, ReplayOrder, TradingBackend,
+};
 pub use client::Mt5Client;
 pub use constants::*;
 pub use error::{classify_retcode, mt5_retcode_description, Mt5Error, Result, RetcodeClass};

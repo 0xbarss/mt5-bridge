@@ -69,6 +69,7 @@ pub mod position_book;
 pub mod reconciliation;
 pub mod session;
 pub mod sync;
+pub mod trade;
 pub mod types;
 
 #[cfg(feature = "wal")]
@@ -102,13 +103,15 @@ pub use reconciliation::{
 };
 pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;
+pub use trade::{Bracket, TradeManager, TrailingStop};
 pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
     BookEvent, Deal, DealEntry, EventEffect, Fill, HistoryResult, Level, MismatchKind,
     OrderRequest, OrderState, OrderType, PingResult, Position, Rate, RejectionEvidence, StreamMode,
-    SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeStatus, WorkingOrder,
-    MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
+    SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeRule, TradeStatus,
+    WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX,
+    WIRE_ID_LEN,
 };
 #[cfg(all(feature = "wal", feature = "json-journal"))]
 pub use wal::{migrate_json_to_wal, wal_to_json};

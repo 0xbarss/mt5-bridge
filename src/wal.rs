@@ -28,12 +28,15 @@ const REC_UPDATE: u8 = 0x02;
 const REC_SNAPSHOT: u8 = 0x03;
 const REC_PRUNE: u8 = 0x04;
 const REC_POSITION: u8 = 0x05;
+const REC_TRADE_RULE: u8 = 0x06;
 
-/// Return type of [`WalOrderStore::load_from_disk`]: orders plus the persisted
-/// position-state transitions needed to rebuild the `Unknown` position set.
+/// Return type of [`WalOrderStore::load_from_disk`]: orders, the persisted
+/// position-state transitions, and trade-management rules needed to rebuild
+/// bracket/trailing state after restart.
 type LoadResult = (
     Vec<TrackedOrder>,
     HashMap<u64, (PositionRef, PositionState)>,
+    Vec<TradeRule>,
 );
 
 const FLAG_SYNC: u8 = 0x01;
@@ -74,7 +77,7 @@ fn crc_poly_for_version(version: u32) -> u32 {
 /// (orders, fills, positions, snapshot envelope) to/from little-endian bytes
 /// so `WalOrderStore` compiles and works with `--no-default-features --features wal`.
 use crate::types::{
-    AttributeMismatch, Fill, MismatchKind, OrderState, OrderType, RejectionEvidence,
+    AttributeMismatch, Fill, MismatchKind, OrderState, OrderType, RejectionEvidence, TradeRule,
 };
 
 // ----- primitives -----
@@ -438,6 +441,65 @@ impl PositionRef {
             magic: read_u64(r)?,
         })
     }
+}
+
+// ----- TradeRule -----
+
+impl TradeRule {
+    /// Binary-serialize this rule into `w`.
+    fn to_bytes<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        write_string(w, &self.client_order_id)?;
+        write_string(w, &self.symbol)?;
+        write_u64(w, self.ticket)?;
+        write_u8(w, self.order_type.to_byte())?;
+        write_f64(w, self.entry_price)?;
+        write_f64(w, self.volume)?;
+        write_f64(w, self.stop_loss)?;
+        write_f64(w, self.take_profit)?;
+        write_option(w, &self.break_even_at_r, |w, v| write_f64(w, *v))?;
+        write_option(w, &self.trailing_distance, |w, v| write_f64(w, *v))?;
+        write_option(w, &self.trailing_step, |w, v| write_f64(w, *v))?;
+        write_option(w, &self.trailing_activation, |w, v| write_f64(w, *v))?;
+        write_f64(w, self.risk)?;
+        write_f64(w, self.stops_level)?;
+        write_i64(w, self.last_modify_secs)?;
+        write_u8(w, u8::from(self.break_even_activated))?;
+        write_u8(w, u8::from(self.trailing_activated))?;
+        Ok(())
+    }
+
+    /// Deserialize a `TradeRule` from binary bytes.
+    fn from_bytes<R: Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            client_order_id: read_string(r)?,
+            symbol: read_string(r)?,
+            ticket: read_u64(r)?,
+            order_type: OrderType::from_byte(read_u8(r)?)?,
+            entry_price: read_f64(r)?,
+            volume: read_f64(r)?,
+            stop_loss: read_f64(r)?,
+            take_profit: read_f64(r)?,
+            break_even_at_r: read_option(r, read_f64)?,
+            trailing_distance: read_option(r, read_f64)?,
+            trailing_step: read_option(r, read_f64)?,
+            trailing_activation: read_option(r, read_f64)?,
+            risk: read_f64(r)?,
+            stops_level: read_f64(r)?,
+            last_modify_secs: read_i64(r)?,
+            break_even_activated: read_u8(r)? != 0,
+            trailing_activated: read_u8(r)? != 0,
+        })
+    }
+}
+
+/// Convenience wrappers usable from the parent module for WAL frame payloads.
+fn encode_trade_rule(rule: &TradeRule) -> Vec<u8> {
+    let mut buf = Vec::new();
+    rule.to_bytes(&mut buf).expect("infallible write to Vec");
+    buf
+}
+fn decode_trade_rule(bytes: &[u8]) -> std::io::Result<TradeRule> {
+    TradeRule::from_bytes(&mut &bytes[..])
 }
 
 // ----- TrackedOrder -----
@@ -1058,7 +1120,8 @@ impl WalOrderStore {
 
     fn compact_inner(inner: &mut WalInner) -> Result<()> {
         // Load current orders by replaying
-        let (orders, position_states) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
+        let (orders, position_states, _trade_rules) =
+            Self::load_from_disk(&inner.path, &inner.snap_path)?;
 
         // Write atomic snapshot
         Self::write_snapshot_file(&inner.snap_path, &orders, &position_states)?;
@@ -1089,6 +1152,7 @@ impl WalOrderStore {
     fn load_from_disk(wal_path: &Path, snap_path: &Path) -> Result<LoadResult> {
         let mut orders_map: HashMap<String, TrackedOrder> = HashMap::new();
         let mut position_states: HashMap<u64, (PositionRef, PositionState)> = HashMap::new();
+        let mut trade_rules: Vec<TradeRule> = Vec::new();
 
         // 1. Read snapshot if it exists
         if snap_path.exists() {
@@ -1241,6 +1305,17 @@ impl WalOrderStore {
                             // Apply last-write-wins: later records override earlier ones
                             position_states.insert(record.0.position_id, record);
                         }
+                        REC_TRADE_RULE => {
+                            let rule = decode_trade_rule(&payload).map_err(|e| {
+                                Mt5Error::PersistenceError(format!(
+                                    "Failed to deserialize trade rule in WAL '{}': {e}",
+                                    wal_path.display()
+                                ))
+                            })?;
+                            // Last-write-wins: replace any existing rule for this client order ID
+                            trade_rules.retain(|r| r.client_order_id != rule.client_order_id);
+                            trade_rules.push(rule);
+                        }
                         other => {
                             return Err(Mt5Error::PersistenceError(format!(
                                 "Unknown record type {other} in WAL '{}'",
@@ -1252,7 +1327,11 @@ impl WalOrderStore {
             }
         }
 
-        Ok((orders_map.into_values().collect(), position_states))
+        Ok((
+            orders_map.into_values().collect(),
+            position_states,
+            trade_rules,
+        ))
     }
 }
 
@@ -1287,7 +1366,7 @@ impl OrderStore for WalOrderStore {
 
     fn load(&self) -> Result<Vec<TrackedOrder>> {
         let inner = self.inner.lock_recover();
-        let (orders, _position_states) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
+        let (orders, _, _) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
         Ok(orders)
     }
 
@@ -1325,14 +1404,14 @@ impl WalOrderStore {
     /// Load all persisted position-state transitions from the WAL and snapshot.
     pub fn load_position_states(&self) -> Result<HashMap<u64, (PositionRef, PositionState)>> {
         let inner = self.inner.lock_recover();
-        let (_orders, position_states) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
+        let (_, position_states, _) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
         Ok(position_states)
     }
 
     /// Return the highest `position_id` ever written to the WAL. Returns `None` when no position records exist.
     pub fn max_position_id(&self) -> Result<Option<u64>> {
         let inner = self.inner.lock_recover();
-        let (_orders, position_states) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
+        let (_, position_states, _) = Self::load_from_disk(&inner.path, &inner.snap_path)?;
         Ok(position_states.keys().copied().max())
     }
 
@@ -1341,6 +1420,24 @@ impl WalOrderStore {
         let bytes = encode_position_record(pos, &state);
         let mut inner = self.inner.lock_recover();
         Self::append_entry(&mut inner, REC_POSITION, &bytes, false)
+    }
+
+    /// Persist a trade-management rule to the WAL as a `REC_TRADE_RULE` frame.
+    pub fn record_trade_rule(&self, _symbol: &str, rule: &TradeRule) -> Result<()> {
+        let bytes = encode_trade_rule(rule);
+        let mut inner = self.inner.lock_recover();
+        Self::append_entry(&mut inner, REC_TRADE_RULE, &bytes, false)
+    }
+
+    /// Load all persisted trade rules from the WAL and snapshot, optionally filtered by symbol.
+    pub fn load_trade_rules(&self, symbol: &str) -> Result<Vec<TradeRule>> {
+        let inner = self.inner.lock_recover();
+        let (_orders, _position_states, trade_rules) =
+            Self::load_from_disk(&inner.path, &inner.snap_path)?;
+        Ok(trade_rules
+            .into_iter()
+            .filter(|r| r.symbol == symbol)
+            .collect())
     }
 }
 
@@ -1394,7 +1491,7 @@ pub fn migrate_json_to_wal(json_path: &Path, wal_path: &Path) -> Result<usize> {
 #[cfg(feature = "json-journal")]
 pub fn wal_to_json(wal_path: &Path, json_path: &Path) -> Result<usize> {
     let snap_path = wal_path.with_extension("snap");
-    let (orders, _position_states) = WalOrderStore::load_from_disk(wal_path, &snap_path)?;
+    let (orders, _, _) = WalOrderStore::load_from_disk(wal_path, &snap_path)?;
     let count = orders.len();
 
     let json_store = crate::journal::JsonFileStore::new(json_path);

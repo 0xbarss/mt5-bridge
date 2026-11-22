@@ -24,6 +24,9 @@ enum Cli {
     Stats(StatsArgs),
     /// Stream trade/tick events (requires the `async` feature).
     Tail(TailArgs),
+    /// Print the wire layout (sizes and field offsets) and JSON Schema for the
+    /// MT5 wire-protocol types (requires the `schema` feature).
+    Schema(SchemaArgs),
     /// Verify a WAL store (requires the `wal` feature).
     Wal(WalArgs),
 }
@@ -56,6 +59,9 @@ struct TailArgs {
 }
 
 #[derive(Parser, Debug)]
+struct SchemaArgs {}
+
+#[derive(Parser, Debug)]
 struct WalArgs {
     #[command(subcommand)]
     command: WalCommand,
@@ -76,6 +82,7 @@ fn main() -> ExitCode {
         Cli::Doctor(args) => run_doctor(args),
         Cli::Stats(args) => run_stats(args),
         Cli::Tail(args) => run_tail(args),
+        Cli::Schema(args) => run_schema(args),
         Cli::Wal(args) => run_wal(args),
     };
     match result {
@@ -171,6 +178,20 @@ async fn run_tail_async(args: TailArgs) -> Result<(), Box<dyn std::error::Error>
     }
 
     Ok(())
+}
+
+fn run_schema(_args: SchemaArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "schema")]
+    {
+        println!("{}", mt5_bridge::schema::wire_layout_report());
+        println!("{}", mt5_bridge::schema::json_schema_report());
+        Ok(())
+    }
+    #[cfg(not(feature = "schema"))]
+    {
+        let _ = _args;
+        Err("schema requires the schema feature".into())
+    }
 }
 
 fn run_wal(args: WalArgs) -> Result<(), Box<dyn std::error::Error>> {

@@ -72,6 +72,8 @@ pub mod prelude;
 pub mod reconciliation;
 pub mod retry;
 pub mod risk;
+#[cfg(feature = "schema")]
+pub mod schema;
 pub mod session;
 pub mod sync;
 pub mod trade;
@@ -126,6 +128,8 @@ pub use reconciliation::{
 };
 pub use retry::RetryPolicy;
 pub use risk::{PreTradeDecision, RiskEngine, RiskLimits};
+#[cfg(feature = "schema")]
+pub use schema::{json_schema_report, wire_layout_report, wire_layouts, FieldLayout, TypeLayout};
 pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;
 pub use trade::{Bracket, TradeManager, TrailingStop};

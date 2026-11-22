@@ -12,11 +12,15 @@
 //!   through [`crate::Mt5Client::symbols`]/[`crate::Mt5Client::symbols_filtered`].
 //! - [`BookSnapshot`] / [`BookStream`] — assemble depth-of-book levels from
 //!   [`crate::types::BookEvent`]s, with imbalance and weighted-mid metrics.
+//! - [`CalendarEvent`] / [`NewsFilter`] — economic calendar events decoded from
+//!   `CMD_CALENDAR_EVENTS` and a windowed news filter for trade gating.
 
 pub mod bars;
 pub mod book;
+pub mod calendar;
 pub mod symbols;
 
 pub use bars::{BarAggregator, BarCache, BarKind};
 pub use book::{BookLevel, BookSnapshot, BookStream};
+pub use calendar::{CalendarEvent, NewsFilter};
 pub use symbols::SymbolRegistry;

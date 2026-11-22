@@ -77,7 +77,9 @@ impl Eq for PriceKey {}
 
 impl Ord for PriceKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Less)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Less)
     }
 }
 

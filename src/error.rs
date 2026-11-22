@@ -47,6 +47,12 @@ pub enum Mt5Error {
     #[error("SymbolSelect query failed for symbol '{0}'")]
     SymbolSelectFailed(String),
 
+    #[error("Calendar events query failed (status {0})")]
+    CalendarEventsFailed(i32),
+
+    #[error("Calendar countries query failed (status {0})")]
+    CalendarCountriesFailed(i32),
+
     #[error("OrderSend failed for symbol '{symbol}' (retcode {retcode}: {description})")]
     OrderSendFailed {
         symbol: String,

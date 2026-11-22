@@ -121,6 +121,8 @@ impl Mt5Client {
             fn_symbols_total,
             fn_symbols_get,
             fn_symbol_select,
+            fn_calendar_events,
+            fn_calendar_countries,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -264,6 +266,22 @@ impl Mt5Client {
                 .map_err(|_| warn!("MT5 DLL: 'SymbolSelect' not found — symbol selection disabled"))
                 .ok();
 
+            let fn_calendar_events: Option<FnCalendarEvents> = lib
+                .get::<FnCalendarEvents>(b"CalendarEvents\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'CalendarEvents' not found — economic calendar disabled")
+                })
+                .ok();
+
+            let fn_calendar_countries: Option<FnCalendarCountries> = lib
+                .get::<FnCalendarCountries>(b"CalendarCountries\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'CalendarCountries' not found — calendar countries disabled")
+                })
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -284,6 +302,8 @@ impl Mt5Client {
                 fn_symbols_total,
                 fn_symbols_get,
                 fn_symbol_select,
+                fn_calendar_events,
+                fn_calendar_countries,
             )
         };
 
@@ -471,6 +491,8 @@ impl Mt5Client {
             fn_symbols_total,
             fn_symbols_get,
             fn_symbol_select,
+            fn_calendar_events,
+            fn_calendar_countries,
             fn_positions,
             fn_orders,
             fn_deals,

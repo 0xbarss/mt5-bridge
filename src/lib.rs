@@ -98,7 +98,8 @@ pub use gateway::{
 pub use journal::JsonFileStore;
 pub use journal::OrderStore;
 pub use market::{
-    BarAggregator, BarCache, BarKind, BookLevel, BookSnapshot, BookStream, SymbolRegistry,
+    BarAggregator, BarCache, BarKind, BookLevel, BookSnapshot, BookStream, CalendarEvent,
+    NewsFilter, SymbolRegistry,
 };
 pub use position_book::{
     BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,

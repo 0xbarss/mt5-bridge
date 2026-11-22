@@ -96,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `symbols_filtered()`, and `symbol_select()`; new `src/market/symbols.rs` module with
     `SymbolRegistry` (refreshable in-memory symbol cache with refresh-on-reconnect hook);
     `SymbolRegistry` re-exported from crate root.
+- **Economic calendar and news filter**:
+  - Wire commands `CMD_CALENDAR_EVENTS` (25) and `CMD_CALENDAR_COUNTRIES` (26) added to
+    the Rust `ProtocolCmd`, the C++ DLL enum, and the MQL5 EA (verified by
+    `tests/protocol_consistency.rs`); DLL exports `CalendarEvents` and
+    `CalendarCountries`; EA dispatches them via `HandleCalendarEvents` and
+    `HandleCalendarCountries`.
+  - New `src/market/calendar.rs` module: `CalendarEvent` (`id`, `time`, `country`,
+    `currency`, `importance`, `title`, `actual`/`forecast`/`previous` as `Option<f64>`)
+    and `NewsFilter` (windowed gating by symbol, currency, minimum importance, and
+    before/after minutes), both re-exported from the crate root.
+  - `Mt5Client::calendar_events(from, to)` and `Mt5Client::calendar_countries()`;
+    new `CalendarEventsFailed` and `CalendarCountriesFailed` error variants.
 
 ### Changed
 

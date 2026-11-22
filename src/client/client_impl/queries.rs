@@ -1,6 +1,8 @@
 use crate::error::{Mt5Error, Result};
 use crate::ffi::*;
+use crate::market::calendar::parse_calendar_events;
 use crate::types::*;
+use crate::CalendarEvent;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
@@ -265,5 +267,65 @@ impl Mt5Client {
             return Err(Mt5Error::SymbolSelectFailed(symbol.to_string()));
         }
         Ok(())
+    }
+
+    /// Query economic calendar events for the UTC half-open interval `[from, to)`.
+    ///
+    /// Returns all events in the window. The FFI status carries the total event
+    /// count; the packed records are decoded from the buffer. An `id == 0`
+    /// record marks the end of the stream (the buffer is zero-initialised and
+    /// MT5 calendar ids are positive), so no trailing garbage is decoded.
+    pub fn calendar_events(&self, from: u64, to: u64) -> Result<Vec<CalendarEvent>> {
+        let fn_calendar_events = self
+            .fn_calendar_events
+            .ok_or(Mt5Error::UnsupportedFeature("CalendarEvents"))?;
+
+        let capacity = 16 * 1024 * 1024;
+        let mut buf = vec![0u8; capacity];
+
+        let total = unsafe {
+            fn_calendar_events(
+                from,
+                to,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as c_int,
+            )
+        };
+        if total < 0 {
+            return Err(Mt5Error::CalendarEventsFailed(total));
+        }
+
+        parse_calendar_events(&buf).map_err(Mt5Error::Other)
+    }
+
+    /// Query the countries that have economic calendar events.
+    ///
+    /// Returns country names (e.g. `"US"`, `"EU"`, `"JP"`) suitable for pairing
+    /// with [`NewsFilter::currencies`] gating.
+    pub fn calendar_countries(&self) -> Result<Vec<String>> {
+        let fn_calendar_countries = self
+            .fn_calendar_countries
+            .ok_or(Mt5Error::UnsupportedFeature("CalendarCountries"))?;
+
+        let capacity = 16 * 1024 * 1024;
+        let mut buf = vec![0u8; capacity];
+
+        let count =
+            unsafe { fn_calendar_countries(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        if count < 0 {
+            return Err(Mt5Error::CalendarCountriesFailed(count));
+        }
+
+        let mut countries = Vec::new();
+        let mut off = 0;
+        while off + 4 <= buf.len() {
+            let len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            if len == 0 || off + 4 + len > buf.len() {
+                break;
+            }
+            countries.push(String::from_utf8_lossy(&buf[off + 4..off + 4 + len]).to_string());
+            off += 4 + len;
+        }
+        Ok(countries)
     }
 }

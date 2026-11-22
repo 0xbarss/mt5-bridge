@@ -141,6 +141,8 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #define CMD_SYMBOLS_TOTAL     22
 #define CMD_SYMBOLS_GET       23
 #define CMD_SYMBOL_SELECT     24
+#define CMD_CALENDAR_EVENTS   25
+#define CMD_CALENDAR_COUNTRIES 26
 
 enum ENUM_SERVER_TIME_CONVENTION {
     SERVER_TIME_FIXED = 0,
@@ -2718,6 +2720,92 @@ void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
     SendResponse(h, ok ? 1 : -1, empty_uchar(), 0);
 }
 
+// ── Economic calendar handlers (protocol v9+) ────────────────────────────────
+
+// Request layout (must match CalendarEvents in bridge_dll/mt5_bridge.cpp):
+//   u64 from, u64 to (UTC seconds)
+// Response: status = total event count, payload = packed records:
+//   [u64 id][i64 time][u32 country_len][country][u32 currency_len][currency]
+//   [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
+//   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
+// The stream is terminated by a record with id == 0.
+void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    ulong from = 0, to = 0;
+    if (!SafeUnpackU64(payload, off, len, from) ||
+        !SafeUnpackU64(payload, off, len, to)) {
+        SendError(h);
+        return;
+    }
+
+    string country_filter[];
+    string currency_filter[];
+    MqlCalendarValue values[];
+    int total = CalendarValueHistory(country_filter, currency_filter,
+                                     (datetime)from, (datetime)to, values);
+    if (total < 0) {
+        SendError(h);
+        return;
+    }
+
+    uchar data[];
+    for (int i = 0; i < total; i++) {
+        PackU64(data, (ulong)values[i].id);
+        PackI64(data, (long)values[i].time);
+        PackStr(data, values[i].country);
+        PackStr(data, values[i].currency);
+        PackU8(data, (uchar)values[i].importance);
+        PackStr(data, values[i].name);
+        PackF64(data, values[i].actual);
+        PackU8(data, values[i].actual != 0.0 ? 1 : 0);
+        PackF64(data, values[i].forecast);
+        PackU8(data, values[i].forecast != 0.0 ? 1 : 0);
+        PackF64(data, values[i].previous);
+        PackU8(data, values[i].previous != 0.0 ? 1 : 0);
+    }
+    // End-of-stream terminator: id == 0.
+    PackU64(data, 0);
+    SendCount(h, total, data, (uint)ArraySize(data));
+}
+
+// Returns the countries that have calendar events. MT5 has no dedicated
+// "enumerate calendar countries" call, so we scan a wide history window and
+// de-duplicate the country field of every event.
+// Response: status = country count, payload = [u32 len][bytes] per country,
+// terminated by len == 0.
+void HandleCalendarCountries(long h) {
+    datetime now = TimeCurrent();
+    datetime from = now - 2 * 365 * 24 * 3600;
+    datetime to = now + 2 * 365 * 24 * 3600;
+
+    string country_filter[];
+    string currency_filter[];
+    MqlCalendarValue values[];
+    int total = CalendarValueHistory(country_filter, currency_filter, from, to, values);
+    if (total < 0) {
+        SendError(h);
+        return;
+    }
+
+    string countries[];
+    for (int i = 0; i < total; i++) {
+        string c = values[i].country;
+        if (StringLen(c) == 0) continue;
+        bool seen = false;
+        for (int k = 0; k < ArraySize(countries); k++) {
+            if (countries[k] == c) { seen = true; break; }
+        }
+        if (!seen) ArrayPush(countries, c);
+    }
+
+    uchar data[];
+    for (int i = 0; i < ArraySize(countries); i++) {
+        PackStr(data, countries[i]);
+    }
+    PackU32(data, 0); // end-of-stream terminator
+    SendCount(h, ArraySize(countries), data, (uint)ArraySize(data));
+}
+
 uchar empty_uchar() {
     uchar e[];
     return e;
@@ -2780,6 +2868,8 @@ bool DispatchRequest(long h) {
         case CMD_SYMBOLS_TOTAL:     HandleSymbolsTotal(h);                       break;
         case CMD_SYMBOLS_GET:       HandleSymbolsGet(h, payload, pay_len);       break;
         case CMD_SYMBOL_SELECT:     HandleSymbolSelect(h, payload, pay_len);     break;
+        case CMD_CALENDAR_EVENTS:   HandleCalendarEvents(h, payload, pay_len);   break;
+        case CMD_CALENDAR_COUNTRIES: HandleCalendarCountries(h);                break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

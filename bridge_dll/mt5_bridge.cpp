@@ -116,6 +116,8 @@ enum Cmd : uint32_t {
     CMD_SYMBOLS_TOTAL     = 22,
     CMD_SYMBOLS_GET       = 23,
     CMD_SYMBOL_SELECT     = 24,
+    CMD_CALENDAR_EVENTS   = 25,
+    CMD_CALENDAR_COUNTRIES = 26,
 };
 
 /* ── Request deadlines ──────────────────────────────────────────────────────
@@ -1301,6 +1303,83 @@ int SymbolSelect(const char* symbol, int enable) {
     std::string data;
     Outcome out = c->request(CMD_SYMBOL_SELECT, p.buf, st, data, query_timeout_sec());
     return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
+}
+
+/* ── Economic calendar (protocol v9+) ─────────────────────────────────────── */
+
+int CalendarEvents(uint64_t from, uint64_t to, char* out_buf, int out_buf_capacity) {
+    if (!out_buf || out_buf_capacity <= 0) return -1;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return -1;
+
+    Packer p;
+    p.u64(from);
+    p.u64(to);
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_CALENDAR_EVENTS, p.buf, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st < 0) return -1;
+
+    // The EA packs each record as:
+    //   [u64 id][i64 time][u32 country_len][country][u32 currency_len][currency]
+    //   [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
+    //   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
+    // and terminates the stream with an id == 0 record. Copy as many complete
+    // records as fit into the caller's buffer.
+    size_t copied = 0;
+    size_t off = 0;
+    while (off + 8 <= data.size()) {
+        uint64_t id = *reinterpret_cast<const uint64_t*>(data.data() + off);
+        if (id == 0) break; // end of stream
+        size_t rec_start = off;
+        off += 8; // id
+        off += 8; // time
+        if (off + 4 > data.size()) break;
+        uint32_t country_len = *reinterpret_cast<const uint32_t*>(data.data() + off);
+        off += 4 + static_cast<size_t>(country_len);
+        if (off + 4 > data.size()) break;
+        uint32_t currency_len = *reinterpret_cast<const uint32_t*>(data.data() + off);
+        off += 4 + static_cast<size_t>(currency_len);
+        off += 1; // importance
+        if (off + 4 > data.size()) break;
+        uint32_t title_len = *reinterpret_cast<const uint32_t*>(data.data() + off);
+        off += 4 + static_cast<size_t>(title_len);
+        off += 8 + 1; // actual + present
+        off += 8 + 1; // forecast + present
+        off += 8 + 1; // previous + present
+        size_t rec_size = off - rec_start;
+        if (copied + rec_size > static_cast<size_t>(out_buf_capacity)) break; // buffer full
+        std::memcpy(out_buf + copied, data.data() + rec_start, rec_size);
+        copied += rec_size;
+    }
+    return static_cast<int>(st);
+}
+
+int CalendarCountries(char* out_buf, int out_buf_capacity) {
+    if (!out_buf || out_buf_capacity <= 0) return -1;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return -1;
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_CALENDAR_COUNTRIES, {}, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st < 0) return -1;
+
+    // The EA packs each country as [u32 len][bytes], terminated by len == 0.
+    size_t copied = 0;
+    size_t off = 0;
+    while (off + 4 <= data.size()) {
+        uint32_t len = *reinterpret_cast<const uint32_t*>(data.data() + off);
+        if (len == 0) break; // end of stream
+        size_t entry_size = 4 + static_cast<size_t>(len);
+        if (off + entry_size > data.size()) break; // truncated entry
+        if (copied + entry_size > static_cast<size_t>(out_buf_capacity)) break; // buffer full
+        std::memcpy(out_buf + copied, data.data() + off, entry_size);
+        off += entry_size;
+        copied += entry_size;
+    }
+    return static_cast<int>(st);
 }
 
 } /* extern "C" */

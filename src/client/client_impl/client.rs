@@ -53,6 +53,8 @@ pub struct Mt5Client {
     pub(crate) fn_symbols_total: Option<FnSymbolsTotal>,
     pub(crate) fn_symbols_get: Option<FnSymbolsGet>,
     pub(crate) fn_symbol_select: Option<FnSymbolSelect>,
+    pub(crate) fn_calendar_events: Option<FnCalendarEvents>,
+    pub(crate) fn_calendar_countries: Option<FnCalendarCountries>,
     pub(crate) fn_positions: Option<FnPositions>,
     pub(crate) fn_orders: Option<FnOrders>,
     pub(crate) fn_deals: Option<FnDeals>,

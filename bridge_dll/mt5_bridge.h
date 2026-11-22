@@ -310,6 +310,17 @@ MT5_API int SymbolsTotal(void);
 MT5_API int SymbolsGet(uint32_t page, uint32_t page_size, char* out_buf, int out_buf_capacity);
 MT5_API int SymbolSelect(const char* symbol, int enable);
 
+/* Economic calendar (protocol v9+).
+ * CalendarEvents returns the total number of events as status and packs records
+ * into out_buf: [u64 id][i64 time][u32 country_len][country][u32 currency_len][currency]
+ * [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
+ * [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present] per record.
+ * A record with id == 0 terminates the stream. from/to are UTC seconds.
+ * CalendarCountries packs country names as [u32 len][bytes] repeated and returns
+ * the country count as status. */
+MT5_API int CalendarEvents(uint64_t from, uint64_t to, char* out_buf, int out_buf_capacity);
+MT5_API int CalendarCountries(char* out_buf, int out_buf_capacity);
+
 /* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);
 MT5_API int RegisterEventCallback(Mt5EventCallback cb);

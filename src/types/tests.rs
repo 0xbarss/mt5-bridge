@@ -3,6 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use super::*;
+use crate::constants::{EA_DEFAULT_MAGIC, EA_DEFAULT_MAGIC_TYPED};
 use crate::types::order_enums::OrderType;
 
 #[test]
@@ -207,4 +208,118 @@ fn test_price_rounding() {
     assert_eq!(sym.round_price(5000.13), 5000.25);
     assert_eq!(sym.round_price(5000.37), 5000.25);
     assert_eq!(sym.round_price(5000.38), 5000.50);
+}
+
+#[test]
+fn test_order_request_builder_market_buy() {
+    let req = OrderRequest::market_buy("EURUSD", Volume::lots(0.10))
+        .stop_loss(Price(1.0800))
+        .take_profit(Price(1.0900))
+        .deviation(20)
+        .comment("breakout")
+        .client_order_id("eurusd-breakout-001")
+        .build()
+        .expect("valid order request");
+
+    assert_eq!(req.symbol, "EURUSD");
+    assert_eq!(req.order_type, OrderType::Buy);
+    assert_eq!(req.volume, 0.10);
+    assert_eq!(req.price, 0.0);
+    assert_eq!(req.stop_loss, 1.0800);
+    assert_eq!(req.take_profit, 1.0900);
+    assert_eq!(req.comment, "breakout");
+    assert_eq!(req.deviation, Some(20));
+    assert_eq!(req.expiration, None);
+    assert_eq!(req.magic, None);
+    assert_eq!(req.client_order_id.as_deref(), Some("eurusd-breakout-001"));
+}
+
+#[test]
+fn test_order_request_builder_market_sell() {
+    let req = OrderRequest::market_sell("GBPUSD", Volume::lots(0.25))
+        .stop_loss(Price(1.2700))
+        .take_profit(Price(1.2600))
+        .magic(EA_DEFAULT_MAGIC_TYPED)
+        .build()
+        .expect("valid order request");
+
+    assert_eq!(req.symbol, "GBPUSD");
+    assert_eq!(req.order_type, OrderType::Sell);
+    assert_eq!(req.volume, 0.25);
+    assert_eq!(req.stop_loss, 1.2700);
+    assert_eq!(req.take_profit, 1.2600);
+    assert_eq!(req.magic, Some(EA_DEFAULT_MAGIC));
+}
+
+#[test]
+fn test_order_request_builder_pending() {
+    let req = OrderRequestBuilder::pending(
+        "EURUSD",
+        OrderType::BuyLimit,
+        Volume::lots(0.10),
+        Price(1.0800),
+    )
+    .stop_loss(Price(1.0750))
+    .take_profit(Price(1.0900))
+    .expiration(1800000000)
+    .build()
+    .expect("valid pending order");
+
+    assert_eq!(req.symbol, "EURUSD");
+    assert_eq!(req.order_type, OrderType::BuyLimit);
+    assert_eq!(req.volume, 0.10);
+    assert_eq!(req.price, 1.0800);
+    assert_eq!(req.stop_loss, 1.0750);
+    assert_eq!(req.take_profit, 1.0900);
+    assert_eq!(req.expiration, Some(1800000000));
+}
+
+#[test]
+fn test_order_request_builder_validation_empty_symbol() {
+    let err = OrderRequest::market_buy("", Volume::lots(0.10))
+        .stop_loss(Price(1.0800))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("symbol cannot be empty"));
+}
+
+#[test]
+fn test_order_request_builder_validation_zero_volume() {
+    let err = OrderRequest::market_buy("EURUSD", Volume::lots(0.0))
+        .stop_loss(Price(1.0800))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("volume"));
+}
+
+#[test]
+fn test_order_request_builder_validation_nan_price() {
+    let err = OrderRequest::market_buy("EURUSD", Volume::lots(0.10))
+        .stop_loss(Price(f64::NAN))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("stop loss"));
+}
+
+#[test]
+fn test_order_request_builder_defaults() {
+    let req = OrderRequest::market_buy("EURUSD", Volume::lots(0.10))
+        .build()
+        .expect("valid order request");
+
+    assert_eq!(req.price, 0.0);
+    assert_eq!(req.stop_loss, 0.0);
+    assert_eq!(req.take_profit, 0.0);
+    assert_eq!(req.comment, "");
+    assert_eq!(req.deviation, None);
+    assert_eq!(req.expiration, None);
+    assert_eq!(req.magic, None);
+    assert_eq!(req.client_order_id, None);
+}
+
+#[test]
+fn test_volume_lots_constructor() {
+    let v = Volume::lots(0.50);
+    assert_eq!(v.into_inner(), 0.50);
+    assert_eq!(v, Volume(0.50));
 }

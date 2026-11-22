@@ -32,7 +32,7 @@ pub use history::HistoryResult;
 pub use level::Level;
 pub use mismatch::{approx_price_eq, approx_volume_eq, AttributeMismatch, MismatchKind};
 pub use order_enums::{OrderState, OrderType, TradeStatus};
-pub use order_request::OrderRequest;
+pub use order_request::{OrderRequest, OrderRequestBuilder};
 pub use position::Position;
 pub use price_ticks::{calculate_sl_ticks, calculate_tp_ticks, price_to_ticks, ticks_to_price};
 pub use rate::Rate;

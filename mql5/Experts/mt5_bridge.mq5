@@ -2628,15 +2628,9 @@ void HandlePing(long h) {
 // Returns the total number of symbols available in Market Watch.
 // Response: status = total count, no payload.
 void HandleSymbolsTotal(long h) {
-    // SymbolsTotal() is not available in this MT5 build.
-    // Full implementation for real terminals:
-    /*
     int total = SymbolsTotal();
     uchar empty[1];
     SendResponse(h, total, empty, 0);
-    */
-    uchar empty[1];
-    SendResponse(h, 0, empty, 0);
 }
 
 // Returns a page of symbols as packed entries:
@@ -2645,9 +2639,6 @@ void HandleSymbolsTotal(long h) {
 //     u32 page, u32 page_size
 // Response: status = total count, payload = packed entries for this page.
 void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
-    // Symbol discovery (SymbolsTotal/SymbolName/SymbolInfoDouble/SymbolInfoInteger/SymbolInfoTick)
-    // is not available in this MT5 build. Full implementation preserved below for real terminals:
-    /*
     int off = 0;
     uint page = 0, page_size = 0;
     if (!SafeUnpackU32(payload, off, len, page) ||
@@ -2710,9 +2701,6 @@ void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
     }
 
     SendResponse(h, total, data, (uint)ArraySize(data));
-    */
-    uchar empty[1];
-    SendResponse(h, 0, empty, 0);
 }
 
 // Selects or deselects a symbol in Market Watch.
@@ -2744,9 +2732,6 @@ void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
 //   [f64 forecast][u8 forecast_present][f64 previous][u8 previous_present]
 // The stream is terminated by a record with id == 0.
 void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
-    // CalendarValueHistory / MqlCalendarValue is not available in this MT5 build.
-    // Full implementation preserved below for real terminals:
-    /*
     int off = 0;
     ulong from = 0, to = 0;
     if (!SafeUnpackU64(payload, off, len, from) ||
@@ -2783,9 +2768,6 @@ void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
     // End-of-stream terminator: id == 0.
     PackU64(data, 0);
     SendResponse(h, total, data, (uint)ArraySize(data));
-    */
-    uchar empty[1];
-    SendResponse(h, 0, empty, 0);
 }
 
 // Returns the countries that have calendar events. MT5 has no dedicated
@@ -2794,9 +2776,6 @@ void HandleCalendarEvents(long h, const uchar &payload[], uint len) {
 // Response: status = country count, payload = [u32 len][bytes] per country,
 // terminated by len == 0.
 void HandleCalendarCountries(long h) {
-    // CalendarValueHistory / MqlCalendarValue is not available in this MT5 build.
-    // Full implementation preserved below for real terminals:
-    /*
     datetime now = TimeCurrent();
     datetime from = now - 2 * 365 * 24 * 3600;
     datetime to = now + 2 * 365 * 24 * 3600;
@@ -2827,9 +2806,6 @@ void HandleCalendarCountries(long h) {
     }
     PackU32(data, 0); // end-of-stream terminator
     SendResponse(h, ArraySize(countries), data, (uint)ArraySize(data));
-    */
-    uchar empty[1];
-    SendResponse(h, 0, empty, 0);
 }
 
 // Returns bridge-side statistics. The DLL tracks the actual counters

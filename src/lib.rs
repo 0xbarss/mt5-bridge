@@ -74,6 +74,9 @@ pub mod sync;
 pub mod trade;
 pub mod types;
 
+#[cfg(feature = "serde_json")]
+pub mod audit;
+
 #[cfg(feature = "wal")]
 pub mod wal;
 
@@ -85,6 +88,8 @@ pub mod gateway;
 #[cfg(feature = "async")]
 pub mod stream;
 
+#[cfg(feature = "serde_json")]
+pub use audit::{AuditEvent, AuditLog, VerifyError};
 pub use backend::{
     DryRunBackend, DryRunConfig, FillModel, ReplayBackend, ReplayInput, ReplayOrder, TradingBackend,
 };

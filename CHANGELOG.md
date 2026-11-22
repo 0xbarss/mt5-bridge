@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structured audit log with hash chaining**:
+  - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
+    `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.
+  - `AuditLog::append` writes one chained entry per call; `AuditLog::verify` replays the
+    file and detects tampering (modified hash or payload) and truncation (a truncated or
+    unparseable final line).
+  - `AuditLog` implements `OrderObserver`, so it can be attached to an `OrderManager` via
+    `with_observer` to audit every order-lifecycle decision (submit, send outcome,
+    reconciliation, acknowledgement) plus explicit risk-reject and config-change records.
+  - `AuditEvent`, `AuditLog`, and `VerifyError` are re-exported from the crate root
+    (requires the `serde_json` feature).
+
 - **One-client-per-process diagnostics**:
   - `Mt5Client::process_connection_count()` reports the number of live clients in the
     current process (`0` or `1`).

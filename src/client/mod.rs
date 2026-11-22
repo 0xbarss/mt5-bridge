@@ -1,3 +1,7 @@
+#[cfg(feature = "async")]
+pub mod async_client;
+#[cfg(feature = "async")]
+pub use async_client::AsyncMt5Client;
 pub mod client_impl;
 pub mod dll_path;
 pub mod pipe;

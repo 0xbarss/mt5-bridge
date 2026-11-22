@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `EA_DEFAULT_MAGIC_TYPED`) for `use mt5_bridge::prelude::*;`.
   - `Volume::lots(f64)` convenience constructor added.
 
+- **Async client facade**:
+  - New `AsyncMt5Client` wrapping `Mt5Client` with `async` methods
+    (`connect_with_secret`, `account_info`, `copy_bars`).
+  - Each call is offloaded via `spawn_blocking` through `BlockingExecutor`, so the
+    Tokio runtime is never blocked by synchronous DLL pipe I/O.
+  - New `src/client/async_client.rs` module, gated on the `async` feature and
+    re-exported from the crate root.
+
 - **Structured audit log with hash chaining**:
   - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
     `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.

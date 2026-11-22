@@ -95,6 +95,8 @@ pub use audit::{AuditEvent, AuditLog, VerifyError};
 pub use backend::{
     DryRunBackend, DryRunConfig, FillModel, ReplayBackend, ReplayInput, ReplayOrder, TradingBackend,
 };
+#[cfg(feature = "async")]
+pub use client::AsyncMt5Client;
 pub use client::Mt5Client;
 pub use constants::*;
 pub use error::{classify_retcode, mt5_retcode_description, Mt5Error, Result, RetcodeClass};

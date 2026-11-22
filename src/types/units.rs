@@ -331,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde_json")]
     fn serde_round_trip() {
         let p: Price = Price::try_from(1.10).unwrap();
         let json = serde_json::to_string(&p).unwrap();

@@ -43,6 +43,11 @@ struct DoctorArgs {
     /// Path to the WAL store to verify.
     #[arg(long)]
     wal: Option<PathBuf>,
+    /// Allow loading an unpinned DLL (development escape hatch; requires the
+    /// allow-unpinned-dll feature). Overrides MT5_DLL_REQUIRE_HASH.
+    #[cfg(feature = "allow-unpinned-dll")]
+    #[arg(long)]
+    allow_unpinned_dll: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -95,6 +100,11 @@ fn main() -> ExitCode {
 }
 
 fn run_doctor(args: DoctorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "allow-unpinned-dll")]
+    if args.allow_unpinned_dll {
+        std::env::set_var("MT5_DLL_ALLOW_UNPINNED", "1");
+    }
+
     let dll_path = resolve_dll_path(args.dll.as_deref())
         .ok_or_else(|| "no bridge DLL found; pass --dll or set MT5_DLL_PATH".to_string())?;
 

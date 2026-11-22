@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `tests/protocol_docs.rs` snapshot test validates generated sizes and offsets
     against the documented wire layout (requires the `schema` feature).
 
+- **Mandatory DLL hash pinning in release builds**:
+  - `MT5_DLL_REQUIRE_HASH` defaults to `true` in release builds
+    (`cfg!(not(debug_assertions))`) unless explicitly set to `false`; debug builds
+    default to `false`.
+  - `verify_dll_hash` reads the expected hash from `MT5_DLL_SHA256`, falling back
+    to a `<dll_name>.sha256` manifest file next to the DLL.
+  - New `MT5_DLL_ALLOW_UNPINNED` environment variable skips hash verification
+    entirely (development escape hatch).
+  - New `allow-unpinned-dll` Cargo feature gates the `--allow-unpinned-dll`
+    escape-hatch flag on the `mt5-bridge doctor` CLI subcommand.
+
 - **Structured audit log with hash chaining**:
   - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
     `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.

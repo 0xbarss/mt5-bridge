@@ -123,6 +123,7 @@ impl Mt5Client {
             fn_symbol_select,
             fn_calendar_events,
             fn_calendar_countries,
+            fn_stats,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -282,6 +283,12 @@ impl Mt5Client {
                 })
                 .ok();
 
+            let fn_stats: Option<FnStats> = lib
+                .get::<FnStats>(b"Stats\0")
+                .map(|s| *s)
+                .map_err(|_| warn!("MT5 DLL: 'Stats' not found — bridge statistics disabled"))
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -304,6 +311,7 @@ impl Mt5Client {
                 fn_symbol_select,
                 fn_calendar_events,
                 fn_calendar_countries,
+                fn_stats,
             )
         };
 
@@ -493,6 +501,7 @@ impl Mt5Client {
             fn_symbol_select,
             fn_calendar_events,
             fn_calendar_countries,
+            fn_stats,
             fn_positions,
             fn_orders,
             fn_deals,

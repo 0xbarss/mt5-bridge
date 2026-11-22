@@ -118,6 +118,7 @@ enum Cmd : uint32_t {
     CMD_SYMBOL_SELECT     = 24,
     CMD_CALENDAR_EVENTS   = 25,
     CMD_CALENDAR_COUNTRIES = 26,
+    CMD_STATS             = 27,
 };
 
 /* ── Request deadlines ──────────────────────────────────────────────────────
@@ -192,6 +193,18 @@ static std::condition_variable    g_event_cv;
 static Mt5EventCallback           g_event_callback = nullptr;
 static std::atomic<uint64_t>      g_events_dropped_total{0};
 static std::atomic<bool>          g_stopping{false};
+
+/* ── Bridge statistics counters ────────────────────────────────────────────── */
+static std::atomic<uint64_t>      g_requests_total{0};
+static std::atomic<uint64_t>      g_tick_drops{0};
+static std::atomic<uint64_t>      g_trade_drops{0};
+static std::atomic<uint64_t>      g_book_drops{0};
+static std::atomic<uint64_t>      g_bar_drops{0};
+static std::atomic<uint32_t>      g_tick_queue_depth{0};
+static std::atomic<uint32_t>      g_trade_queue_depth{0};
+static std::atomic<int32_t>       g_last_error{0};
+static std::chrono::steady_clock::time_point g_start_time =
+    std::chrono::steady_clock::now();
 
 /* ── Pending Request Table ────────────────────────────────────────────────── */
 
@@ -280,6 +293,8 @@ public:
             return Outcome::NOT_CONNECTED;
         }
 
+        g_requests_total.fetch_add(1, std::memory_order_relaxed);
+
         uint32_t req_id = next_req_id_.fetch_add(1, std::memory_order_relaxed);
         if (req_id == 0) {
             req_id = next_req_id_.fetch_add(1, std::memory_order_relaxed);
@@ -363,6 +378,9 @@ public:
 
         out_status = status;
         out_data   = std::move(data);
+        if (out_status < 0) {
+            g_last_error.store(out_status, std::memory_order_relaxed);
+        }
         return Outcome::RESPONDED;
     }
 
@@ -506,8 +524,19 @@ private:
                     if (g_event_queue.size() >= MAX_EVENT_QUEUE) {
                         g_event_queue.pop();
                         g_events_dropped_total.fetch_add(1, std::memory_order_relaxed);
+                        switch (hdr.id) {
+                            case EVENT_TICK:  g_tick_drops.fetch_add(1, std::memory_order_relaxed); break;
+                            case EVENT_TRADE: g_trade_drops.fetch_add(1, std::memory_order_relaxed); break;
+                            case EVENT_BOOK:  g_book_drops.fetch_add(1, std::memory_order_relaxed); break;
+                            case EVENT_BAR:   g_bar_drops.fetch_add(1, std::memory_order_relaxed); break;
+                        }
                     }
                     g_event_queue.push({hdr.id, std::move(payload)});
+                    switch (hdr.id) {
+                        case EVENT_TICK:  g_tick_queue_depth.fetch_add(1, std::memory_order_relaxed); break;
+                        case EVENT_TRADE: g_trade_queue_depth.fetch_add(1, std::memory_order_relaxed); break;
+                        default: break;
+                    }
                     g_event_cv.notify_one();
                 }
             }
@@ -1213,6 +1242,11 @@ int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_
     // afterwards.
     QueuedRawEvent ev = std::move(front);
     g_event_queue.pop();
+    switch (ev.event_type) {
+        case EVENT_TICK:  g_tick_queue_depth.fetch_sub(1, std::memory_order_relaxed); break;
+        case EVENT_TRADE: g_trade_queue_depth.fetch_sub(1, std::memory_order_relaxed); break;
+        default: break;
+    }
 
     *out_event_type = ev.event_type;
     if (n > 0) {
@@ -1380,6 +1414,27 @@ int CalendarCountries(char* out_buf, int out_buf_capacity) {
         copied += entry_size;
     }
     return static_cast<int>(st);
+}
+
+int Stats(char* out_buf, int out_buf_capacity) {
+    if (!out_buf || out_buf_capacity < static_cast<int>(sizeof(Mt5Stats))) return -1;
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - g_start_time).count();
+
+    Mt5Stats st{};
+    st.uptime_secs     = static_cast<uint64_t>(uptime);
+    st.requests_total  = g_requests_total.load(std::memory_order_relaxed);
+    st.tick_drops      = g_tick_drops.load(std::memory_order_relaxed);
+    st.trade_drops     = g_trade_drops.load(std::memory_order_relaxed);
+    st.book_drops      = g_book_drops.load(std::memory_order_relaxed);
+    st.bar_drops       = g_bar_drops.load(std::memory_order_relaxed);
+    st.tick_queue_depth = g_tick_queue_depth.load(std::memory_order_relaxed);
+    st.trade_queue_depth = g_trade_queue_depth.load(std::memory_order_relaxed);
+    st.last_error      = g_last_error.load(std::memory_order_relaxed);
+    st.protocol        = MT5_BRIDGE_PROTOCOL_VERSION;
+
+    std::memcpy(out_buf, &st, sizeof(st));
+    return 1;
 }
 
 } /* extern "C" */

@@ -77,6 +77,9 @@ pub mod types;
 #[cfg(feature = "wal")]
 pub mod wal;
 
+#[cfg(feature = "metrics")]
+pub mod telemetry;
+
 #[cfg(feature = "async")]
 pub mod gateway;
 #[cfg(feature = "async")]
@@ -116,7 +119,7 @@ pub use trade::{Bracket, TradeManager, TrailingStop};
 pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
-    BookEvent, Deal, DealEntry, EventEffect, Fill, HistoryResult, Level, MismatchKind,
+    BookEvent, BridgeStats, Deal, DealEntry, EventEffect, Fill, HistoryResult, Level, MismatchKind,
     OrderRequest, OrderState, OrderType, PingResult, Position, Rate, RejectionEvidence, StreamMode,
     SymbolInfo, Tick, Timeframe, TrackedOrder, TradeEvent, TradeResult, TradeRule, TradeStatus,
     WorkingOrder, MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX,

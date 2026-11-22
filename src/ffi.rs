@@ -339,6 +339,25 @@ impl Default for Mt5BarEvent {
     }
 }
 
+/// Bridge-wide statistics snapshot (64 bytes, packed).
+///
+/// Returned by `CMD_STATS` (27). Mirrors the `Mt5Stats` struct in
+/// `bridge_dll/mt5_bridge.h`.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mt5Stats {
+    pub uptime_secs: u64,
+    pub requests_total: u64,
+    pub tick_drops: u64,
+    pub trade_drops: u64,
+    pub book_drops: u64,
+    pub bar_drops: u64,
+    pub tick_queue_depth: u32,
+    pub trade_queue_depth: u32,
+    pub last_error: i32,
+    pub protocol: u32,
+}
+
 /// Packet kind on the wire (protocol v5+).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +442,7 @@ const_assert_eq!(std::mem::size_of::<Mt5TickEvent>(), 88);
 const_assert_eq!(std::mem::size_of::<Mt5TradeEvent>(), 176);
 const_assert_eq!(std::mem::size_of::<Mt5BookEvent>(), 72);
 const_assert_eq!(std::mem::size_of::<Mt5BarEvent>(), 96);
+const_assert_eq!(std::mem::size_of::<Mt5Stats>(), 64);
 
 // The pump buffer is allocated from MAX_EVENT_SIZE; this pins the documented
 // 176-byte value so any future event layout change is noticed here.
@@ -441,6 +461,7 @@ assert_eq_size!(Mt5TickEvent, [u8; 88]);
 assert_eq_size!(Mt5TradeEvent, [u8; 176]);
 assert_eq_size!(Mt5BookEvent, [u8; 72]);
 assert_eq_size!(Mt5BarEvent, [u8; 96]);
+assert_eq_size!(Mt5Stats, [u8; 64]);
 
 // Function pointer signatures for dynamic library loading.
 pub type FnInit = unsafe extern "C" fn(i64, *const c_char, *const c_char) -> c_int;
@@ -504,6 +525,7 @@ pub type FnRegisterEventCallback = unsafe extern "C" fn(Mt5EventCallback) -> c_i
 pub type FnPollEvent = unsafe extern "C" fn(*mut u16, *mut u8, u32, *mut u32, u32) -> c_int;
 pub type FnEventsDroppedTotal = unsafe extern "C" fn() -> u64;
 pub type FnGetOrphanCount = unsafe extern "C" fn() -> u64;
+pub type FnStats = unsafe extern "C" fn(*mut c_char, c_int) -> c_int;
 
 /// Protocol command IDs defined in `mt5_bridge.cpp` and `mt5_bridge.mq5`.
 #[repr(u32)]
@@ -535,6 +557,7 @@ pub enum ProtocolCmd {
     SymbolSelect = 24,
     CalendarEvents = 25,
     CalendarCountries = 26,
+    Stats = 27,
 }
 
 #[cfg(test)]

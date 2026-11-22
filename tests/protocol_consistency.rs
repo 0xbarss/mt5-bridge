@@ -100,6 +100,7 @@ fn command_ids_agree_across_rust_dll_and_ea() {
         ("CMD_SYMBOL_SELECT", ProtocolCmd::SymbolSelect),
         ("CMD_CALENDAR_EVENTS", ProtocolCmd::CalendarEvents),
         ("CMD_CALENDAR_COUNTRIES", ProtocolCmd::CalendarCountries),
+        ("CMD_STATS", ProtocolCmd::Stats),
     ];
     for (name, cmd) in table {
         assert_eq!(cpp_enum(&cpp, name), cmd as u64, "DLL {name}");
@@ -113,12 +114,14 @@ fn command_ids_agree_across_rust_dll_and_ea() {
     assert!(
         ea.contains("case CMD_CALENDAR_COUNTRIES:") && ea.contains("void HandleCalendarCountries(")
     );
+    assert!(ea.contains("case CMD_STATS:") && ea.contains("void HandleStats("));
     // …and the DLL exports the new functions.
     assert!(cpp.contains("int SymbolsTotal(void)"));
     assert!(cpp.contains("int SymbolsGet(uint32_t page"));
     assert!(cpp.contains("int SymbolSelect(const char* symbol, int enable)"));
     assert!(cpp.contains("int CalendarEvents(uint64_t from"));
     assert!(cpp.contains("int CalendarCountries(char* out_buf"));
+    assert!(cpp.contains("int Stats(char* out_buf"));
     // …and the EA actually dispatches the commands.
     assert!(ea.contains("case CMD_DEALS_GET:") && ea.contains("void HandleDealsGet("));
     assert!(ea.contains("case CMD_SUBSCRIBE_TICKS:") && ea.contains("void HandleSubscribeTicks("));

@@ -25,6 +25,7 @@ sha2 = "0.10"
 hex = "0.4"
 dunce = "1.0"
 arc-swap = "1.7"
+prometheus = { version = "0.13", optional = true }
 
 [features]
 default = ["async", "serde_json", "wal"]
@@ -32,6 +33,7 @@ async = ["dep:tokio"]
 wal = []
 json-journal = ["dep:serde_json"]
 serde_json = ["json-journal"]
+metrics = ["dep:prometheus"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }

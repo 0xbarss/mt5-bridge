@@ -109,6 +109,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Mt5Client::calendar_events(from, to)` and `Mt5Client::calendar_countries()`;
     new `CalendarEventsFailed` and `CalendarCountriesFailed` error variants.
 
+  - **Bridge statistics via `CMD_STATS` (27)**:
+    - New `ProtocolCmd::Stats` command ID, `Mt5Stats` wire struct (64 bytes, packed),
+      `BridgeStats` high-level snapshot, `Mt5Client::stats()`, and `StatsFailed` error.
+    - DLL exports `Stats()` returning `Mt5Stats` (uptime, requests, per-type drops,
+      queue depths, last error, protocol version); tracked across request handling
+      and the event queue.
+    - MQL5 EA dispatches `CMD_STATS` via `HandleStats()`; protocol consistency test
+      verifies command ID agreement across Rust, DLL, and EA sources plus dispatch.
+    - New `metrics` feature backed by `prometheus`: process-wide registry with
+      `requests_total`, `drops_total`, and `queue_depth` metrics, plus
+      `prometheus::encode()` text-format export (`src/telemetry/`).
+    - Verified in `tests/protocol_consistency.rs`.
+
 ### Changed
 
 - `Mt5Error::AlreadyConnected` now reads "a client is already connected in this process;

@@ -182,6 +182,21 @@ typedef struct {
     uint64_t event_seq;
 } Mt5BarEvent;           /* 96 bytes */
 
+/* Bridge-wide statistics snapshot (64 bytes, packed, protocol v9+).
+ * Returned by CMD_STATS (27). Mirrors src/ffi.rs Mt5Stats. */
+typedef struct {
+    uint64_t uptime_secs;
+    uint64_t requests_total;
+    uint64_t tick_drops;
+    uint64_t trade_drops;
+    uint64_t book_drops;
+    uint64_t bar_drops;
+    uint32_t tick_queue_depth;
+    uint32_t trade_queue_depth;
+    int32_t  last_error;
+    uint32_t protocol;
+} Mt5Stats;               /* 64 bytes */
+
 #pragma pack(pop)
 
 /* Protocol version for wire handshake compatibility checks. */
@@ -224,6 +239,7 @@ static_assert(sizeof(Mt5TickEvent) == 88, "Mt5TickEvent size must be exactly 88 
 static_assert(sizeof(Mt5TradeEvent) == 176, "Mt5TradeEvent size must be exactly 176 bytes");
 static_assert(sizeof(Mt5BookEvent) == 72, "Mt5BookEvent size must be exactly 72 bytes");
 static_assert(sizeof(Mt5BarEvent) == 96, "Mt5BarEvent size must be exactly 96 bytes");
+static_assert(sizeof(Mt5Stats) == 64, "Mt5Stats size must be exactly 64 bytes");
 #endif
 
 #ifdef __cplusplus
@@ -320,6 +336,11 @@ MT5_API int SymbolSelect(const char* symbol, int enable);
  * the country count as status. */
 MT5_API int CalendarEvents(uint64_t from, uint64_t to, char* out_buf, int out_buf_capacity);
 MT5_API int CalendarCountries(char* out_buf, int out_buf_capacity);
+
+/* Bridge statistics (protocol v9+).
+ * Stats packs an Mt5Stats struct into out_buf and returns 1 on success,
+ * -1 on failure. */
+MT5_API int Stats(char* out_buf, int out_buf_capacity);
 
 /* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);

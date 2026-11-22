@@ -2,6 +2,8 @@ use crate::error::{Mt5Error, Result};
 use crate::ffi::*;
 use crate::types::*;
 use std::collections::HashMap;
+use std::os::raw::{c_char, c_int};
+use std::ptr::read_unaligned;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,6 +57,7 @@ pub struct Mt5Client {
     pub(crate) fn_symbol_select: Option<FnSymbolSelect>,
     pub(crate) fn_calendar_events: Option<FnCalendarEvents>,
     pub(crate) fn_calendar_countries: Option<FnCalendarCountries>,
+    pub(crate) fn_stats: Option<FnStats>,
     pub(crate) fn_positions: Option<FnPositions>,
     pub(crate) fn_orders: Option<FnOrders>,
     pub(crate) fn_deals: Option<FnDeals>,
@@ -227,6 +230,26 @@ impl Mt5Client {
             server_time_secs: chrono::Utc::now().timestamp(),
             protocol: crate::ffi::PROTOCOL_VERSION,
         })
+    }
+
+    /// Query bridge-wide statistics (queue depths, drop counts, uptime, protocol version).
+    ///
+    /// Returns a snapshot of bridge-side observability counters. Requires the
+    /// `Stats` export in the loaded DLL; returns [`Mt5Error::UnsupportedFeature`]
+    /// when the export is missing.
+    pub fn stats(&self) -> Result<crate::types::BridgeStats> {
+        let fn_stats = self.fn_stats.ok_or(Mt5Error::UnsupportedFeature("Stats"))?;
+
+        const CAPACITY: usize = std::mem::size_of::<crate::ffi::Mt5Stats>();
+        let mut buf = [0u8; CAPACITY];
+
+        let ret = unsafe { fn_stats(buf.as_mut_ptr() as *mut c_char, CAPACITY as c_int) };
+        if ret < 0 {
+            return Err(Mt5Error::StatsFailed(ret));
+        }
+
+        let raw: crate::ffi::Mt5Stats = unsafe { read_unaligned(buf.as_ptr() as *const _) };
+        Ok(crate::types::BridgeStats::from_raw(raw))
     }
 
     /// Subscribe to connection disconnect notifications.

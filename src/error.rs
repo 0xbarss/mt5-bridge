@@ -53,6 +53,9 @@ pub enum Mt5Error {
     #[error("Calendar countries query failed (status {0})")]
     CalendarCountriesFailed(i32),
 
+    #[error("Stats query failed (status {0})")]
+    StatsFailed(i32),
+
     #[error("OrderSend failed for symbol '{symbol}' (retcode {retcode}: {description})")]
     OrderSendFailed {
         symbol: String,

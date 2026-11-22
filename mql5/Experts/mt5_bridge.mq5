@@ -143,6 +143,7 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #define CMD_SYMBOL_SELECT     24
 #define CMD_CALENDAR_EVENTS   25
 #define CMD_CALENDAR_COUNTRIES 26
+#define CMD_STATS             27
 
 enum ENUM_SERVER_TIME_CONVENTION {
     SERVER_TIME_FIXED = 0,
@@ -2806,6 +2807,16 @@ void HandleCalendarCountries(long h) {
     SendCount(h, ArraySize(countries), data, (uint)ArraySize(data));
 }
 
+// Returns bridge-side statistics. The DLL tracks the actual counters
+// (uptime, requests, drops, queue depth) and packs an Mt5Stats struct;
+// this EA handler exists for protocol completeness and returns the
+// negotiated protocol version as status.
+void HandleStats(long h) {
+    uchar data[];
+    PackU32(data, PROTOCOL_VERSION);
+    SendOkData(h, data, (uint)ArraySize(data));
+}
+
 uchar empty_uchar() {
     uchar e[];
     return e;
@@ -2870,6 +2881,7 @@ bool DispatchRequest(long h) {
         case CMD_SYMBOL_SELECT:     HandleSymbolSelect(h, payload, pay_len);     break;
         case CMD_CALENDAR_EVENTS:   HandleCalendarEvents(h, payload, pay_len);   break;
         case CMD_CALENDAR_COUNTRIES: HandleCalendarCountries(h);                break;
+        case CMD_STATS:              HandleStats(h);                             break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

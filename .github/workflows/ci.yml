@@ -180,6 +180,36 @@ jobs:
       - name: Run C++ tests
         run: ctest --test-dir bridge_dll/tests/build --output-on-failure
 
+  fuzz:
+    name: Fuzz targets (cargo-fuzz)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check fuzz formatting
+        run: cargo fmt --check
+        working-directory: fuzz
+
+      - name: Clippy fuzz crate
+        run: cargo clippy -- -D warnings
+        working-directory: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Build all fuzz targets
+        run: cargo fuzz build
+        working-directory: fuzz
+
   windows-build:
     name: Windows Native (Test & MSVC DLL)
     runs-on: windows-latest

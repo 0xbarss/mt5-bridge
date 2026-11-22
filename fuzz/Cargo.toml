@@ -1,0 +1,14 @@
+[package]
+name = "mt5-bridge-fuzz"
+version = "0.3.0"
+edition = "2021"
+publish = false
+description = "Coverage-guided fuzz targets for mt5-bridge wire and WAL parsers"
+
+[dependencies]
+mt5-bridge = { path = "..", default-features = false, features = ["wal", "serde_json"] }
+libfuzzer-sys = "0.4"
+arbitrary = "1.3"
+
+[profile.release]
+opt-level = 3

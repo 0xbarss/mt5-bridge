@@ -138,6 +138,9 @@ uint  WaitForSingleObject(long hHandle, uint dwMilliseconds);
 #define CMD_SUBSCRIBE_BARS    19
 #define CMD_UNSUBSCRIBE_BARS  20
 #define CMD_PING              21
+#define CMD_SYMBOLS_TOTAL     22
+#define CMD_SYMBOLS_GET       23
+#define CMD_SYMBOL_SELECT     24
 
 enum ENUM_SERVER_TIME_CONVENTION {
     SERVER_TIME_FIXED = 0,
@@ -430,6 +433,18 @@ void PackF64(uchar &b[], double v) {
     StructToCharArray(db, tmp);
     int n = ArraySize(b); ArrayResize(b, n + 8);
     ArrayCopy(b, tmp, n, 0, 8);
+}
+
+// Pack a length-prefixed UTF-8 string: [u32 name_len][name bytes].
+// MT5 symbol names are ASCII, so StringToCharArray/CharArrayToString with CP_UTF8 agree.
+void PackStr(uchar &b[], const string s) {
+    uchar bytes[256];
+    ArrayInitialize(bytes, 0);
+    int len = StringToCharArray(s, bytes, 0, 255);
+    PackU32(b, (uint)len);
+    int n = ArraySize(b);
+    ArrayResize(b, n + len);
+    ArrayCopy(b, bytes, n, 0, len);
 }
 
 // ── Response senders (protocol v6+) ─────────────────────────────────────────
@@ -2607,6 +2622,107 @@ void HandlePing(long h) {
     SendOkData(h, data, (uint)ArraySize(data));
 }
 
+// ── Symbol universe discovery handlers (protocol v8+) ───────────────────────
+
+// Returns the total number of symbols available in Market Watch.
+// Response: status = total count, no payload.
+void HandleSymbolsTotal(long h) {
+    int total = SymbolsTotal();
+    uchar empty[];
+    SendCount(h, total, empty, (uint)ArraySize(empty));
+}
+
+// Returns a page of symbols as packed entries:
+//   [u32 name_len][name bytes][Mt5SymInfo 76 bytes] repeated
+// Request layout (must match SymbolsGet in bridge_dll/mt5_bridge.cpp):
+//     u32 page, u32 page_size
+// Response: status = total count, payload = packed entries for this page.
+void HandleSymbolsGet(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    uint page = 0, page_size = 0;
+    if (!SafeUnpackU32(payload, off, len, page) ||
+        !SafeUnpackU32(payload, off, len, page_size)) {
+        SendError(h);
+        return;
+    }
+    if (page_size == 0) page_size = 1000;
+
+    int total = SymbolsTotal();
+    uchar data[];
+    int start = (int)page * (int)page_size;
+    int end = MathMin(start + (int)page_size, total);
+    if (start >= total) {
+        SendCount(h, total, data, (uint)ArraySize(data));
+        return;
+    }
+
+    for (int i = start; i < end; i++) {
+        string sym = SymbolName(i);
+        if (StringLen(sym) == 0) continue;
+
+        // Ensure symbol properties are available (auto-select into Market Watch if needed)
+        if (!EnsureSymbolAvailable(sym)) continue;
+
+        double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
+        double tick_value = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+        double tick_size  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+        if (tick_size <= 0.0) tick_size = point;
+        double lot_step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+        double min_lot    = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+        double max_lot    = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+        int    digits     = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+        if (point <= 0.0) continue;
+
+        MqlTick tick;
+        double spread = 0.0;
+        double bid = 0.0;
+        double ask = 0.0;
+        if (SymbolInfoTick(sym, tick) && point > 0.0) {
+            spread = (tick.ask - tick.bid) / point;
+            bid = tick.bid;
+            ask = tick.ask;
+        }
+
+        PackStr(data, sym);
+        PackF64(data, point);
+        PackF64(data, tick_value);
+        PackF64(data, tick_size);
+        PackF64(data, lot_step);
+        PackF64(data, min_lot);
+        PackF64(data, max_lot);
+        PackF64(data, spread);
+        PackI32(data, digits);
+        PackF64(data, bid);
+        PackF64(data, ask);
+    }
+
+    SendCount(h, total, data, (uint)ArraySize(data));
+}
+
+// Selects or deselects a symbol in Market Watch.
+// Request layout (must match SymbolSelect in bridge_dll/mt5_bridge.cpp):
+//     str symbol, i32 enable (0 or 1)
+// Response: status = 1 on success, -1 on failure.
+void HandleSymbolSelect(long h, const uchar &payload[], uint len) {
+    int off = 0;
+    string sym = "";
+    int enable = 0;
+    if (!SafeUnpackStr(payload, off, len, sym) ||
+        !SafeUnpackI32(payload, off, len, enable)) {
+        SendError(h);
+        return;
+    }
+
+    bool ok = SymbolSelect(sym, enable != 0);
+    SendResponse(h, ok ? 1 : -1, empty_uchar(), 0);
+}
+
+uchar empty_uchar() {
+    uchar e[];
+    return e;
+}
+
 // ── Request dispatcher ────────────────────────────────────────────────────────
 
 bool DispatchRequest(long h) {
@@ -2661,6 +2777,9 @@ bool DispatchRequest(long h) {
         case CMD_SUBSCRIBE_BARS:    HandleSubscribeBars(h, payload, pay_len);    break;
         case CMD_UNSUBSCRIBE_BARS:  HandleUnsubscribeBars(h, payload, pay_len);  break;
         case CMD_PING:              HandlePing(h);                               break;
+        case CMD_SYMBOLS_TOTAL:     HandleSymbolsTotal(h);                       break;
+        case CMD_SYMBOLS_GET:       HandleSymbolsGet(h, payload, pay_len);       break;
+        case CMD_SYMBOL_SELECT:     HandleSymbolSelect(h, payload, pay_len);     break;
         default:
             Print("MT5Bridge: unknown cmd=", cmd);
             SendError(h);

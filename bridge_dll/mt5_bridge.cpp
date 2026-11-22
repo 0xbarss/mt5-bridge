@@ -113,6 +113,9 @@ enum Cmd : uint32_t {
     CMD_SUBSCRIBE_BARS    = 19,
     CMD_UNSUBSCRIBE_BARS  = 20,
     CMD_PING              = 21,
+    CMD_SYMBOLS_TOTAL     = 22,
+    CMD_SYMBOLS_GET       = 23,
+    CMD_SYMBOL_SELECT     = 24,
 };
 
 /* ── Request deadlines ──────────────────────────────────────────────────────
@@ -1237,6 +1240,67 @@ MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol) {
 
 MT5_API uint64_t EventsDroppedTotal(void) {
     return g_events_dropped_total.load(std::memory_order_relaxed);
+}
+
+/* ── Symbol universe discovery (protocol v8+) ─────────────────────────────── */
+
+int SymbolsTotal(void) {
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return -1;
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_SYMBOLS_TOTAL, {}, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st < 0) return -1;
+    return st;
+}
+
+int SymbolsGet(uint32_t page, uint32_t page_size, char* out_buf, int out_buf_capacity) {
+    if (!out_buf || out_buf_capacity <= 0) return -1;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return -1;
+
+    if (page_size == 0) page_size = 1000;
+
+    Packer p;
+    p.u32(page);
+    p.u32(page_size);
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_SYMBOLS_GET, p.buf, st, data, query_timeout_sec());
+    if (out != Outcome::RESPONDED || st < 0) return -1;
+
+    int32_t total = st;
+    // The EA packs each entry as: [u32 name_len][name bytes][Mt5SymInfo 76 bytes].
+    // Copy as many complete entries as fit into the caller's buffer.
+    size_t copied = 0;
+    size_t off = 0;
+    while (off + 4 <= data.size()) {
+        uint32_t name_len = *reinterpret_cast<const uint32_t*>(data.data() + off);
+        size_t entry_size = 4 + static_cast<size_t>(name_len) + sizeof(Mt5SymInfo);
+        if (off + entry_size > data.size()) break; // truncated entry
+        if (copied + entry_size > static_cast<size_t>(out_buf_capacity)) break; // buffer full
+        std::memcpy(out_buf + copied, data.data() + off, entry_size);
+        off += entry_size;
+        copied += entry_size;
+    }
+    return total;
+}
+
+int SymbolSelect(const char* symbol, int enable) {
+    if (!symbol || !*symbol) return 0;
+    auto c = current_conn();
+    if (!c || !c->is_alive()) return 0;
+
+    Packer p;
+    p.str(symbol);
+    p.i32(enable ? 1 : 0);
+
+    int32_t st = 0;
+    std::string data;
+    Outcome out = c->request(CMD_SYMBOL_SELECT, p.buf, st, data, query_timeout_sec());
+    return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
 }
 
 } /* extern "C" */

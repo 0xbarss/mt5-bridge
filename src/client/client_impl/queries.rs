@@ -2,7 +2,7 @@ use crate::error::{Mt5Error, Result};
 use crate::ffi::*;
 use crate::types::*;
 use std::ffi::CString;
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 use std::ptr;
 
 use super::client::Mt5Client;
@@ -159,5 +159,111 @@ impl Mt5Client {
         }
         let n = (count as usize).min(buf.len());
         Ok(buf[..n].iter().copied().map(Deal::from_raw).collect())
+    }
+
+    /// Maximum number of symbols returned by a single [`symbols`](Self::symbols) call.
+    pub const SYMBOLS_PAGE_SIZE: u32 = 1000;
+
+    /// Maximum symbol name length in bytes (MT5 symbol names fit in a 32-byte fixed field).
+    pub const SYMBOL_NAME_MAX_BYTES: usize = 32;
+
+    /// Query the total number of symbols available in MT5 Market Watch.
+    pub fn symbols_total(&self) -> Result<u32> {
+        let fn_symbols_total = self
+            .fn_symbols_total
+            .ok_or(Mt5Error::UnsupportedFeature("SymbolsTotal"))?;
+
+        let count = unsafe { fn_symbols_total() };
+        if count < 0 {
+            return Err(Mt5Error::SymbolsTotalFailed(count));
+        }
+        Ok(count as u32)
+    }
+
+    /// Query a page of symbols from MT5 Market Watch.
+    ///
+    /// Returns up to `page_size` [`SymbolInfo`] entries starting at `page * page_size`.
+    /// Use [`symbols`](Self::symbols) to fetch all symbols in one call (paging internally).
+    pub fn symbols_page(&self, page: u32, page_size: u32) -> Result<Vec<SymbolInfo>> {
+        let fn_symbols_get = self
+            .fn_symbols_get
+            .ok_or(Mt5Error::UnsupportedFeature("SymbolsGet"))?;
+
+        let page_size = page_size.max(1);
+        let entry_size = 4 + Self::SYMBOL_NAME_MAX_BYTES + std::mem::size_of::<Mt5SymInfo>();
+        let capacity = (page_size as usize + 1) * entry_size;
+        let mut buf = vec![0u8; capacity];
+
+        let total = unsafe {
+            fn_symbols_get(
+                page,
+                page_size,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as c_int,
+            )
+        };
+        if total < 0 {
+            return Err(Mt5Error::SymbolsGetFailed(total));
+        }
+
+        let mut symbols = Vec::new();
+        let mut off = 0;
+        while off + 4 <= buf.len() {
+            let name_len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+            let entry_size = 4 + name_len as usize + std::mem::size_of::<Mt5SymInfo>();
+            if off + entry_size > buf.len() {
+                break;
+            }
+            let name_bytes = &buf[off + 4..off + 4 + name_len as usize];
+            let name = String::from_utf8_lossy(name_bytes).to_string();
+            let info_raw = unsafe {
+                ptr::read_unaligned(buf[off + 4 + name_len as usize..].as_ptr() as *const Mt5SymInfo)
+            };
+            symbols.push(SymbolInfo::from_raw(&name, info_raw));
+            off += entry_size;
+        }
+        Ok(symbols)
+    }
+
+    /// Query all symbols available in MT5 Market Watch.
+    ///
+    /// Pages through [`symbols_page`](Self::symbols_page) internally using [`SYMBOLS_PAGE_SIZE`](Self::SYMBOLS_PAGE_SIZE).
+    /// On any page error, returns the symbols collected so far along with the error.
+    pub fn symbols(&self) -> Result<Vec<SymbolInfo>> {
+        let mut all = Vec::new();
+        let mut page = 0u32;
+        loop {
+            let page_syms = self.symbols_page(page, Self::SYMBOLS_PAGE_SIZE)?;
+            let page_len = page_syms.len();
+            all.extend(page_syms);
+            if page_len < Self::SYMBOLS_PAGE_SIZE as usize {
+                break;
+            }
+            page += 1;
+        }
+        Ok(all)
+    }
+
+    /// Query symbols filtered by predicate `f`.
+    pub fn symbols_filtered(&self, f: impl Fn(&SymbolInfo) -> bool) -> Result<Vec<SymbolInfo>> {
+        let all = self.symbols()?;
+        Ok(all.into_iter().filter(|s| f(s)).collect())
+    }
+
+    /// Select or deselect a symbol in MT5 Market Watch.
+    ///
+    /// When `enable` is true, the symbol is added to Market Watch (required before
+    /// many MT5 operations such as `copy_bars` or `symbol_info`).
+    pub fn symbol_select(&self, symbol: &str, enable: bool) -> Result<()> {
+        let fn_symbol_select = self
+            .fn_symbol_select
+            .ok_or(Mt5Error::UnsupportedFeature("SymbolSelect"))?;
+
+        let sym_c = CString::new(symbol)?;
+        let ret = unsafe { fn_symbol_select(sym_c.as_ptr(), enable as c_int) };
+        if ret != 1 {
+            return Err(Mt5Error::SymbolSelectFailed(symbol.to_string()));
+        }
+        Ok(())
     }
 }

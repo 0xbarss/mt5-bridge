@@ -97,7 +97,7 @@ pub use gateway::{
 #[cfg(feature = "json-journal")]
 pub use journal::JsonFileStore;
 pub use journal::OrderStore;
-pub use market::{BarAggregator, BarCache, BarKind};
+pub use market::{BarAggregator, BarCache, BarKind, SymbolRegistry};
 pub use position_book::{
     BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,
     PositionTransition,

@@ -301,6 +301,15 @@ MT5_API int UnsubscribeBars(const char* symbol, int timeframe);
 /* Heartbeat ping returning MT5 server time and negotiated protocol version. */
 MT5_API int Ping(int64_t* server_time_secs, uint32_t* protocol);
 
+/* Symbol universe discovery (protocol v8+).
+ * SymbolsTotal returns the number of symbols in Market Watch.
+ * SymbolsGet returns a page of symbols: status = total count, out_buf is filled
+ * with packed entries [u32 name_len][name bytes][Mt5SymInfo (76 bytes)] repeated.
+ * SymbolSelect selects/deselects a symbol in Market Watch. Returns 1 on success. */
+MT5_API int SymbolsTotal(void);
+MT5_API int SymbolsGet(uint32_t page, uint32_t page_size, char* out_buf, int out_buf_capacity);
+MT5_API int SymbolSelect(const char* symbol, int enable);
+
 /* Event callback registration and polling (protocol v6+) */
 typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload, uint32_t payload_len);
 MT5_API int RegisterEventCallback(Mt5EventCallback cb);

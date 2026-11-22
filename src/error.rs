@@ -38,6 +38,15 @@ pub enum Mt5Error {
     #[error("SymbolInfoTick query failed for symbol '{0}'")]
     SymbolTickFailed(String),
 
+    #[error("SymbolsTotal query failed (status {0})")]
+    SymbolsTotalFailed(i32),
+
+    #[error("SymbolsGet query failed (status {0})")]
+    SymbolsGetFailed(i32),
+
+    #[error("SymbolSelect query failed for symbol '{0}'")]
+    SymbolSelectFailed(String),
+
     #[error("OrderSend failed for symbol '{symbol}' (retcode {retcode}: {description})")]
     OrderSendFailed {
         symbol: String,

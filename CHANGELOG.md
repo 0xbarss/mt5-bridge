@@ -86,6 +86,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and range bar kinds (`BarKind::Time`, `TickCount`, `Volume`, `Range`).
   - `BarCache` is a bounded, TTL-backed cache keyed by `(symbol, timeframe)` for serving
     repeated `copy_bars` calls from memory, with per-key size bounds and expiry.
+- **Market-data symbol universe discovery**:
+  - New `CMD_SYMBOLS_TOTAL` (22), `CMD_SYMBOLS_GET` (23), `CMD_SYMBOL_SELECT` (24)
+    protocol commands; `ProtocolCmd` enum extended; wire-protocol consistency tests added.
+  - C++ DLL exports `SymbolsTotal`, `SymbolsGet` (paged `[u32 name_len][name][Mt5SymInfo]`
+    entries), and `SymbolSelect`; MQL5 EA dispatches them via `HandleSymbolsTotal`,
+    `HandleSymbolsGet`, `HandleSymbolSelect`.
+  - Rust: `Mt5Client::symbols_total()`, `symbols_page()`, `symbols()`,
+    `symbols_filtered()`, and `symbol_select()`; new `src/market/symbols.rs` module with
+    `SymbolRegistry` (refreshable in-memory symbol cache with refresh-on-reconnect hook);
+    `SymbolRegistry` re-exported from crate root.
 
 ### Changed
 

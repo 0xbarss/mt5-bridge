@@ -95,11 +95,22 @@ fn command_ids_agree_across_rust_dll_and_ea() {
         ("CMD_SUBSCRIBE_BARS", ProtocolCmd::SubscribeBars),
         ("CMD_UNSUBSCRIBE_BARS", ProtocolCmd::UnsubscribeBars),
         ("CMD_PING", ProtocolCmd::Ping),
+        ("CMD_SYMBOLS_TOTAL", ProtocolCmd::SymbolsTotal),
+        ("CMD_SYMBOLS_GET", ProtocolCmd::SymbolsGet),
+        ("CMD_SYMBOL_SELECT", ProtocolCmd::SymbolSelect),
     ];
     for (name, cmd) in table {
         assert_eq!(cpp_enum(&cpp, name), cmd as u64, "DLL {name}");
         assert_eq!(define(&ea, name), cmd as u64, "EA {name}");
     }
+    // …and the EA actually dispatches the new commands.
+    assert!(ea.contains("case CMD_SYMBOLS_TOTAL:") && ea.contains("void HandleSymbolsTotal("));
+    assert!(ea.contains("case CMD_SYMBOLS_GET:") && ea.contains("void HandleSymbolsGet("));
+    assert!(ea.contains("case CMD_SYMBOL_SELECT:") && ea.contains("void HandleSymbolSelect("));
+    // …and the DLL exports the new functions.
+    assert!(cpp.contains("int SymbolsTotal(void)"));
+    assert!(cpp.contains("int SymbolsGet(uint32_t page"));
+    assert!(cpp.contains("int SymbolSelect(const char* symbol, int enable)"));
     // …and the EA actually dispatches the commands.
     assert!(ea.contains("case CMD_DEALS_GET:") && ea.contains("void HandleDealsGet("));
     assert!(ea.contains("case CMD_SUBSCRIBE_TICKS:") && ea.contains("void HandleSubscribeTicks("));

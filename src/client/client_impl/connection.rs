@@ -118,6 +118,9 @@ impl Mt5Client {
             fn_orders,
             fn_deals,
             fn_ping,
+            fn_symbols_total,
+            fn_symbols_get,
+            fn_symbol_select,
         ) = unsafe {
             let fn_init: FnInit =
                 *lib.get(b"Initialize\0")
@@ -239,6 +242,28 @@ impl Mt5Client {
 
             let fn_ping: Option<FnPing> = lib.get::<FnPing>(b"Ping\0").map(|s| *s).ok();
 
+            let fn_symbols_total: Option<FnSymbolsTotal> = lib
+                .get::<FnSymbolsTotal>(b"SymbolsTotal\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'SymbolsTotal' not found — symbol universe discovery disabled")
+                })
+                .ok();
+
+            let fn_symbols_get: Option<FnSymbolsGet> = lib
+                .get::<FnSymbolsGet>(b"SymbolsGet\0")
+                .map(|s| *s)
+                .map_err(|_| {
+                    warn!("MT5 DLL: 'SymbolsGet' not found — symbol universe discovery disabled")
+                })
+                .ok();
+
+            let fn_symbol_select: Option<FnSymbolSelect> = lib
+                .get::<FnSymbolSelect>(b"SymbolSelect\0")
+                .map(|s| *s)
+                .map_err(|_| warn!("MT5 DLL: 'SymbolSelect' not found — symbol selection disabled"))
+                .ok();
+
             (
                 fn_init,
                 fn_shut,
@@ -256,6 +281,9 @@ impl Mt5Client {
                 fn_orders,
                 fn_deals,
                 fn_ping,
+                fn_symbols_total,
+                fn_symbols_get,
+                fn_symbol_select,
             )
         };
 
@@ -440,6 +468,9 @@ impl Mt5Client {
             fn_modify_magic,
             fn_sym_tick,
             fn_sym_info,
+            fn_symbols_total,
+            fn_symbols_get,
+            fn_symbol_select,
             fn_positions,
             fn_orders,
             fn_deals,

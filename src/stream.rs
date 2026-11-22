@@ -570,8 +570,8 @@ impl Drop for BookSubscription {
 /// consumer-side lag detection. Trade event fan-out is a **bounded, ordered broadcast**: a slow
 /// subscriber falls behind and observes [`StreamError::Lagged`] via
 /// [`recv_checked`](Self::recv_checked); skipped events are not re-delivered to that subscriber.
-/// For durability requirements (durable queue, cursor-based replay), see the record/replay (B5)
-/// and audit log (C2) proposals.
+/// For durability requirements (durable queue, cursor-based replay), see the record/replay
+/// and audit log proposals.
 pub struct TradeSubscription {
     rx: broadcast::Receiver<TradeEvent>,
     lagged: u64,

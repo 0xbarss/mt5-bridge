@@ -67,6 +67,7 @@ pub mod ffi;
 pub mod journal;
 pub mod position_book;
 pub mod reconciliation;
+pub mod risk;
 pub mod session;
 pub mod sync;
 pub mod trade;
@@ -101,6 +102,7 @@ pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderEvent, OrderManager, OrderObserver, OrderSnapshot,
     ReconciliationReport, SafetyPolicy, SharedOrderManager, StrategyMagic, UnknownBlockScope,
 };
+pub use risk::{PreTradeDecision, RiskEngine, RiskLimits};
 pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;
 pub use trade::{Bracket, TradeManager, TrailingStop};

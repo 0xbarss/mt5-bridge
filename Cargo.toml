@@ -40,18 +40,22 @@ doc-comment = "0.3"
 
 [[bench]]
 name = "benchmarks"
+required-features = ["async"]
 harness = false
 
 [[bench]]
 name = "latency_harness"
+required-features = ["wal"]
 harness = false
 
 [[bench]]
 name = "mt5_extensive_benchmark"
+required-features = ["wal"]
 harness = false
 
 [[bench]]
 name = "push_probe"
+required-features = ["async"]
 harness = false
 
 [[example]]

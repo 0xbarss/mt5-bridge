@@ -57,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     it is not lossless. Slow subscribers skip events and must handle lag explicitly.
   - `TradeSubscription` tracks the total number of skipped events (`lagged()`).
   - `Mt5Gateway` logs when trade event fan-out lags behind subscribers.
+- **Pre-trade risk engine**:
+  - New `src/risk` module with `RiskEngine` and `RiskLimits` for portfolio-level
+    pre-trade checks (open positions, per-symbol and total volume, daily loss,
+    drawdown, symbol allow/block list, orders-per-minute sliding window).
+  - `Mt5Error::RiskRejected` returned when a limit is violated; the rejection is
+    raised before any request reaches the MT5 backend.
+  - `GatewayConfig::risk_engine` wires an optional `RiskEngine` into the gateway;
+    `submit_order` runs `pre_trade` against live account, position, and working-order
+    snapshots before submission.
+  - `RiskEngine` is `Send + Sync`, takes `&self`, and keeps portfolio state current
+    through `on_account_info`, `on_positions`, and `on_working_orders`.
 
 ### Changed
 

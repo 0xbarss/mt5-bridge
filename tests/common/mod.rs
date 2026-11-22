@@ -536,6 +536,7 @@ pub fn buy(symbol: &str, vol: f64, cid: &str) -> OrderRequest {
 }
 
 /// Unique scratch directory under the OS temp dir (no external crate needed).
+#[cfg(feature = "serde_json")]
 pub fn scratch_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);

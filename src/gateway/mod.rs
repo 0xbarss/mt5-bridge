@@ -20,8 +20,9 @@ pub use executor::BlockingExecutor;
 
 use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
+use crate::risk::RiskEngine;
 use crate::session::SessionConfig;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Abstraction for connecting and health-checking trading backends with automatic lifecycle supervision.
@@ -84,6 +85,9 @@ pub struct GatewayConfig {
     pub p2_timeout: Duration,
     /// Deadline for Priority 3 bulk download operations.
     pub p3_timeout: Duration,
+    /// Optional pre-trade risk engine. When set, every order submission is checked
+    /// against portfolio-level limits before reaching the backend.
+    pub risk_engine: Option<Arc<RiskEngine>>,
 }
 
 impl Default for GatewayConfig {
@@ -94,6 +98,7 @@ impl Default for GatewayConfig {
             p1_timeout: Duration::from_secs(30),
             p2_timeout: Duration::from_secs(10),
             p3_timeout: Duration::from_secs(120),
+            risk_engine: None,
         }
     }
 }

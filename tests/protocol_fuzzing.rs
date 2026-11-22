@@ -11,7 +11,6 @@
 
 use mt5_bridge::ffi::*;
 use mt5_bridge::*;
-use std::io::Write;
 
 /// Deterministic pseudo-random number generator for reproducible fuzz sweeps.
 struct SimpleRng(u64);
@@ -255,6 +254,7 @@ fn fuzz_order_request_validation_extreme_values() {
 #[cfg(feature = "serde_json")]
 #[test]
 fn fuzz_json_file_store_corrupted_payloads() {
+    use std::io::Write;
     let mut rng = SimpleRng::new(0xDEADBEEF00112233);
     let temp_dir = std::env::temp_dir();
     let path = temp_dir.join(format!("fuzz_journal_{}.json", std::process::id()));

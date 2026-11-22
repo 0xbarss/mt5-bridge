@@ -9,6 +9,7 @@ use crate::reconciliation::{
     classify_send_error, LifecycleState, OrderEvent, OrderManager, OrderObserver,
     ReconciliationReport, SharedOrderManager,
 };
+use crate::risk::{PreTradeDecision, RiskEngine};
 use crate::session::{Mt5Session, SessionConfig};
 use crate::types::{
     AccountInfo, Deal, HistoryResult, Level, OrderRequest, OrderState, Position, Timeframe,
@@ -475,6 +476,7 @@ pub struct Mt5Gateway<B: TradingBackend + Send + Sync + 'static> {
     p2_timeout: Duration,
     p3_timeout: Duration,
     order_event_out_tx: broadcast::Sender<OrderEvent>,
+    risk_engine: Option<Arc<RiskEngine>>,
 }
 
 impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
@@ -575,6 +577,7 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
             p2_timeout: config.p2_timeout,
             p3_timeout: config.p3_timeout,
             order_event_out_tx,
+            risk_engine: config.risk_engine,
         };
 
         let join_handle = tokio::spawn(async move {
@@ -860,12 +863,33 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                 let executor = self.executor.clone();
                 let timeout = self.p1_timeout;
                 let dis_tx = self.disconnect_trigger_tx.clone();
+                let risk_engine = self.risk_engine.clone();
+                let strategy_magic = manager.strategy_magic();
                 tokio::spawn(async move {
-                    let res = executor
-                        .run(timeout, "p1_submit_order", move || {
-                            manager.submit_order(&*backend, req)
-                        })
-                        .await;
+                    let res: Result<TrackedOrder, Mt5Error> = async {
+                        // Pre-trade risk check: reject before any backend submission so a
+                        // risk rejection never reaches the MT5 backend.
+                        if let Some(engine) = &risk_engine {
+                            let account = backend.account_info()?;
+                            let positions = backend
+                                .positions_filtered(Some(strategy_magic), Some(&req.symbol))?;
+                            let working_orders = backend
+                                .pending_orders_filtered(Some(strategy_magic), Some(&req.symbol))?;
+                            match engine.pre_trade(&req, &account, &positions, &working_orders)? {
+                                PreTradeDecision::Allowed => {}
+                                PreTradeDecision::Rejected { rule, detail } => {
+                                    return Err(Mt5Error::RiskRejected { rule, detail });
+                                }
+                            }
+                        }
+
+                        executor
+                            .run(timeout, "p1_submit_order", move || {
+                                manager.submit_order(&*backend, req)
+                            })
+                            .await
+                    }
+                    .await;
                     if matches!(
                         &res,
                         Err(Mt5Error::PipeDisconnected) | Err(Mt5Error::TransmissionFailed(_))

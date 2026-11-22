@@ -130,6 +130,9 @@ pub enum Mt5Error {
     )]
     PreflightRejected(String),
 
+    #[error("Order rejected by pre-trade risk rule '{rule}': {detail}")]
+    RiskRejected { rule: &'static str, detail: String },
+
     #[error("Server authentication failed or pipe peer verification failed")]
     ServerAuthFailed,
 

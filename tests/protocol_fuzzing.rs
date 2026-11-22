@@ -252,6 +252,7 @@ fn fuzz_order_request_validation_extreme_values() {
 // 4. Persistence & Journal State Fuzzing
 // ═════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn fuzz_json_file_store_corrupted_payloads() {
     let mut rng = SimpleRng::new(0xDEADBEEF00112233);

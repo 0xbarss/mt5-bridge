@@ -282,6 +282,7 @@ fn test_live_market_order_lifecycle() {
     guard.ticket = 0;
 }
 
+#[cfg(feature = "async")]
 #[test]
 fn test_live_events_dropped_total() {
     let (client, _guard) = require_client_or_skip!("test_live_events_dropped_total");
@@ -360,6 +361,7 @@ fn test_live_order_manager_reconciliation_with_deals() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_lossless() {
@@ -396,6 +398,7 @@ async fn test_live_push_tick_stream_lossless() {
     let _ = client.unsubscribe_ticks("EURUSD");
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_live_push_tick_stream_latest() {

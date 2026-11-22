@@ -53,3 +53,19 @@ harness = false
 [[bench]]
 name = "push_probe"
 harness = false
+
+[[example]]
+name = "04_stream_ticks"
+required-features = ["async"]
+
+[[example]]
+name = "07_stream_bars"
+required-features = ["async"]
+
+[[example]]
+name = "09_stream_bars_push"
+required-features = ["async"]
+
+[[example]]
+name = "10_wal_order_store"
+required-features = ["wal"]

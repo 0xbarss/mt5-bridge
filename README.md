@@ -1001,19 +1001,20 @@ Rather than relying solely on periodic snapshot polling (which introduces latenc
 
 ```rust,no_run
 # use mt5_bridge::{Mt5Client, OrderManager};
+# #[cfg(feature = "async")]
 # async fn example(client: &Mt5Client, mut manager: OrderManager) -> Result<(), Box<dyn std::error::Error>> {
-// Subscribe to real-time broker trade events (Protocol v5+)
-let mut trade_sub = client.subscribe_trade()?;
-
-// Background event processing loop; recv_checked() returns Err(StreamError::Lagged) when
-// the broadcast buffer overflows and events were skipped for this subscriber.
-tokio::spawn(async move {
-    while let Ok(Some(event)) = trade_sub.recv_checked().await {
-        // Incrementally updates local tracked orders with fills, deal tickets, and closes
-        manager.apply_trade_event(&event);
-    }
-});
-# Ok(())
+#     // Subscribe to real-time broker trade events (Protocol v5+)
+#     let mut trade_sub = client.subscribe_trade()?;
+#     
+#     // Background event processing loop; recv_checked() returns Err(StreamError::Lagged) when
+#     // the broadcast buffer overflows and events were skipped for this subscriber.
+#     tokio::spawn(async move {
+#         while let Ok(Some(event)) = trade_sub.recv_checked().await {
+#             // Incrementally updates local tracked orders with fills, deal tickets, and closes
+#             manager.apply_trade_event(&event);
+#         }
+#     });
+#     Ok(())
 # }
 ```
 This enables sub-millisecond local state transitions for fills and closes while reserving full snapshot reconciliation ([`manager.reconcile(&client)`](src/reconciliation/mod.rs)) for startup, reconnects, or periodic drift verification.

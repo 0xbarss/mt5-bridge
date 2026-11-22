@@ -8,6 +8,7 @@
 //! - TradeEvent bounded fan-out delivery and event_seq gap detection triggering reconciliation.
 //! - Conflated tick stream updates via watch channels.
 
+#![cfg(feature = "async")]
 #![allow(clippy::disallowed_methods)]
 
 use mt5_bridge::backend::TradingBackend;

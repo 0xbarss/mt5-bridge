@@ -1,6 +1,8 @@
 //! Integration tests for `WalOrderStore` crash recovery, compaction, CRC verification,
 //! torn-tail recovery, position state journaling, and JSON migration.
 
+#![cfg(feature = "wal")]
+
 use mt5_bridge::journal::OrderStore;
 use mt5_bridge::position_book::{PositionRef, PositionState};
 use mt5_bridge::types::{OrderRequest, OrderState, OrderType, TrackedOrder};

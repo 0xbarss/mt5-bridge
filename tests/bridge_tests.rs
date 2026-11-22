@@ -1,4 +1,5 @@
 use mt5_bridge::*;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn test_timeframe_math() {
@@ -979,6 +980,7 @@ fn test_order_manager_tracking_and_reconciliation() {
     assert_eq!(report.foreign_positions[0].ticket, 9999);
 }
 
+#[cfg(feature = "async")]
 #[test]
 fn test_stream_config_and_backpressure() {
     let cfg = StreamConfig::default();
@@ -1204,6 +1206,7 @@ fn test_order_request_stops_validation_with_symbol() {
     assert!(good_stops.validate_with_symbol(&sym).is_ok());
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn test_reconciliation_report_serde_and_clean() {
     let report_clean = ReconciliationReport {
@@ -1395,6 +1398,7 @@ fn test_order_manager_apply_trade_event() {
     assert!((final_order.average_price - 1.0860).abs() < 1e-6);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_event_bus_tick_fanout_and_isolation() {
     let bus = EventBus::new(64);
@@ -1427,6 +1431,7 @@ async fn test_event_bus_tick_fanout_and_isolation() {
     assert!(gbpusd_sub.try_recv().is_err());
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_tick_subscription_latest_mode_auto_drop_lag() {
     let bus = EventBus::new(16);
@@ -1456,6 +1461,7 @@ async fn test_tick_subscription_latest_mode_auto_drop_lag() {
     assert!(next_tick.bid > 1.08100);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_tick_subscription_lossless_mode_checked_lag() {
     let bus = EventBus::new(16);
@@ -1488,6 +1494,7 @@ async fn test_tick_subscription_lossless_mode_checked_lag() {
     }
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_event_bus_trade_and_book_dispatch() {
     let bus = EventBus::new(64);
@@ -1535,6 +1542,7 @@ async fn test_event_bus_trade_and_book_dispatch() {
     assert_eq!(rec_book.price, 155.250);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_event_bus_bar_dispatch() {
     let bus = EventBus::new(64);
@@ -1627,6 +1635,7 @@ fn test_raw_event_wire_conversions() {
     assert_eq!(book.event_seq, 1);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_book_subscription_recv_checked_gap_detection() {
     use mt5_bridge::stream::BookSubscription;
@@ -1673,6 +1682,7 @@ async fn test_book_subscription_recv_checked_gap_detection() {
     assert_eq!(sub.last_seq(), Some(5));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_book_subscription_prunes_on_drop() {
     use mt5_bridge::stream::BookSubscription;
@@ -1687,6 +1697,7 @@ async fn test_book_subscription_prunes_on_drop() {
     assert!(!bus.active_book_symbols().contains(&"EURUSD".to_string()));
 }
 
+#[cfg(feature = "async")]
 #[test]
 fn test_sequence_tracker_gap_and_reorder() {
     use mt5_bridge::SequenceTracker;
@@ -1712,6 +1723,7 @@ fn test_sequence_tracker_gap_and_reorder() {
     assert_eq!(tracker.last_seq(), Some(5));
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_book_subscription_dropped_events_tracking() {
     use mt5_bridge::stream::BookSubscription;
@@ -1743,6 +1755,7 @@ async fn test_book_subscription_dropped_events_tracking() {
     assert!(sub.dropped() > 0);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn test_trade_subscription_dropped_events_tracking() {
     use mt5_bridge::stream::TradeSubscription;
@@ -1839,4 +1852,314 @@ fn test_trading_backend_close_position_alias() {
     let res = backend.close_position_with_magic(42, 999).unwrap();
     assert_eq!(res.deal, 420);
     assert_eq!(res.order, 999);
+}
+
+/// Collects `OrderEvent`s into a shared vector so tests can assert the observed sequence.
+#[derive(Default, Clone)]
+struct EventCollector(Arc<Mutex<Vec<OrderEvent>>>);
+
+impl OrderObserver for EventCollector {
+    fn on_event(&self, event: &OrderEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+/// Simulated backend: every order fills in full immediately on submission.
+#[derive(Default, Clone)]
+struct FillBackend {
+    sends: Arc<Mutex<Vec<OrderRequest>>>,
+    closes: Arc<Mutex<Vec<u64>>>,
+}
+
+impl TradingBackend for FillBackend {
+    fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+        self.sends.lock().unwrap().push(req.clone());
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 1001,
+            order: 1001,
+            position: 1001,
+            volume: req.volume,
+            price: req.price,
+        })
+    }
+    fn order_close_with_magic(&self, ticket: u64, _magic: u64) -> Result<TradeResult> {
+        self.closes.lock().unwrap().push(ticket);
+        Ok(TradeResult {
+            retcode: 10009,
+            deal: 1002,
+            order: 0,
+            position: 0,
+            volume: 0.0,
+            price: 0.0,
+        })
+    }
+    fn order_modify_with_magic(
+        &self,
+        _ticket: u64,
+        _magic: u64,
+        _stop_loss: Level,
+        _take_profit: Level,
+    ) -> Result<TradeResult> {
+        Err(Mt5Error::Other("modify not used".to_string()))
+    }
+    fn positions_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        Ok(vec![])
+    }
+    fn pending_orders_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        Ok(vec![])
+    }
+}
+
+/// Simulated backend: accepts pending orders but never fills them.
+#[derive(Default, Clone)]
+struct PendingFillBackend {
+    sends: Arc<Mutex<Vec<OrderRequest>>>,
+}
+
+impl TradingBackend for PendingFillBackend {
+    fn order_send(&self, req: &OrderRequest) -> Result<TradeResult> {
+        self.sends.lock().unwrap().push(req.clone());
+        Ok(TradeResult {
+            retcode: 10008,
+            deal: 0,
+            order: 1001,
+            position: 0,
+            volume: req.volume,
+            price: req.price,
+        })
+    }
+    fn order_close_with_magic(&self, _ticket: u64, _magic: u64) -> Result<TradeResult> {
+        Err(Mt5Error::Other("close not used".to_string()))
+    }
+    fn order_modify_with_magic(
+        &self,
+        _ticket: u64,
+        _magic: u64,
+        _stop_loss: Level,
+        _take_profit: Level,
+    ) -> Result<TradeResult> {
+        Err(Mt5Error::Other("modify not used".to_string()))
+    }
+    fn positions_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<Position>> {
+        Ok(vec![])
+    }
+    fn pending_orders_filtered(
+        &self,
+        _magic: Option<u64>,
+        _symbol: Option<&str>,
+    ) -> Result<Vec<WorkingOrder>> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn test_order_lifecycle_events_emit_on_submit_fill_close() {
+    let events = Arc::default();
+    let observer = EventCollector(Arc::clone(&events));
+    let backend = FillBackend::default();
+    let mut manager = OrderManager::try_new(20240101)
+        .expect("valid magic")
+        .with_observer(Box::new(observer));
+
+    let tracked = manager
+        .submit_order(&backend, OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0850))
+        .expect("submit must succeed");
+    assert_eq!(tracked.state, OrderState::Filled);
+    assert_eq!(tracked.order_ticket, 1001);
+
+    let captured = events.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    match &captured[0] {
+        OrderEvent::Submitting {
+            client_order_id,
+            request,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert_eq!(request.symbol, "EURUSD");
+            assert_eq!(request.volume, 0.5);
+            assert_eq!(request.magic, Some(20240101));
+            assert_eq!(request.stop_loss, 1.0850);
+        }
+        other => panic!("expected Submitting, got {other:?}"),
+    }
+    match &captured[1] {
+        OrderEvent::Filled {
+            client_order_id,
+            deal_ticket,
+            price,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert_eq!(*deal_ticket, 1001);
+            assert_eq!(*price, 0.0);
+        }
+        other => panic!("expected Filled, got {other:?}"),
+    }
+
+    // Close the position → Closed event.
+    assert!(manager.close_position(&backend, 1001).is_ok());
+    assert_eq!(&*backend.closes.lock().unwrap(), &vec![1001]);
+
+    let captured = events.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    match &captured[2] {
+        OrderEvent::Closed {
+            client_order_id,
+            reason,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert_eq!(*reason, DealReason::Expert);
+        }
+        other => panic!("expected Closed, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_order_lifecycle_no_event_on_idempotent_replay() {
+    let events = Arc::default();
+    let observer = EventCollector(Arc::clone(&events));
+    let backend = FillBackend::default();
+    let mut manager = OrderManager::try_new(20240101)
+        .expect("valid magic")
+        .with_observer(Box::new(observer));
+
+    let first = manager
+        .submit_order(&backend, OrderRequest::buy("EURUSD", 0.5).stop_loss(1.0850))
+        .expect("submit must succeed");
+    let before = events.lock().unwrap().len();
+    assert_eq!(before, 2);
+
+    let replay = manager
+        .submit_order(
+            &backend,
+            OrderRequest::buy("EURUSD", 0.5)
+                .stop_loss(1.0850)
+                .client_order_id(first.client_order_id.clone()),
+        )
+        .expect("replay must succeed");
+    assert_eq!(replay.client_order_id, first.client_order_id);
+    assert_eq!(events.lock().unwrap().len(), before);
+}
+
+#[test]
+fn test_order_lifecycle_trade_events_emit_partial_and_full_fill() {
+    let events = Arc::default();
+    let observer = EventCollector(Arc::clone(&events));
+    let backend = PendingFillBackend::default();
+    let mut manager = OrderManager::try_new(20240101)
+        .expect("valid magic")
+        .with_observer(Box::new(observer));
+
+    let tracked = manager
+        .submit_order(
+            &backend,
+            OrderRequest::pending("EURUSD", OrderType::BuyLimit, 0.5, 1.0850).stop_loss(1.0800),
+        )
+        .expect("submit must succeed");
+    assert_eq!(tracked.state, OrderState::Accepted);
+    assert_eq!(tracked.order_ticket, 1001);
+
+    let captured = events.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    assert!(matches!(&captured[0], OrderEvent::Submitting { .. }));
+    match &captured[1] {
+        OrderEvent::Accepted {
+            client_order_id,
+            order_ticket,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert_eq!(*order_ticket, 1001);
+        }
+        other => panic!("expected Accepted, got {other:?}"),
+    }
+
+    // Partial fill arrives asynchronously; matched by order ticket.
+    manager
+        .apply_trade_event(&TradeEvent {
+            deal: 5,
+            order: 1001,
+            position: 0,
+            time: 1_700_000_000,
+            trans_type: 0,
+            order_type: OrderType::BuyLimit,
+            price: 1.0850,
+            volume: 0.2,
+            sl: 1.0800,
+            tp: 0.0,
+            symbol: "EURUSD".to_string(),
+            comment: String::new(),
+            deal_entry: 0,
+            deal_type: 0,
+            deal_magic: 20240101,
+            deal_position_id: 0,
+            deal_reason: 0,
+            event_seq: 1,
+        })
+        .expect("partial fill event must apply");
+
+    let captured = events.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    match &captured[2] {
+        OrderEvent::PartialFill {
+            client_order_id,
+            filled,
+            remaining,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert!((*filled - 0.2).abs() < 1e-9);
+            assert!((*remaining - 0.3).abs() < 1e-9);
+        }
+        other => panic!("expected PartialFill, got {other:?}"),
+    }
+
+    // Remainder fills.
+    manager
+        .apply_trade_event(&TradeEvent {
+            deal: 6,
+            order: 1001,
+            position: 1001,
+            time: 1_700_000_001,
+            trans_type: 0,
+            order_type: OrderType::BuyLimit,
+            price: 1.0850,
+            volume: 0.6,
+            sl: 1.0800,
+            tp: 0.0,
+            symbol: "EURUSD".to_string(),
+            comment: String::new(),
+            deal_entry: 0,
+            deal_type: 0,
+            deal_magic: 20240101,
+            deal_position_id: 0,
+            deal_reason: 0,
+            event_seq: 2,
+        })
+        .expect("fill event must apply");
+
+    let captured = events.lock().unwrap().clone();
+    assert_eq!(captured.len(), 4);
+    match &captured[3] {
+        OrderEvent::Filled {
+            client_order_id,
+            deal_ticket,
+            price,
+        } => {
+            assert_eq!(client_order_id, &tracked.client_order_id);
+            assert_eq!(*deal_ticket, 6);
+            assert!((*price - 1.0850).abs() < 1e-9);
+        }
+        other => panic!("expected Filled, got {other:?}"),
+    }
 }

@@ -1,7 +1,9 @@
 use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
 use crate::journal::OrderStore;
+use crate::position_book::DealReason;
 use crate::reconciliation::classification::classify_send_error;
+use crate::reconciliation::events::{OrderEvent, OrderObserver};
 use crate::reconciliation::state::{
     BrokerSnapshot, LifecycleState, ReconciliationReport, SafetyPolicy, UnknownBlockScope,
     DEAL_WINDOW_SLACK_SECS,
@@ -127,11 +129,14 @@ pub struct OrderManager {
     wire_index: HashMap<String, String>,
     policy: SafetyPolicy,
     store: Option<Box<dyn OrderStore>>,
+    /// Optional observer notified of every lifecycle event this manager emits.
+    observer: Option<Box<dyn OrderObserver>>,
 }
 
 impl OrderManager {
     /// Create a new `OrderManager` bound to a validated [`StrategyMagic`] number, with no
-    /// durable journal (state lives in memory only — see [`with_store`](Self::with_store)).
+    /// durable journal (state lives in memory only — see [`with_store`](Self::with_store))
+    /// and no lifecycle observer.
     pub fn new(strategy_magic: StrategyMagic) -> Self {
         Self {
             strategy_magic,
@@ -140,6 +145,7 @@ impl OrderManager {
             wire_index: HashMap::new(),
             policy: SafetyPolicy::default(),
             store: None,
+            observer: None,
         }
     }
 
@@ -160,6 +166,33 @@ impl OrderManager {
     pub fn try_with_policy(strategy_magic: u64, policy: SafetyPolicy) -> Result<Self> {
         let magic = StrategyMagic::new(strategy_magic)?;
         Ok(Self::with_policy(magic, policy))
+    }
+
+    /// Attach an observer that receives every lifecycle event this manager emits.
+    ///
+    /// The observer is invoked **synchronously** during state transitions, so it must not
+    /// block. Use this to fan events out to logs, journals, or broadcast channels; the
+    /// reconciliation core itself stays free of Tokio.
+    ///
+    /// ```
+    /// use mt5_bridge::{OrderManager, StrategyMagic};
+    /// use mt5_bridge::reconciliation::events::{OrderEvent, OrderObserver};
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    ///
+    /// struct Counter(AtomicUsize);
+    /// impl OrderObserver for Counter {
+    ///     fn on_event(&self, _event: &OrderEvent) {
+    ///         self.0.fetch_add(1, Ordering::Relaxed);
+    ///     }
+    /// }
+    ///
+    /// let manager = OrderManager::try_new(20240101)
+    ///     .expect("valid magic")
+    ///     .with_observer(Box::new(Counter(AtomicUsize::new(0))));
+    /// ```
+    pub fn with_observer(mut self, observer: Box<dyn OrderObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Create a manager backed by a durable [`OrderStore`], restoring any state it holds.
@@ -220,6 +253,15 @@ impl OrderManager {
     /// Validated [`StrategyMagic`] owned by this manager.
     pub fn magic(&self) -> StrategyMagic {
         self.strategy_magic
+    }
+
+    /// Notify the attached observer, if any, of a lifecycle event.
+    ///
+    /// Called synchronously during state transitions; observers must not block.
+    fn emit(&self, event: OrderEvent) {
+        if let Some(observer) = &self.observer {
+            observer.on_event(&event);
+        }
     }
 
     /// Retrieve all tracked orders (ordered by `client_order_id`).
@@ -519,6 +561,10 @@ impl OrderManager {
             error!(client_order_id = %cid, error = %e, "Write-ahead journal failed; order NOT transmitted");
             return Err(e);
         }
+        self.emit(OrderEvent::Submitting {
+            client_order_id: cid.clone(),
+            request: req.clone(),
+        });
 
         // Transmit to MT5 bridge
         let outcome = client.order_send(&req);
@@ -533,6 +579,30 @@ impl OrderManager {
                     price = tracked.average_price,
                     "Order executed and tracked successfully"
                 );
+                match tracked.state {
+                    OrderState::Filled => self.emit(OrderEvent::Filled {
+                        client_order_id: cid.clone(),
+                        deal_ticket: tracked.deal_ticket,
+                        price: tracked.average_price,
+                    }),
+                    OrderState::PartiallyFilled => self.emit(OrderEvent::PartialFill {
+                        client_order_id: cid.clone(),
+                        filled: tracked.filled_volume,
+                        remaining: tracked.remaining_volume,
+                    }),
+                    OrderState::Accepted => self.emit(OrderEvent::Accepted {
+                        client_order_id: cid.clone(),
+                        order_ticket: tracked.order_ticket,
+                    }),
+                    OrderState::Rejected => self.emit(OrderEvent::Rejected {
+                        client_order_id: cid.clone(),
+                        reason: tracked
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| trade_res.description().to_string()),
+                    }),
+                    _ => {}
+                }
                 Ok(())
             }
             Err(e) => {
@@ -545,6 +615,10 @@ impl OrderManager {
                             client_order_id = %cid,
                             "Order execution outcome is UNKNOWN! Reconcile against broker before retrying."
                         );
+                        self.emit(OrderEvent::Unknown {
+                            client_order_id: cid.clone(),
+                            description: desc.clone(),
+                        });
                         Err(Mt5Error::UnknownExecutionState {
                             symbol: req.symbol.clone(),
                             client_order_id: Some(cid.clone()),
@@ -554,8 +628,12 @@ impl OrderManager {
                     OrderState::Rejected => {
                         tracked.state = OrderState::Rejected;
                         tracked.rejection = evidence;
-                        tracked.error_message = Some(desc);
+                        tracked.error_message = Some(desc.clone());
                         tracked.updated_at = Utc::now().timestamp();
+                        self.emit(OrderEvent::Rejected {
+                            client_order_id: cid.clone(),
+                            reason: desc,
+                        });
                         Err(e)
                     }
                     _ => Err(e),
@@ -976,17 +1054,44 @@ impl OrderManager {
             LifecycleState::Ready
         };
 
-        ReconciliationReport {
+        let report = ReconciliationReport {
             positions: live_positions,
             pending_orders: live_orders,
-            reconciled_orders,
-            absent_orders,
+            reconciled_orders: reconciled_orders.clone(),
+            absent_orders: absent_orders.clone(),
             foreign_positions,
             timestamp: now,
             unresolved_orders,
-            mismatched_orders,
+            mismatched_orders: mismatched_orders.clone(),
             deal_history_available,
+        };
+
+        // Emit lifecycle events for the orders this pass resolved.
+        for tracked in &report.reconciled_orders {
+            self.emit(OrderEvent::Reconciled {
+                client_order_id: tracked.client_order_id.clone(),
+                report: report.clone(),
+            });
         }
+        for tracked in &report.mismatched_orders {
+            self.emit(OrderEvent::Mismatched {
+                client_order_id: tracked.client_order_id.clone(),
+                mismatches: tracked.mismatches.iter().map(|m| m.kind).collect(),
+            });
+        }
+        for tracked in &report.absent_orders {
+            self.emit(OrderEvent::Rejected {
+                client_order_id: tracked.client_order_id.clone(),
+                reason: tracked.error_message.clone().unwrap_or_else(|| {
+                    format!(
+                        "order '{}' confirmed absent from broker",
+                        tracked.client_order_id
+                    )
+                }),
+            });
+        }
+
+        report
     }
 
     /// Apply an asynchronous broker `TradeEvent` (protocol v5+ push model).
@@ -1025,9 +1130,28 @@ impl OrderManager {
         });
 
         if let Some(id) = target_id {
-            if let Some(ord) = self.orders.get_mut(&id) {
+            let state_and_cloned = self.orders.get_mut(&id).map(|ord| {
                 ord.update_from_trade_event(ev);
-                let cloned = ord.clone();
+                (ord.state, ord.clone())
+            });
+            if let Some((state, cloned)) = state_and_cloned {
+                match state {
+                    OrderState::Accepted => self.emit(OrderEvent::Accepted {
+                        client_order_id: id.clone(),
+                        order_ticket: cloned.order_ticket,
+                    }),
+                    OrderState::PartiallyFilled => self.emit(OrderEvent::PartialFill {
+                        client_order_id: id.clone(),
+                        filled: cloned.filled_volume,
+                        remaining: cloned.remaining_volume,
+                    }),
+                    OrderState::Filled => self.emit(OrderEvent::Filled {
+                        client_order_id: id.clone(),
+                        deal_ticket: cloned.deal_ticket,
+                        price: cloned.average_price,
+                    }),
+                    _ => {}
+                }
                 self.persist_update(&cloned)?;
                 return Ok(Some(cloned));
             }
@@ -1121,8 +1245,28 @@ impl OrderManager {
         };
         order.mismatches.clear();
         order.updated_at = chrono::Utc::now().timestamp();
+        let client_order_id = client_order_id.to_string();
         let out = order.clone();
         self.persist()?;
+        match out.state {
+            OrderState::Reconciled => {
+                let report = ReconciliationReport {
+                    reconciled_orders: vec![out.clone()],
+                    ..Default::default()
+                };
+                self.emit(OrderEvent::Reconciled {
+                    client_order_id,
+                    report,
+                });
+            }
+            OrderState::Accepted => {
+                self.emit(OrderEvent::Accepted {
+                    client_order_id,
+                    order_ticket: out.order_ticket,
+                });
+            }
+            _ => {}
+        }
         Ok(out)
     }
 
@@ -1151,6 +1295,10 @@ impl OrderManager {
                 if touched {
                     for o in self.orders.values() {
                         if o.position_ticket == ticket || o.order_ticket == ticket {
+                            self.emit(OrderEvent::Closed {
+                                client_order_id: o.client_order_id.clone(),
+                                reason: DealReason::Expert,
+                            });
                             if let Err(e) = self.persist_update(o) {
                                 error!(ticket, error = %e, "Failed to journal position close");
                             }
@@ -1273,6 +1421,7 @@ impl OrderManager {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "serde_json")]
     #[test]
     fn strategy_magic_validation_and_conversions() {
         assert!(StrategyMagic::new(0).is_err());

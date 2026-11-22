@@ -305,6 +305,7 @@ fn generated_client_order_ids_are_unique_across_threads() {
 }
 
 #[test]
+#[cfg(feature = "serde_json")]
 fn tracked_order_state_exported_by_older_versions_still_deserializes() {
     // No wire_id / requested_* / deal_tickets / absent_* / mismatches fields.
     let old = r#"{
@@ -1621,10 +1622,12 @@ fn arc_and_reference_backends_are_accepted_by_the_manager() {
 // Durable persistence and crash recovery
 // ═════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "serde_json")]
 fn store_at(path: &std::path::Path) -> Box<dyn OrderStore> {
     Box::new(JsonFileStore::new(path))
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn restart_after_a_lost_response_resumes_from_disk_and_reconciles() {
     let dir = scratch_dir("restart");
@@ -1674,6 +1677,7 @@ fn restart_after_a_lost_response_resumes_from_disk_and_reconciles() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn a_crash_between_write_ahead_and_outcome_restores_as_unknown() {
     struct CrashOnSend<'a>(&'a MockBroker);
@@ -1750,6 +1754,7 @@ fn a_crash_between_write_ahead_and_outcome_restores_as_unknown() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn if_the_write_ahead_record_cannot_be_saved_the_order_is_not_transmitted() {
     let dir = scratch_dir("nowal");
@@ -1772,6 +1777,7 @@ fn if_the_write_ahead_record_cannot_be_saved_the_order_is_not_transmitted() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn corrupt_or_foreign_journal_files_are_an_error_never_an_empty_order_book() {
     let dir = scratch_dir("corrupt");
@@ -1793,6 +1799,7 @@ fn corrupt_or_foreign_journal_files_are_an_error_never_an_empty_order_book() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn a_stale_temp_file_from_a_crash_mid_write_is_ignored_and_overwritten() {
     let dir = scratch_dir("tmpfile");
@@ -1823,6 +1830,7 @@ fn a_stale_temp_file_from_a_crash_mid_write_is_ignored_and_overwritten() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(feature = "serde_json")]
 #[test]
 fn journal_file_is_a_versioned_envelope_and_a_fresh_store_loads_empty() {
     let dir = scratch_dir("envelope");

@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 use mt5_bridge::stream::{BookSubscription, EventBus, SequenceTracker};
 use mt5_bridge::{BookEvent, StreamError, StreamMode, Tick, TickSubscription};
 use std::sync::Arc;

@@ -36,12 +36,14 @@
 //!   failure modes.)
 
 pub mod classification;
+pub mod events;
 pub mod manager;
 pub mod shared;
 pub mod state;
 
 #[cfg(feature = "async")]
 pub(crate) use classification::classify_send_error;
+pub use events::{OrderEvent, OrderObserver};
 pub use manager::{OrderManager, StrategyMagic};
 pub use shared::{OrderSnapshot, SharedOrderManager};
 pub use state::{

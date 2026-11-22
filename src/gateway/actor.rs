@@ -6,7 +6,8 @@ use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
 use crate::position_book::PositionBook;
 use crate::reconciliation::{
-    classify_send_error, LifecycleState, OrderManager, ReconciliationReport, SharedOrderManager,
+    classify_send_error, LifecycleState, OrderEvent, OrderManager, OrderObserver,
+    ReconciliationReport, SharedOrderManager,
 };
 use crate::session::{Mt5Session, SessionConfig};
 use crate::types::{
@@ -118,6 +119,7 @@ pub struct Mt5GatewayHandle {
     p3_tx: mpsc::Sender<P3Command>,
     trade_event_in_tx: mpsc::UnboundedSender<TradeEvent>,
     trade_event_out_tx: broadcast::Sender<TradeEvent>,
+    order_event_out_tx: broadcast::Sender<OrderEvent>,
     tick_watchers: Arc<Mutex<HashMap<String, watch::Sender<Option<crate::types::Tick>>>>>,
     state_watch: watch::Receiver<LifecycleState>,
     shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -335,6 +337,16 @@ impl Mt5GatewayHandle {
         crate::stream::TradeSubscription::new(self.trade_event_out_tx.subscribe())
     }
 
+    /// Subscribe to order lifecycle events emitted by the gateway's order manager.
+    ///
+    /// Events are broadcast: every subscriber receives its own copy and a slow subscriber
+    /// is detached rather than blocking the gateway. Combine with
+    /// [`Mt5GatewayHandle::submit_order`] to observe submissions, fills, rejections, and
+    /// reconciliation outcomes without polling.
+    pub fn subscribe_order_events(&self) -> broadcast::Receiver<OrderEvent> {
+        self.order_event_out_tx.subscribe()
+    }
+
     /// Current operational lifecycle state.
     pub fn state(&self) -> LifecycleState {
         *self.state_watch.borrow()
@@ -462,6 +474,7 @@ pub struct Mt5Gateway<B: TradingBackend + Send + Sync + 'static> {
     p1_timeout: Duration,
     p2_timeout: Duration,
     p3_timeout: Duration,
+    order_event_out_tx: broadcast::Sender<OrderEvent>,
 }
 
 impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
@@ -512,6 +525,7 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
         let (p3_tx, p3_rx) = mpsc::channel(1024);
         let (trade_event_in_tx, trade_event_in_rx) = mpsc::unbounded_channel();
         let (trade_event_out_tx, _) = broadcast::channel(2048);
+        let (order_event_out_tx, _) = broadcast::channel(2048);
         let tick_watchers = Arc::new(Mutex::new(HashMap::new()));
         let (state_watch_tx, state_watch_rx) = watch::channel(LifecycleState::Starting);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -520,8 +534,24 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
         let session = Mt5Session::new(config.session);
         let strategy_magic = order_manager.strategy_magic();
         let position_book = Arc::new(Mutex::new(PositionBook::new(Some(strategy_magic))));
-        let shared_order_manager = SharedOrderManager::new(order_manager);
         let executor = BlockingExecutor::new(config.executor_permits);
+
+        // The handle is built first so it can act as the order manager's observer: every
+        // lifecycle event is broadcast on `order_event_out_tx` for `subscribe_order_events()`.
+        let handle = Mt5GatewayHandle {
+            p1_tx,
+            p2_tx,
+            p3_tx,
+            trade_event_in_tx,
+            trade_event_out_tx: trade_event_out_tx.clone(),
+            order_event_out_tx: order_event_out_tx.clone(),
+            tick_watchers: Arc::clone(&tick_watchers),
+            state_watch: state_watch_rx,
+            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+        };
+
+        let order_manager = order_manager.with_observer(Box::new(handle.clone()));
+        let shared_order_manager = SharedOrderManager::new(order_manager);
 
         let gateway = Self {
             backend: None,
@@ -544,17 +574,7 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
             p1_timeout: config.p1_timeout,
             p2_timeout: config.p2_timeout,
             p3_timeout: config.p3_timeout,
-        };
-
-        let handle = Mt5GatewayHandle {
-            p1_tx,
-            p2_tx,
-            p3_tx,
-            trade_event_in_tx,
-            trade_event_out_tx,
-            tick_watchers,
-            state_watch: state_watch_rx,
-            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+            order_event_out_tx,
         };
 
         let join_handle = tokio::spawn(async move {
@@ -1279,5 +1299,17 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                 );
             }
         }
+    }
+}
+
+impl OrderObserver for Mt5GatewayHandle {
+    fn on_event(&self, event: &OrderEvent) {
+        let _ = self.order_event_out_tx.send(event.clone());
+    }
+}
+
+impl<B: TradingBackend + Send + Sync + 'static> OrderObserver for Mt5Gateway<B> {
+    fn on_event(&self, event: &OrderEvent) {
+        let _ = self.order_event_out_tx.send(event.clone());
     }
 }

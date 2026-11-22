@@ -21,9 +21,13 @@ pub const DUP_PRICE_THRESHOLD: f64 = PRICE_TOLERANCE;
 pub const DUP_TIME_THRESHOLD: f64 = TIME_TOLERANCE;
 
 use crate::reconciliation::StrategyMagic;
+use crate::types::Magic;
 
 /// Magic number used by the default EA configuration (`InpMagicNumber`).
 pub const EA_DEFAULT_MAGIC: u64 = 20240101;
+
+/// Default magic as a [`Magic`] newtype.
+pub const EA_DEFAULT_MAGIC_TYPED: Magic = Magic(EA_DEFAULT_MAGIC);
 
 /// Strategy magic corresponding to [`EA_DEFAULT_MAGIC`].
 pub const EA_DEFAULT_STRATEGY_MAGIC: StrategyMagic =

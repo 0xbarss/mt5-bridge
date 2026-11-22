@@ -4,6 +4,7 @@ use crate::types::symbol::SymbolInfo;
 use crate::types::wire_id::{
     truncate_utf8, wire_id, MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX,
 };
+use crate::types::{Magic, Price, Symbol, Volume};
 use serde::{Deserialize, Serialize};
 
 /// Parameters for placing an order via `order_send`.
@@ -117,6 +118,122 @@ impl OrderRequest {
     pub fn client_order_id(mut self, id: impl Into<String>) -> Self {
         self.client_order_id = Some(id.into());
         self
+    }
+
+    // ---- Typed constructors (alongside the primitive API) ----
+
+    /// Create a new market Buy order request with typed units.
+    pub fn buy_typed(symbol: impl Into<Symbol>, volume: Volume) -> Self {
+        Self {
+            symbol: symbol.into().into_inner(),
+            order_type: OrderType::Buy,
+            volume: volume.into_inner(),
+            price: 0.0,
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+
+    /// Create a new market Sell order request with typed units.
+    pub fn sell_typed(symbol: impl Into<Symbol>, volume: Volume) -> Self {
+        Self {
+            symbol: symbol.into().into_inner(),
+            order_type: OrderType::Sell,
+            volume: volume.into_inner(),
+            price: 0.0,
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+
+    /// Create a new limit or pending order request with typed units.
+    pub fn pending_typed(
+        symbol: impl Into<Symbol>,
+        order_type: OrderType,
+        volume: Volume,
+        price: Price,
+    ) -> Self {
+        Self {
+            symbol: symbol.into().into_inner(),
+            order_type,
+            volume: volume.into_inner(),
+            price: price.into_inner(),
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+
+    // ---- Typed field mutators (alongside the primitive API) ----
+
+    pub fn symbol_typed(mut self, symbol: Symbol) -> Self {
+        self.symbol = symbol.into_inner();
+        self
+    }
+
+    pub fn volume_typed(mut self, volume: Volume) -> Self {
+        self.volume = volume.into_inner();
+        self
+    }
+
+    pub fn price_typed(mut self, price: Price) -> Self {
+        self.price = price.into_inner();
+        self
+    }
+
+    pub fn stop_loss_typed(mut self, stop_loss: Price) -> Self {
+        self.stop_loss = stop_loss.into_inner();
+        self
+    }
+
+    pub fn take_profit_typed(mut self, take_profit: Price) -> Self {
+        self.take_profit = take_profit.into_inner();
+        self
+    }
+
+    pub fn magic_typed(mut self, magic: Magic) -> Self {
+        self.magic = Some(magic.into_inner());
+        self
+    }
+
+    // ---- Typed field accessors (alongside the public primitive fields) ----
+
+    pub fn symbol_typed_get(&self) -> Symbol {
+        Symbol::from(self.symbol.clone())
+    }
+
+    pub fn volume_typed_get(&self) -> Volume {
+        Volume(self.volume)
+    }
+
+    pub fn price_typed_get(&self) -> Price {
+        Price(self.price)
+    }
+
+    pub fn stop_loss_typed_get(&self) -> Price {
+        Price(self.stop_loss)
+    }
+
+    pub fn take_profit_typed_get(&self) -> Price {
+        Price(self.take_profit)
+    }
+
+    pub fn magic_typed_get(&self) -> Option<Magic> {
+        self.magic.map(Magic)
     }
 
     /// Formats the effective MT5 wire comment, embedding the order's identity if present.

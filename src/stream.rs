@@ -548,7 +548,7 @@ impl BookSubscription {
             }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 self.dropped += skipped;
-                Err(StreamError::Lagged(skipped))
+                Err(StreamError::Lagged { skipped })
             }
             Err(broadcast::error::RecvError::Closed) => Ok(None),
         }
@@ -560,6 +560,57 @@ impl Drop for BookSubscription {
         self.rx = None;
         if let Some(bus) = &self.bus {
             bus.prune_book(&self.symbol);
+        }
+    }
+}
+
+/// Active subscription to pushed broker trade transaction events (protocol v5+).
+///
+/// Wraps a broadcast [`Receiver`](tokio::sync::broadcast::Receiver) of [`TradeEvent`] with
+/// consumer-side lag detection. Trade event fan-out is a **bounded, ordered broadcast**: a slow
+/// subscriber falls behind and observes [`StreamError::Lagged`] via
+/// [`recv_checked`](Self::recv_checked); skipped events are not re-delivered to that subscriber.
+/// For durability requirements (durable queue, cursor-based replay), see the record/replay (B5)
+/// and audit log (C2) proposals.
+pub struct TradeSubscription {
+    rx: broadcast::Receiver<TradeEvent>,
+    lagged: u64,
+}
+
+impl TradeSubscription {
+    /// Construct a subscription from a raw broadcast receiver.
+    pub fn new(rx: broadcast::Receiver<TradeEvent>) -> Self {
+        Self { rx, lagged: 0 }
+    }
+
+    /// Total events skipped by broadcast buffer overflow (consumer lag) on this subscription.
+    pub fn lagged(&self) -> u64 {
+        self.lagged
+    }
+
+    /// Asynchronously receive the next trade event with explicit lag detection.
+    ///
+    /// - Returns `Ok(Some(ev))` when delivered cleanly.
+    /// - Returns `Err(StreamError::Lagged { skipped })` on broadcast buffer overrun; `skipped`
+    ///   events were permanently lost to this subscriber and [`lagged`](Self::lagged) is
+    ///   increased accordingly.
+    /// - Returns `Ok(None)` when the trade broadcast channel is closed.
+    pub async fn recv_checked(&mut self) -> Result<Option<TradeEvent>, StreamError> {
+        match self.rx.recv().await {
+            Ok(ev) => Ok(Some(ev)),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                self.lagged += skipped;
+                Err(StreamError::Lagged { skipped })
+            }
+            Err(broadcast::error::RecvError::Closed) => Ok(None),
+        }
+    }
+
+    /// Create a new independent receiver subscribed to the same trade broadcast feed.
+    pub fn resubscribe(&self) -> Self {
+        Self {
+            rx: self.rx.resubscribe(),
+            lagged: 0,
         }
     }
 }
@@ -635,8 +686,8 @@ pub enum StreamError {
     Closed,
 
     /// Consumer lagged behind stream buffer.
-    #[error("Stream consumer lagged by {0} events")]
-    Lagged(u64),
+    #[error("Stream consumer lagged by {skipped} events")]
+    Lagged { skipped: u64 },
 
     /// Upstream event sequence jumped forward, indicating dropped events between
     /// `expected` and `got` (inclusive range of missing sequence numbers).

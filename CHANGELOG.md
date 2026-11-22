@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reaches the backend, so no custom backend can receive an unprotected order by default.
   - Opt out with `require_stop_loss = false` for strategies that manage protection
     externally (not recommended).
+- **Trade stream delivery guarantee clarified**:
+  - `Mt5Client::subscribe_trade()` now returns a `TradeSubscription` wrapping the broadcast
+    receiver with consumer-side lag detection via `recv_checked()`, which returns
+    `StreamError::Lagged { skipped }` when the broadcast buffer overflows.
+  - The trade event stream is documented as bounded, ordered fan-out with lag detection;
+    it is not lossless. Slow subscribers skip events and must handle lag explicitly.
+  - `TradeSubscription` tracks the total number of skipped events (`lagged()`).
+  - `Mt5Gateway` logs when trade event fan-out lags behind subscribers.
 
 ### Changed
 

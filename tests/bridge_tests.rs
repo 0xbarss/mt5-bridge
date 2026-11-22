@@ -1721,10 +1721,56 @@ async fn test_book_subscription_dropped_events_tracking() {
     // recv_checked returns Lagged when the broadcast buffer overflows.
     let result = sub.recv_checked().await;
     assert!(
-        matches!(result, Err(mt5_bridge::StreamError::Lagged(_))),
+        matches!(result, Err(mt5_bridge::StreamError::Lagged { .. })),
         "expected Lagged, got {result:?}"
     );
     assert!(sub.dropped() > 0);
+}
+
+#[tokio::test]
+async fn test_trade_subscription_dropped_events_tracking() {
+    use mt5_bridge::stream::TradeSubscription;
+
+    // Small buffer so we can overflow it.
+    let bus = EventBus::new(4);
+    let rx = bus.subscribe_trade();
+    let mut sub = TradeSubscription::new(rx);
+
+    // Flood the channel.
+    for seq in 1u64..=200 {
+        let ev = TradeEvent {
+            deal: seq,
+            order: seq,
+            position: seq,
+            time: 1710000000 + seq as i64,
+            trans_type: 0,
+            order_type: OrderType::Buy,
+            price: 1.0850,
+            volume: 0.1,
+            sl: 0.0,
+            tp: 0.0,
+            symbol: "EURUSD".to_string(),
+            comment: "test".to_string(),
+            deal_entry: 0,
+            deal_type: 0,
+            deal_magic: 0,
+            deal_position_id: seq,
+            deal_reason: 0,
+            event_seq: seq,
+        };
+        bus.dispatch_trade(ev);
+    }
+
+    // recv_checked returns Lagged when the broadcast buffer overflows.
+    let result = sub.recv_checked().await;
+    assert!(
+        matches!(
+            result,
+            Err(mt5_bridge::StreamError::Lagged { skipped }) if skipped > 0
+        ),
+        "expected Lagged with skipped > 0, got {result:?}"
+    );
+    assert!(sub.lagged() > 0);
 }
 
 #[test]

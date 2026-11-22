@@ -290,7 +290,7 @@ impl Mt5GatewayHandle {
         rx.await.map_err(|_| Mt5Error::ChannelDisconnected)?
     }
 
-    /// Ingest a trade transaction event into the lossless queue.
+    /// Ingest a trade transaction event into the bounded fan-out queue.
     pub fn dispatch_trade_event(&self, event: TradeEvent) {
         let _ = self.trade_event_in_tx.send(event);
     }
@@ -325,9 +325,14 @@ impl Mt5GatewayHandle {
         }
     }
 
-    /// Subscribe to the lossless broadcast stream of trade events.
-    pub fn subscribe_trade_events(&self) -> broadcast::Receiver<TradeEvent> {
-        self.trade_event_out_tx.subscribe()
+    /// Subscribe to the bounded, ordered fan-out stream of trade events.
+    ///
+    /// Returns a [`TradeSubscription`](crate::stream::TradeSubscription) wrapping the broadcast
+    /// receiver with explicit consumer-side lag detection (`recv_checked()` returns
+    /// [`crate::stream::StreamError::Lagged`] when the broadcast buffer overflows). Trade event
+    /// delivery is not lossless; a slow subscriber skips events and must handle lag explicitly.
+    pub fn subscribe_trade_events(&self) -> crate::stream::TradeSubscription {
+        crate::stream::TradeSubscription::new(self.trade_event_out_tx.subscribe())
     }
 
     /// Current operational lifecycle state.
@@ -1257,6 +1262,22 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
             .unwrap_or_else(|p| p.into_inner())
             .apply_trade_event(&event);
         let _ = self.order_manager.apply_trade_event(&event);
-        let _ = self.trade_event_out_tx.send(event);
+
+        // Fan out to all trade subscribers. broadcast::Sender::send returns the number of
+        // receivers that accepted the event; if that is below receiver_count(), at least one
+        // subscriber's buffer is full and that subscriber skipped this event (lag). Log the
+        // lag so operators can detect it and trigger reconciliation if needed.
+        let delivered = self.trade_event_out_tx.send(event);
+        if let Ok(n) = delivered {
+            let total = self.trade_event_out_tx.receiver_count();
+            if n < total {
+                warn!(
+                    delivered = n,
+                    subscribers = total,
+                    skipped = total - n,
+                    "Trade event fan-out lag: some subscribers skipped this event; call subscribe_trade_events().recv_checked() to detect lag on the consumer side"
+                );
+            }
+        }
     }
 }

@@ -7,7 +7,9 @@
 //!   - Priority 2 (Transactional): Account info, positions, pending orders, deals, manual reconciliation, and responsiveness pings.
 //!   - Priority 3 (Bulk): Historical candle downloads (`copy_rates_chunked`).
 //! - Starvation-free priority scheduling ensuring P1 commands are never blocked by heavy P3 downloads.
-//! - Lossless trade event stream with `event_seq` gap detection triggering immediate reconciliation.
+//! - Bounded, ordered trade event fan-out with per-subscriber lag detection via
+//!   [`TradeSubscription::recv_checked`](crate::stream::TradeSubscription::recv_checked); `event_seq`
+//!   gap detection triggers immediate reconciliation.
 //! - Tick conflation via Tokio `watch` channels to decouple order execution from high-frequency tick bursts.
 
 pub mod actor;

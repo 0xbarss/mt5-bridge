@@ -57,7 +57,11 @@ impl Mt5Client {
     }
 
     /// Subscribe to asynchronous broker trade transaction events (protocol v5+).
-    pub fn subscribe_trade(&self) -> Result<tokio::sync::broadcast::Receiver<TradeEvent>> {
+    ///
+    /// Returns a [`TradeSubscription`](crate::stream::TradeSubscription) wrapping the broadcast
+    /// receiver with explicit consumer-side lag detection (`recv_checked()` returns
+    /// [`crate::stream::StreamError::Lagged`] when the broadcast buffer overflows).
+    pub fn subscribe_trade(&self) -> Result<crate::stream::TradeSubscription> {
         let fn_sub = self
             .fn_subscribe_trade
             .ok_or(Mt5Error::UnsupportedFeature("SubscribeTrade"))?;
@@ -68,7 +72,9 @@ impl Mt5Client {
             )));
         }
         self.register_trade_subscription();
-        Ok(self.event_bus.subscribe_trade())
+        Ok(crate::stream::TradeSubscription::new(
+            self.event_bus.subscribe_trade(),
+        ))
     }
 
     /// Unsubscribe from asynchronous broker trade transaction events (protocol v5+).

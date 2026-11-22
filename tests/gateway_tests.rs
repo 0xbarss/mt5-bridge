@@ -5,7 +5,7 @@
 //! - Concurrent order submissions and modifications without state corruption.
 //! - Mt5Session lifecycle state transitions and exponential backoff ladder.
 //! - Disconnect blocking of new entries and post-reconnect recovery.
-//! - TradeEvent lossless queue delivery and event_seq gap detection triggering reconciliation.
+//! - TradeEvent bounded fan-out delivery and event_seq gap detection triggering reconciliation.
 //! - Conflated tick stream updates via watch channels.
 
 #![allow(clippy::disallowed_methods)]
@@ -428,7 +428,7 @@ async fn test_gateway_concurrent_submissions_and_modifications() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 4. Trade Event Lossless Queue & Gap Recovery
+// 4. Trade Event Bounded Fan-Out & Gap Recovery
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -466,7 +466,7 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
     };
     gateway.dispatch_trade_event(ev1.clone());
 
-    let received = trade_rx.recv().await.unwrap();
+    let received = trade_rx.recv_checked().await.unwrap().unwrap();
     assert_eq!(received.event_seq, 1);
     assert_eq!(broker.reconcile_count(), initial_reconcile);
 
@@ -493,7 +493,7 @@ async fn test_gateway_trade_event_lossless_queue_and_gap_detection() {
     };
     gateway.dispatch_trade_event(ev5.clone());
 
-    let received5 = trade_rx.recv().await.unwrap();
+    let received5 = trade_rx.recv_checked().await.unwrap().unwrap();
     assert_eq!(received5.event_seq, 5);
 
     // Wait briefly for actor to execute mandatory reconciliation triggered by gap

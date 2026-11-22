@@ -244,7 +244,7 @@ In high-volatility market conditions (e.g. major news releases), quote or transa
 - **Client Drop Counter Inspection**: Call [`Mt5Client::events_dropped_total(&self) -> u64`](src/client/mod.rs) at any time to monitor dropped events across all active subscriptions.
 - **MQL5 EA Drops Alerting**: The EA maintains independent queue counters (`g_ticks_dropped_total`, `g_trades_dropped_total`) and emits periodic warning alerts to the MT5 Experts log whenever queue capacity thresholds are exceeded.
 - **Dual Stream Modes**:
-  - `StreamMode::Lossless`: Backpressure detection via `recv_checked()` which returns `Err(RecvError::Lagged(skipped))` whenever a consumer falls behind, guaranteeing that recording and auditing engines detect data gaps.
+  - `StreamMode::Lossless`: Backpressure detection via `recv_checked()` which returns `Err(RecvError::Lagged(skipped))` whenever a consumer falls behind, so recording and auditing engines can detect data gaps explicitly.
   - `StreamMode::Latest`: Broadcast channel that drops lagged quotes in favor of the newest tick, ensuring execution algorithms never execute on a stale backlog.
 - **Upstream Sequence Gap Detection**: Both `TickSubscription` and `BookSubscription` embed monotonic sequence tracking. `BookSubscription::recv_checked()` returns `Err(StreamError::Gap { expected, got })` when an upstream drop occurs, buffering the out-of-sequence event to prevent silent quote loss. Trackers also expose `.gaps()`, `.reordered()`, and `.last_seq()`.
 
@@ -1005,9 +1005,10 @@ Rather than relying solely on periodic snapshot polling (which introduces latenc
 // Subscribe to real-time broker trade events (Protocol v5+)
 let mut trade_sub = client.subscribe_trade()?;
 
-// Background event processing loop
+// Background event processing loop; recv_checked() returns Err(StreamError::Lagged) when
+// the broadcast buffer overflows and events were skipped for this subscriber.
 tokio::spawn(async move {
-    while let Ok(event) = trade_sub.recv().await {
+    while let Ok(Some(event)) = trade_sub.recv_checked().await {
         // Incrementally updates local tracked orders with fills, deal tickets, and closes
         manager.apply_trade_event(&event);
     }
@@ -1134,11 +1135,11 @@ Event-driven streaming directly fed from MT5's `OnTick()`, `OnBookEvent()`, `OnT
 | Method | Signature | Description |
 | :--- | :--- | :--- |
 | [`subscribe_ticks`](src/client/mod.rs) | `pub fn subscribe_ticks(&self, symbol: &str) -> Result<TickSubscription>` | Subscribes to push tick events for `symbol` using default [`StreamMode::Latest`](src/stream.rs). |
-| [`subscribe_ticks_with_mode`](src/client/mod.rs) | `pub fn subscribe_ticks_with_mode(&self, symbol: &str, mode: StreamMode) -> Result<TickSubscription>` | Subscribes to push ticks with explicit mode: `StreamMode::Lossless` (guaranteed delivery with lag detection) or `StreamMode::Latest` (lowest-latency). |
+| [`subscribe_ticks_with_mode`](src/client/mod.rs) | `pub fn subscribe_ticks_with_mode(&self, symbol: &str, mode: StreamMode) -> Result<TickSubscription>` | Subscribes to push ticks with explicit mode: `StreamMode::Lossless` (backpressure and lag detection) or `StreamMode::Latest` (lowest-latency). |
 | [`unsubscribe_ticks`](src/client/mod.rs) | `pub fn unsubscribe_ticks(&self, symbol: &str) -> Result<()>` | Unsubscribes from push tick quotes for `symbol`. |
 | [`subscribe_book`](src/client/mod.rs) | `pub fn subscribe_book(&self, symbol: &str) -> Result<BookSubscription>` | Subscribes to real-time Level II Market Depth (order book) updates for `symbol`. |
 | [`unsubscribe_book`](src/client/mod.rs) | `pub fn unsubscribe_book(&self, symbol: &str) -> Result<()>` | Unsubscribes from Level II depth stream for `symbol`. |
-| [`subscribe_trade`](src/client/mod.rs) | `pub fn subscribe_trade(&self) -> Result<tokio::sync::broadcast::Receiver<TradeEvent>>` | Subscribes to real-time broker trade transactions (`OnTradeTransaction`) with order comment attribution. |
+| [`subscribe_trade`](src/client/mod.rs) | `pub fn subscribe_trade(&self) -> Result<TradeSubscription>` | Subscribes to real-time broker trade transactions (`OnTradeTransaction`) with order comment attribution. Delivery is bounded fan-out; use `recv_checked()` to detect consumer lag. |
 | [`unsubscribe_trade`](src/client/mod.rs) | `pub fn unsubscribe_trade(&self) -> Result<()>` | Unsubscribes from broker trade transactions stream. |
 | [`subscribe_bars`](src/client/mod.rs) | `pub fn subscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<tokio::sync::broadcast::Receiver<Bar>>` | Subscribes to real-time closed candlestick bar notifications for `symbol` and `timeframe`. |
 | [`unsubscribe_bars`](src/client/mod.rs) | `pub fn unsubscribe_bars(&self, symbol: &str, timeframe: Timeframe) -> Result<()>` | Unsubscribes from closed bar stream. |

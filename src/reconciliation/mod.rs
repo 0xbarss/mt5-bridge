@@ -43,7 +43,7 @@ pub mod state;
 #[cfg(feature = "async")]
 pub(crate) use classification::classify_send_error;
 pub use manager::{OrderManager, StrategyMagic};
-pub use shared::SharedOrderManager;
+pub use shared::{OrderSnapshot, SharedOrderManager};
 pub use state::{
     BrokerSnapshot, LifecycleState, ReconciliationReport, SafetyPolicy, UnknownBlockScope,
 };

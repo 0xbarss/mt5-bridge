@@ -299,6 +299,14 @@ impl OrderManager {
         self.orders.values().cloned().collect()
     }
 
+    /// Clone the tracked order book keyed by `client_order_id`.
+    ///
+    /// Used by [`SharedOrderManager`](crate::reconciliation::SharedOrderManager) to publish a
+    /// lock-free read snapshot after every mutation.
+    pub(crate) fn orders_snapshot(&self) -> BTreeMap<String, TrackedOrder> {
+        self.orders.clone()
+    }
+
     /// Flush the current state to the configured [`OrderStore`] (no-op without one).
     pub fn persist(&self) -> Result<()> {
         match &self.store {

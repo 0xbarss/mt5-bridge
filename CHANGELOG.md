@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Lock-free reconciliation reads** (A-09):
+  - `SharedOrderManager` publishes an `OrderSnapshot` through `arc-swap` after every mutation.
+  - `get_order`, `export_orders`, `lifecycle`, and the new `snapshot()` read the published
+    snapshot without acquiring the manager mutex, so they never wait behind a slow broker call.
+  - `try_get_order` performs a non-blocking authoritative read (`None` when the order is
+    unknown or the manager is busy).
+  - `OrderSnapshot` is re-exported from the crate root.
+- `tests/failure_injection.rs`: added a slow-backend test proving reads return immediately
+  while a reconciliation pass holds the manager lock.
+
+### Changed
+
+- `SharedOrderManager::strategy_magic` and `magic` no longer acquire the manager lock; the
+  strategy magic is immutable after construction.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

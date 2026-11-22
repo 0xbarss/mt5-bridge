@@ -967,6 +967,24 @@ When a live position or working order matches on ticket or wire identity token, 
   ```
   This structurally guarantees that checking idempotency, journaling write-ahead, transmitting over the pipe, and recording the outcome happen atomically across concurrent threads.
 
+  **Lock-free reads.** Writes are serialized, but reads are not. After every mutation the manager publishes an [`OrderSnapshot`](src/reconciliation/mod.rs) through `arc-swap`, so `get_order`, `export_orders`, `lifecycle`, and `snapshot()` never wait behind an in-flight broker call:
+  ```rust,no_run
+  # use mt5_bridge::{OrderManager, SharedOrderManager};
+  # fn example() -> Result<(), Box<dyn std::error::Error>> {
+  let shared = SharedOrderManager::new(OrderManager::try_new(998877)?);
+
+  // Non-blocking, consistent view as of the last completed mutation.
+  let snapshot = shared.snapshot();
+  let state = snapshot.lifecycle;
+
+  // Authoritative read that never waits: None means "unknown or manager busy".
+  let latest = shared.try_get_order("ord-1");
+  # let _ = (snapshot, state, latest);
+  # Ok(())
+  # }
+  ```
+  The snapshot is slightly behind a mutation that is still in flight; use `try_get_order` (or retry) when the authoritative latest state is required.
+
 #### Incremental Event Processing (`apply_trade_event`)
 Rather than relying solely on periodic snapshot polling (which introduces latency and pipe overhead), [`OrderManager`](src/reconciliation/mod.rs) and [`SharedOrderManager`](src/reconciliation/mod.rs) directly consume live push trade notifications via [`apply_trade_event`](src/reconciliation/mod.rs):
 

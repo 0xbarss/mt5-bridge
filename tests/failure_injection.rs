@@ -1455,6 +1455,124 @@ fn a_panic_mid_submission_leaves_a_recoverable_state_and_does_not_poison_the_sha
 }
 
 #[test]
+fn shared_manager_reads_do_not_wait_for_a_slow_broker_call() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct SlowBackend {
+        inner: Arc<MockBroker>,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        blocked: AtomicBool,
+    }
+
+    impl TradingBackend for SlowBackend {
+        fn order_send(&self, r: &OrderRequest) -> Result<TradeResult> {
+            self.inner.order_send(r)
+        }
+        fn order_close_with_magic(&self, t: u64, m: u64) -> Result<TradeResult> {
+            self.inner.order_close_with_magic(t, m)
+        }
+        fn order_modify_with_magic(
+            &self,
+            t: u64,
+            m: u64,
+            sl: Level,
+            tp: Level,
+        ) -> Result<TradeResult> {
+            self.inner.order_modify_with_magic(t, m, sl, tp)
+        }
+        fn positions_filtered(&self, m: Option<u64>, s: Option<&str>) -> Result<Vec<Position>> {
+            // Hold the manager lock across a slow broker query (bounded so a broken read path
+            // fails the assertion instead of hanging the suite forever).
+            if !self.blocked.swap(true, Ordering::SeqCst) {
+                let _ = self.entered.send(());
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2));
+            }
+            self.inner.positions_filtered(m, s)
+        }
+        fn pending_orders_filtered(
+            &self,
+            m: Option<u64>,
+            s: Option<&str>,
+        ) -> Result<Vec<WorkingOrder>> {
+            self.inner.pending_orders_filtered(m, s)
+        }
+    }
+
+    let broker = Arc::new(MockBroker::new());
+    let mut manager = manager();
+    manager
+        .submit_order(&*broker, buy("EURUSD", 0.5, "READ-1"))
+        .unwrap();
+    let shared = SharedOrderManager::new(manager);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let slow = SlowBackend {
+        inner: broker.clone(),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+        blocked: AtomicBool::new(false),
+    };
+
+    let reconcile_handle = {
+        let shared = shared.clone();
+        std::thread::spawn(move || shared.reconcile(&slow))
+    };
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reconcile thread must enter the slow broker call");
+
+    // The write lock is held by the reconcile thread right now. Every read below must still
+    // return immediately from the published snapshot.
+    let started = Instant::now();
+    let order = shared.get_order("READ-1").expect("snapshot has the order");
+    assert_eq!(order.state, OrderState::Filled);
+    let orders = shared.export_orders();
+    assert_eq!(orders.len(), 1);
+    let lifecycle = shared.lifecycle();
+    assert!(matches!(
+        lifecycle,
+        LifecycleState::Ready | LifecycleState::Starting
+    ));
+    let snapshot = shared.snapshot();
+    assert_eq!(
+        snapshot.get_order("READ-1").map(|o| o.state),
+        Some(OrderState::Filled)
+    );
+    // `try_get_order` is explicitly non-blocking: the lock is busy, so it reports "unknown".
+    assert!(shared.try_get_order("READ-1").is_none());
+    let elapsed = started.elapsed();
+
+    let _ = release_tx.send(());
+    let report = reconcile_handle
+        .join()
+        .expect("reconcile thread must not panic")
+        .expect("reconcile must succeed");
+    assert!(report.is_clean());
+
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "lock-free reads took {elapsed:?} while the broker call held the manager lock"
+    );
+    // After the mutation completes the snapshot reflects the new state.
+    assert_eq!(
+        shared.get_order("READ-1").unwrap().state,
+        OrderState::Filled
+    );
+    assert_eq!(
+        shared.try_get_order("READ-1").unwrap().state,
+        OrderState::Filled
+    );
+}
+
+#[test]
 fn arc_and_reference_backends_are_accepted_by_the_manager() {
     let arc = Arc::new(MockBroker::new());
     let mut mgr = manager();

@@ -30,7 +30,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 [features]
 default = ["async", "serde_json", "wal"]
-async = ["dep:tokio"]
+async = ["dep:tokio", "tokio/rt-multi-thread", "tokio/sync", "tokio/time", "tokio/macros"]
 wal = []
 json-journal = ["dep:serde_json"]
 serde_json = ["json-journal"]

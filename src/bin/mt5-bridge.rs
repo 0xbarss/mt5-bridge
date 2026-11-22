@@ -1,6 +1,6 @@
 //! mt5-bridge operational CLI.
 //!
-//! Commands: `doctor`, `stats`, `tail`, `replay`, `wal verify`.
+//! Commands: `doctor`, `stats`, `tail`, `wal verify`.
 //!
 //! This binary is built only with the `cli` feature; clap is a CLI-only
 //! dependency and the library remains free of CLI dependencies.
@@ -24,8 +24,6 @@ enum Cli {
     Stats(StatsArgs),
     /// Stream trade/tick events (requires the `async` feature).
     Tail(TailArgs),
-    /// Replay a captured event stream (requires the `async` feature).
-    Replay(ReplayArgs),
     /// Verify a WAL store (requires the `wal` feature).
     Wal(WalArgs),
 }
@@ -58,12 +56,6 @@ struct TailArgs {
 }
 
 #[derive(Parser, Debug)]
-struct ReplayArgs {
-    /// Capture file to replay.
-    path: PathBuf,
-}
-
-#[derive(Parser, Debug)]
 struct WalArgs {
     #[command(subcommand)]
     command: WalCommand,
@@ -84,7 +76,6 @@ fn main() -> ExitCode {
         Cli::Doctor(args) => run_doctor(args),
         Cli::Stats(args) => run_stats(args),
         Cli::Tail(args) => run_tail(args),
-        Cli::Replay(args) => run_replay(args),
         Cli::Wal(args) => run_wal(args),
     };
     match result {
@@ -137,29 +128,49 @@ fn run_stats(_args: StatsArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_tail(args: TailArgs) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "async")]
+    #[cfg(all(feature = "async", feature = "serde_json"))]
     {
-        let _ = args;
-        Err("tail is not yet implemented against a live terminal".into())
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(run_tail_async(args))
     }
-    #[cfg(not(feature = "async"))]
+    #[cfg(not(all(feature = "async", feature = "serde_json")))]
     {
         let _ = args;
-        Err("tail requires the async feature".into())
+        Err("tail requires the async and serde_json features".into())
     }
 }
 
-fn run_replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "async")]
-    {
-        let _ = args;
-        Err("replay is not yet implemented against a live terminal".into())
+#[cfg(all(feature = "async", feature = "serde_json"))]
+async fn run_tail_async(args: TailArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let client = Mt5Client::connect(0, "", "")?;
+    let max = args.count;
+    let mut count = 0usize;
+
+    if let Some(symbol) = &args.symbol {
+        let mut sub = client.subscribe_ticks(symbol)?;
+        while let Some(tick) = sub.recv().await {
+            println!("{}", serde_json::to_string(&tick)?);
+            count += 1;
+            if let Some(max) = max {
+                if count >= max {
+                    break;
+                }
+            }
+        }
+    } else {
+        let mut sub = client.subscribe_trade()?;
+        while let Ok(Some(ev)) = sub.recv_checked().await {
+            println!("{}", serde_json::to_string(&ev)?);
+            count += 1;
+            if let Some(max) = max {
+                if count >= max {
+                    break;
+                }
+            }
+        }
     }
-    #[cfg(not(feature = "async"))]
-    {
-        let _ = args;
-        Err("replay requires the async feature".into())
-    }
+
+    Ok(())
 }
 
 fn run_wal(args: WalArgs) -> Result<(), Box<dyn std::error::Error>> {

@@ -20,7 +20,6 @@ fn cli_help_lists_subcommands() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("tail"))
-        .stdout(predicate::str::contains("replay"))
         .stdout(predicate::str::contains("wal"));
 }
 
@@ -52,15 +51,6 @@ fn tail_help_lists_options() {
         .success()
         .stdout(predicate::str::contains("--symbol"))
         .stdout(predicate::str::contains("--count"));
-}
-
-#[test]
-fn replay_help_requires_path() {
-    mt5_bridge()
-        .args(["replay", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Capture file to replay"));
 }
 
 #[test]

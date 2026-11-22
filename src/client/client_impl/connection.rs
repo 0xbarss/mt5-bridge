@@ -350,7 +350,10 @@ impl Mt5Client {
                 .name("mt5-event-pump".to_string())
                 .spawn(move || {
                     let mut event_type: u16 = 0;
-                    let mut buf = [0u8; 1024];
+                    // Heap buffer sized from the largest event payload; grows on
+                    // demand when the DLL reports MT5_ERR_BUFFER_TOO_SMALL so no
+                    // pushed event is ever truncated or silently dropped.
+                    let mut buf = vec![0u8; MAX_EVENT_SIZE];
                     let mut out_len: u32 = 0;
                     while running.load(std::sync::atomic::Ordering::Relaxed) {
                         let res = unsafe {
@@ -362,9 +365,29 @@ impl Mt5Client {
                                 100,
                             )
                         };
-                        if res < 0 {
-                            let _ = dis_tx.send(());
-                        } else if res == 1 && out_len > 0 {
+                        match res {
+                            MT5_ERR_BUFFER_TOO_SMALL => {
+                                // The head-of-queue event did not fit: the DLL kept it
+                                // queued and reported the required size in `out_len`.
+                                // Grow the buffer and retry immediately so the event is
+                                // delivered whole on the next call.
+                                let required = out_len.max(1) as usize;
+                                if required > buf.len() {
+                                    buf.resize(required, 0);
+                                    warn!(
+                                        required,
+                                        current = buf.len(),
+                                        "Event pump buffer too small for incoming event; resized heap buffer"
+                                    );
+                                }
+                                continue;
+                            }
+                            res if res < 0 => {
+                                // Any other negative result (pipe disconnected, etc.)
+                                // tears the pump down.
+                                let _ = dis_tx.send(());
+                            }
+                            1 if out_len > 0 => {
                             match event_type {
                                 1 if out_len >= std::mem::size_of::<Mt5TickEvent>() as u32 => {
                                     let raw: Mt5TickEvent = unsafe {
@@ -394,6 +417,8 @@ impl Mt5Client {
                                 _ => {}
                             }
                         }
+                        _ => {}
+                    }
                     }
                 })
                 .ok()

@@ -383,6 +383,32 @@ pub const MT5_ERR_PIPE_DISCONNECTED: i32 = -3;
 pub const MT5_ERR_SERVER_AUTH_FAILED: i32 = -4;
 pub const MT5_ERR_EA_REJECTED: i32 = -5;
 pub const MT5_ERR_ALREADY_INITIALIZED: i32 = -6;
+pub const MT5_ERR_BUFFER_TOO_SMALL: i32 = -7;
+
+/// Largest of four sizes, usable in const contexts (MSRV-compatible; `Ord::max`
+/// is not yet const-stable).
+const fn max_event_size(a: usize, b: usize, c: usize, d: usize) -> usize {
+    let m = if a > b { a } else { b };
+    let m = if m > c { m } else { c };
+    if m > d {
+        m
+    } else {
+        d
+    }
+}
+
+/// Maximum wire payload size of any asynchronous event pushed by the EA.
+///
+/// Sized from the largest event struct at compile time so the Rust event pump
+/// can allocate a buffer that fits every event type (`Mt5TradeEvent` = 176 bytes
+/// today) and never has to parse a truncated payload. Kept in sync with the
+/// packed-struct size assertions below.
+pub const MAX_EVENT_SIZE: usize = max_event_size(
+    std::mem::size_of::<Mt5TradeEvent>(),
+    std::mem::size_of::<Mt5TickEvent>(),
+    std::mem::size_of::<Mt5BookEvent>(),
+    std::mem::size_of::<Mt5BarEvent>(),
+);
 
 // Ensure struct memory layouts match C header at compile-time.
 const_assert_eq!(std::mem::size_of::<Mt5SymInfo>(), 76);
@@ -397,6 +423,10 @@ const_assert_eq!(std::mem::size_of::<Mt5TickEvent>(), 88);
 const_assert_eq!(std::mem::size_of::<Mt5TradeEvent>(), 176);
 const_assert_eq!(std::mem::size_of::<Mt5BookEvent>(), 72);
 const_assert_eq!(std::mem::size_of::<Mt5BarEvent>(), 96);
+
+// The pump buffer is allocated from MAX_EVENT_SIZE; this pins the documented
+// 176-byte value so any future event layout change is noticed here.
+const_assert_eq!(MAX_EVENT_SIZE, 176);
 
 // Ensure field offsets match expected layout (validates packing).
 assert_eq_size!(Mt5SymInfo, [u8; 76]);
@@ -495,4 +525,35 @@ pub enum ProtocolCmd {
     SubscribeBars = 19,
     UnsubscribeBars = 20,
     Ping = 21,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_event_size_covers_every_event_payload() {
+        let sizes = [
+            std::mem::size_of::<Mt5TickEvent>(),
+            std::mem::size_of::<Mt5TradeEvent>(),
+            std::mem::size_of::<Mt5BookEvent>(),
+            std::mem::size_of::<Mt5BarEvent>(),
+        ];
+        assert_eq!(MAX_EVENT_SIZE, 176);
+        assert_eq!(MAX_EVENT_SIZE, *sizes.iter().max().unwrap());
+        assert!(sizes.iter().all(|&size| size <= MAX_EVENT_SIZE));
+    }
+
+    #[test]
+    fn mt5_err_buffer_too_small_is_a_distinct_negative_code() {
+        assert_eq!(MT5_ERR_BUFFER_TOO_SMALL, -7);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_OK);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_GENERAL);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_SEND_FAILED);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_UNKNOWN_EXECUTION);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_PIPE_DISCONNECTED);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_SERVER_AUTH_FAILED);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_EA_REJECTED);
+        assert_ne!(MT5_ERR_BUFFER_TOO_SMALL, MT5_ERR_ALREADY_INITIALIZED);
+    }
 }

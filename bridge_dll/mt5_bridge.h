@@ -209,6 +209,7 @@ typedef struct {
 #define MT5_ERR_SERVER_AUTH_FAILED -4   /* Server authentication failed */
 #define MT5_ERR_EA_REJECTED        -5   /* EA responded with an error status */
 #define MT5_ERR_ALREADY_INITIALIZED -6  /* Bridge client already initialized in this process */
+#define MT5_ERR_BUFFER_TOO_SMALL   -7   /* PollEvent: out_buf too small; *out_len reports the required size, nothing is copied, event stays queued */
 
 #if defined(__cplusplus)
 static_assert(sizeof(Mt5SymInfo) == 76, "Mt5SymInfo size must be exactly 76 bytes");

@@ -1191,12 +1191,25 @@ int PollEvent(uint16_t* out_event_type, void* out_buf, uint32_t buf_cap, uint32_
         if (!got || g_event_queue.empty()) return 0;
     }
 
-    QueuedRawEvent ev = std::move(g_event_queue.front());
+    // Peek at the head-of-queue event before popping it: if the caller's buffer
+    // cannot hold the whole payload we refuse to truncate it. The required size
+    // is reported through out_len, the event stays queued, and a larger buffer
+    // can pick it up on the next call. A truncated payload is never delivered
+    // as a whole event.
+    QueuedRawEvent& front = g_event_queue.front();
+    uint32_t n = static_cast<uint32_t>(front.data.size());
+    if (n > buf_cap) {
+        if (out_len) *out_len = n;
+        return MT5_ERR_BUFFER_TOO_SMALL;
+    }
+
+    // Take ownership of the payload before dropping the queue node: `front`
+    // references the node being destroyed by pop(), so it must not be used
+    // afterwards.
+    QueuedRawEvent ev = std::move(front);
     g_event_queue.pop();
 
     *out_event_type = ev.event_type;
-    uint32_t n = static_cast<uint32_t>(ev.data.size());
-    if (n > buf_cap) n = buf_cap;
     if (n > 0) {
         std::memcpy(out_buf, ev.data.data(), n);
     }

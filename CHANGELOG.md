@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **One-client-per-process diagnostics** (A-10):
+- **One-client-per-process diagnostics**:
   - `Mt5Client::process_connection_count()` reports the number of live clients in the
     current process (`0` or `1`).
   - Rustdoc and README now state that only one client may be live per process, that
     multi-terminal setups require one process per terminal, and that `MT5_PIPE_NAME` is
     read at connect time.
-- **Lock-free reconciliation reads** (A-09):
+- **Lock-free reconciliation reads**:
   - `SharedOrderManager` publishes an `OrderSnapshot` through `arc-swap` after every mutation.
   - `get_order`, `export_orders`, `lifecycle`, and the new `snapshot()` read the published
     snapshot without acquiring the manager mutex, so they never wait behind a slow broker call.
@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `OrderSnapshot` is re-exported from the crate root.
 - `tests/failure_injection.rs`: added a slow-backend test proving reads return immediately
   while a reconciliation pass holds the manager lock.
-- **Subscription race fix and sender-map pruning** (A-12):
+- **Subscription race fix and sender-map pruning**:
   - `subscribe_ticks` subscribes the `EventBus` before the EA so a tick pushed between
     bus registration and EA acknowledgment cannot be lost; a failed EA subscribe removes
     the tick sender again.
@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     map does not grow unboundedly.
   - `EventBus::remove_tick_sender()` drops an idle tick sender and `EventBus::prune()`
     sweeps idle senders from the tick, book, and bar maps for periodic maintenance.
+- **Event pump buffer overflow status**:
+  - `PollEvent` returns `MT5_ERR_BUFFER_TOO_SMALL` (-7) with the required size in
+    `out_len` when the caller's buffer cannot hold the whole event; nothing is copied
+    and the event stays queued, so a larger buffer picks it up on the next call and no
+    truncated event is ever parsed as a valid struct.
+  - `src/ffi.rs`: new `MT5_ERR_BUFFER_TOO_SMALL` error code and `MAX_EVENT_SIZE`
+    constant, sized from the largest event struct at compile time (176 bytes today).
+  - The Rust event pump allocates its heap buffer from `MAX_EVENT_SIZE` and grows it
+    on `MT5_ERR_BUFFER_TOO_SMALL`.
+  - `bridge_dll/mt5_bridge.h` / `bridge_dll/mt5_bridge.cpp`: `MT5_ERR_BUFFER_TOO_SMALL`
+    defined and `PollEvent` no longer truncates payloads.
 
 ### Changed
 
@@ -42,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **WAL feature split** (A-11): the `wal` feature now enables the binary WAL without
+- **WAL feature split**: the `wal` feature now enables the binary WAL without
   `serde_json`. `JsonFileStore`, `migrate_json_to_wal`, and `wal_to_json` moved to the new
   `json-journal` feature (`serde_json` remains an alias for `json-journal`). Use
   `--no-default-features --features wal` for WAL without JSON.

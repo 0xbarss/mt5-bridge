@@ -30,12 +30,18 @@ impl Mt5Client {
 
     /// Verify the SHA-256 hash of the DLL against an expected value.
     ///
-    /// The expected hash is read from the `MT5_DLL_SHA256` environment variable.
-    /// If the variable is not set, verification is skipped with a prominent
-    /// warning (the operator has not pinned the bridge binary).
-    /// The hash should be provided as a lowercase hexadecimal string (64 characters).
+    /// The expected hash is read from the `MT5_DLL_SHA256` environment variable,
+    /// falling back to a `<dll_name>.sha256` manifest file next to the DLL.
+    ///
+    /// `MT5_DLL_REQUIRE_HASH` controls whether a hash is mandatory. It defaults
+    /// to `true` in release builds (`cfg!(not(debug_assertions))`) unless
+    /// explicitly set to `false`, and to `false` in debug builds.
+    ///
+    /// Set `MT5_DLL_ALLOW_UNPINNED=1` to skip hash verification entirely
+    /// (development escape hatch).
     pub(crate) fn verify_dll_hash(path: &Path) -> Result<()> {
-        let require_hash = std::env::var("MT5_DLL_REQUIRE_HASH")
+        // Development escape hatch: skip hash verification entirely.
+        let allow_unpinned = std::env::var("MT5_DLL_ALLOW_UNPINNED")
             .ok()
             .map(|value| {
                 matches!(
@@ -44,21 +50,57 @@ impl Mt5Client {
                 )
             })
             .unwrap_or(false);
-        let Ok(expected_hex) = std::env::var("MT5_DLL_SHA256") else {
-            if require_hash {
-                return Err(Mt5Error::InvalidDllPath {
-                    path: path.display().to_string(),
-                    reason: "MT5_DLL_REQUIRE_HASH is enabled but MT5_DLL_SHA256 is not set"
-                        .to_string(),
-                });
-            }
+        if allow_unpinned {
             warn!(
                 dll = %path.display(),
-                "MT5_DLL_SHA256 is not set; the bridge DLL is loaded without an integrity check"
+                "MT5_DLL_ALLOW_UNPINNED is set; DLL hash verification is skipped"
             );
             return Ok(());
+        }
+
+        // MT5_DLL_REQUIRE_HASH defaults to true in release builds unless
+        // explicitly set to false.
+        let require_hash = match std::env::var("MT5_DLL_REQUIRE_HASH") {
+            Ok(value) => matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            ),
+            Err(_) => cfg!(not(debug_assertions)),
         };
-        let expected_hex = expected_hex.trim();
+
+        // Read the expected hash from MT5_DLL_SHA256, falling back to a
+        // <dll_name>.sha256 manifest file next to the DLL.
+        let expected_hex = std::env::var("MT5_DLL_SHA256")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                path.parent()
+                    .and_then(|parent| {
+                        path.file_name()
+                            .map(|name| parent.join(format!("{}.sha256", name.to_string_lossy())))
+                    })
+                    .and_then(|manifest_path| std::fs::read_to_string(&manifest_path).ok())
+            });
+
+        let expected_hex = match expected_hex {
+            Some(hex) => hex.trim().to_string(),
+            None => {
+                if require_hash {
+                    return Err(Mt5Error::InvalidDllPath {
+                        path: path.display().to_string(),
+                        reason: "MT5_DLL_REQUIRE_HASH is enabled but no DLL hash was provided \
+                               (set MT5_DLL_SHA256 or place a <dll>.sha256 manifest next to the DLL)"
+                            .to_string(),
+                    });
+                }
+                warn!(
+                    dll = %path.display(),
+                    "no DLL hash provided; the bridge DLL is loaded without an integrity check"
+                );
+                return Ok(());
+            }
+        };
+
         if expected_hex.is_empty() {
             if require_hash {
                 return Err(Mt5Error::InvalidDllPath {
@@ -82,7 +124,7 @@ impl Mt5Client {
                 ),
             });
         }
-        let expected_bytes = hex::decode(expected_hex).map_err(|_| Mt5Error::InvalidDllPath {
+        let expected_bytes = hex::decode(&expected_hex).map_err(|_| Mt5Error::InvalidDllPath {
             path: path.display().to_string(),
             reason: "MT5_DLL_SHA256 is not valid hex".to_string(),
         })?;
@@ -139,5 +181,176 @@ impl Mt5Client {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::client_impl::client::Mt5Client;
+    use std::env;
+
+    // Serializes hash tests: they mutate process-global env vars, so they must
+    // not run concurrently with one another.
+    static HASH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_hash_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        HASH_TEST_LOCK
+            .lock()
+            .expect("hash test lock must not be poisoned")
+    }
+
+    fn compute_sha256(content: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Temporarily set (or remove) an env var, run `f`, then restore the previous value.
+    fn with_env_var<F>(key: &str, value: Option<&str>, f: F)
+    where
+        F: FnOnce(),
+    {
+        let prev: Option<String> = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, &v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn verify_dll_hash_accepts_correct_hash() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_valid_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        let hash = compute_sha256(b"dummy dll content");
+        with_env_var("MT5_DLL_SHA256", Some(&hash), || {
+            with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
+                assert!(
+                    Mt5Client::verify_dll_hash(&dll).is_ok(),
+                    "correct hash should be accepted"
+                );
+            });
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_dll_hash_rejects_wrong_hash() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_wrong_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        with_env_var(
+            "MT5_DLL_SHA256",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            || {
+                with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
+                    assert!(
+                        Mt5Client::verify_dll_hash(&dll).is_err(),
+                        "wrong hash should be rejected"
+                    );
+                });
+            },
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_dll_hash_requires_hash_when_flag_enabled() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_require_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        with_env_var("MT5_DLL_SHA256", None, || {
+            with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
+                assert!(
+                    Mt5Client::verify_dll_hash(&dll).is_err(),
+                    "missing hash should be rejected when required"
+                );
+            });
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_dll_hash_allows_missing_hash_when_not_required() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_optional_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        with_env_var("MT5_DLL_SHA256", None, || {
+            with_env_var("MT5_DLL_REQUIRE_HASH", Some("false"), || {
+                assert!(
+                    Mt5Client::verify_dll_hash(&dll).is_ok(),
+                    "missing hash should be allowed when not required"
+                );
+            });
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_dll_hash_allow_unpinned_bypasses_requirement() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_escape_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        with_env_var("MT5_DLL_SHA256", None, || {
+            with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
+                with_env_var("MT5_DLL_ALLOW_UNPINNED", Some("1"), || {
+                    assert!(
+                        Mt5Client::verify_dll_hash(&dll).is_ok(),
+                        "allow-unpinned should bypass hash requirement"
+                    );
+                });
+            });
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_dll_hash_reads_manifest_next_to_dll() {
+        let _lock = with_hash_test_lock();
+        let dir = env::temp_dir().join(format!("mt5_hash_test_manifest_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dll = dir.join("mt5_bridge.dll");
+        std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
+
+        let hash = compute_sha256(b"dummy dll content");
+        let manifest = dir.join("mt5_bridge.dll.sha256");
+        std::fs::write(&manifest, &hash).expect("manifest must be writable");
+
+        with_env_var("MT5_DLL_SHA256", None, || {
+            with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
+                assert!(
+                    Mt5Client::verify_dll_hash(&dll).is_ok(),
+                    "hash from manifest next to DLL should be accepted"
+                );
+            });
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

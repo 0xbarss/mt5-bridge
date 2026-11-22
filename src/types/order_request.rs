@@ -236,6 +236,183 @@ impl OrderRequest {
         self.magic.map(Magic)
     }
 
+    // ---- Builder API ----
+
+    /// Create a builder for a new market Buy order request.
+    ///
+    /// Chain configuration methods and call [`build`](OrderRequestBuilder::build)
+    /// to produce a validated [`OrderRequest`].
+    pub fn market_buy(symbol: impl Into<String>, volume: Volume) -> OrderRequestBuilder {
+        OrderRequestBuilder {
+            symbol: symbol.into(),
+            order_type: OrderType::Buy,
+            volume: volume.into_inner(),
+            price: 0.0,
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+
+    /// Create a builder for a new market Sell order request.
+    ///
+    /// Chain configuration methods and call [`build`](OrderRequestBuilder::build)
+    /// to produce a validated [`OrderRequest`].
+    pub fn market_sell(symbol: impl Into<String>, volume: Volume) -> OrderRequestBuilder {
+        OrderRequestBuilder {
+            symbol: symbol.into(),
+            order_type: OrderType::Sell,
+            volume: volume.into_inner(),
+            price: 0.0,
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+}
+
+/// Builder for constructing an [`OrderRequest`] with validation on `build()`.
+///
+/// Start with [`OrderRequest::market_buy`] or [`OrderRequest::market_sell`],
+/// chain configuration methods, then call [`build`](Self::build) which runs
+/// [`OrderRequest::validate`] before returning the request.
+///
+/// ```rust
+/// use mt5_bridge::{OrderRequest, Price, Volume};
+///
+/// let req = OrderRequest::market_buy("EURUSD", Volume::lots(0.10))
+///     .stop_loss(Price(1.0800))
+///     .take_profit(Price(1.0900))
+///     .deviation(20)
+///     .comment("breakout")
+///     .client_order_id("eurusd-breakout-001")
+///     .build()
+///     .expect("valid order request");
+/// assert_eq!(req.symbol, "EURUSD");
+/// assert_eq!(req.volume, 0.10);
+/// assert_eq!(req.stop_loss, 1.0800);
+/// assert_eq!(req.take_profit, 1.0900);
+/// assert_eq!(req.deviation, Some(20));
+/// assert_eq!(req.comment, "breakout");
+/// assert_eq!(req.client_order_id.as_deref(), Some("eurusd-breakout-001"));
+/// ```
+#[derive(Debug, Clone)]
+pub struct OrderRequestBuilder {
+    symbol: String,
+    order_type: OrderType,
+    volume: f64,
+    price: f64,
+    stop_loss: f64,
+    take_profit: f64,
+    comment: String,
+    deviation: Option<u32>,
+    expiration: Option<i64>,
+    magic: Option<u64>,
+    client_order_id: Option<String>,
+}
+
+impl OrderRequestBuilder {
+    /// Create a builder for a pending (limit/stop) order request.
+    pub fn pending(
+        symbol: impl Into<String>,
+        order_type: OrderType,
+        volume: Volume,
+        price: Price,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            order_type,
+            volume: volume.into_inner(),
+            price: price.into_inner(),
+            stop_loss: 0.0,
+            take_profit: 0.0,
+            comment: String::new(),
+            deviation: None,
+            expiration: None,
+            magic: None,
+            client_order_id: None,
+        }
+    }
+
+    /// Set the stop loss price.
+    pub fn stop_loss(mut self, sl: Price) -> Self {
+        self.stop_loss = sl.into_inner();
+        self
+    }
+
+    /// Set the take profit price.
+    pub fn take_profit(mut self, tp: Price) -> Self {
+        self.take_profit = tp.into_inner();
+        self
+    }
+
+    /// Set the order price (for pending orders).
+    pub fn price(mut self, price: Price) -> Self {
+        self.price = price.into_inner();
+        self
+    }
+
+    /// Set the maximum deviation in points.
+    pub fn deviation(mut self, deviation: u32) -> Self {
+        self.deviation = Some(deviation);
+        self
+    }
+
+    /// Set the order expiration (epoch milliseconds).
+    pub fn expiration(mut self, expiration: i64) -> Self {
+        self.expiration = Some(expiration);
+        self
+    }
+
+    /// Set the EA magic number.
+    pub fn magic(mut self, magic: Magic) -> Self {
+        self.magic = Some(magic.into_inner());
+        self
+    }
+
+    /// Set the order comment.
+    pub fn comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = comment.into();
+        self
+    }
+
+    /// Set the client order ID.
+    pub fn client_order_id(mut self, id: impl Into<String>) -> Self {
+        self.client_order_id = Some(id.into());
+        self
+    }
+
+    /// Build the [`OrderRequest`], running validation first.
+    ///
+    /// Returns an error if the request fails [`OrderRequest::validate`]
+    /// (e.g. empty symbol, invalid volume, non-finite prices).
+    pub fn build(self) -> Result<OrderRequest, Mt5Error> {
+        let req = OrderRequest {
+            symbol: self.symbol,
+            order_type: self.order_type,
+            volume: self.volume,
+            price: self.price,
+            stop_loss: self.stop_loss,
+            take_profit: self.take_profit,
+            comment: self.comment,
+            deviation: self.deviation,
+            expiration: self.expiration,
+            magic: self.magic,
+            client_order_id: self.client_order_id,
+        };
+        req.validate()?;
+        Ok(req)
+    }
+}
+impl OrderRequest {
     /// Formats the effective MT5 wire comment, embedding the order's identity if present.
     ///
     /// With a `client_order_id` the result is `cid:<wire_id>` or `cid:<wire_id>:<comment>`,

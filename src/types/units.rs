@@ -95,6 +95,11 @@ impl fmt::Display for Price {
 // ---- Volume ----
 
 impl Volume {
+    /// Create a volume from a lot size.
+    pub fn lots(lots: f64) -> Self {
+        Self(lots)
+    }
+
     pub fn into_inner(self) -> f64 {
         self.0
     }

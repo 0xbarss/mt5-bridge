@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Builder API and prelude**:
+  - New `OrderRequestBuilder` with `build()` validation, constructible via
+    `OrderRequest::market_buy` / `market_sell` / `OrderRequestBuilder::pending`.
+  - Builder methods accept typed units (`Price`, `Volume`, `Magic`) and chain to
+    produce a validated `OrderRequest`.
+  - New `src/prelude.rs` re-exporting common types (`OrderRequest`, `Price`,
+    `Volume`, `Magic`, `Symbol`, `Ticket`, `OrderType`, `Mt5Error`, `Result`,
+    `EA_DEFAULT_MAGIC_TYPED`) for `use mt5_bridge::prelude::*;`.
+  - `Volume::lots(f64)` convenience constructor added.
+
 - **Structured audit log with hash chaining**:
   - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
     `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.

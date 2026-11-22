@@ -68,6 +68,7 @@ pub mod health;
 pub mod journal;
 pub mod market;
 pub mod position_book;
+pub mod prelude;
 pub mod reconciliation;
 pub mod risk;
 pub mod session;
@@ -115,6 +116,7 @@ pub use position_book::{
     BookPosition, DealReason, PositionBook, PositionDeal, PositionRef, PositionState,
     PositionTransition,
 };
+pub use prelude::*;
 pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderEvent, OrderManager, OrderObserver, OrderSnapshot,
     ReconciliationReport, SafetyPolicy, SharedOrderManager, StrategyMagic, UnknownBlockScope,

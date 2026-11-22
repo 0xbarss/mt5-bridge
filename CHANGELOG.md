@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `src/client/async_client.rs` module, gated on the `async` feature and
     re-exported from the crate root.
 
+- **Retry policy abstraction**:
+  - New `RetryPolicy` with bounded, jittered exponential backoff.
+  - Only retries `TransmissionFailed` and retcodes classified as
+    `DefinitivelyNotExecuted`; never retries `UnknownExecutionState`,
+    `UnresolvedUnknownOrders`, `RiskRejected`, or `PreflightRejected`.
+  - New `src/retry.rs` module; `RetryPolicy` re-exported from the crate root.
+  - Async `run` method offloads retries via `tokio::time::sleep` (requires the
+    `async` feature).
+
 - **Structured audit log with hash chaining**:
   - New `src/audit::AuditLog` append-only JSON Lines log whose entries are chained by
     `SHA256(prev_hash || canonical_json(event))`, seeded with a genesis hash.

@@ -70,6 +70,7 @@ pub mod market;
 pub mod position_book;
 pub mod prelude;
 pub mod reconciliation;
+pub mod retry;
 pub mod risk;
 pub mod session;
 pub mod sync;
@@ -123,6 +124,7 @@ pub use reconciliation::{
     BrokerSnapshot, LifecycleState, OrderEvent, OrderManager, OrderObserver, OrderSnapshot,
     ReconciliationReport, SafetyPolicy, SharedOrderManager, StrategyMagic, UnknownBlockScope,
 };
+pub use retry::RetryPolicy;
 pub use risk::{PreTradeDecision, RiskEngine, RiskLimits};
 pub use session::{Mt5Session, SessionConfig};
 pub use sync::LockExt;

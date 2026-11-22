@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Persisted trade-management rule attached to a filled order.
 ///
-/// Created when an order reaches [`OrderState::Filled`]; updated on every
+/// Created when an order reaches [`crate::types::OrderState::Filled`]; updated on every
 /// break-even or trailing-stop modification; removed when the position is closed.
 ///
 /// All fields are owned and serializable so the rule can be journaled to the WAL

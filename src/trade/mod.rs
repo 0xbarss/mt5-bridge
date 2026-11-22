@@ -1,6 +1,6 @@
 //! Trade management: brackets, break-even, and trailing stops.
 //!
-//! [`TradeManager`](manager::TradeManager) subscribes to [`OrderEvent`]s emitted by
+//! [`TradeManager`] subscribes to [`crate::reconciliation::OrderEvent`]s emitted by
 //! [`OrderManager`](crate::reconciliation::OrderManager) and maintains stop-loss /
 //! take-profit rules that survive process restarts via the WAL.
 //!

@@ -59,7 +59,7 @@ impl TradeManager {
 
     /// Import rules previously persisted (e.g. loaded from WAL on restart).
     ///
-    /// Rules for orders that are no longer active are ignored by [`check_rules`].
+    /// Rules for orders that are no longer active are ignored by [`TradeManager::check_rules`].
     /// Imported rules are not subject to the rate limit so they can be evaluated
     /// immediately on the next tick.
     pub fn import_rules(&self, rules: Vec<TradeRule>) {

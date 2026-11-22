@@ -1,6 +1,6 @@
 use crate::types::TradeRule;
 
-/// Trailing-stop configuration for a [`TradeRule`](crate::types::TradeRule).
+/// Trailing-stop configuration for a [`TradeRule`].
 ///
 /// Trailing activates when profit reaches `activation * risk`; from then on the
 /// stop is trailed at `distance` from the current price, moving only when the

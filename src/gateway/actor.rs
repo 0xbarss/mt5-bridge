@@ -6,8 +6,8 @@ use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
 use crate::position_book::PositionBook;
 use crate::reconciliation::{
-    classify_send_error, LifecycleState, OrderEvent, OrderManager, OrderObserver,
-    ReconciliationReport, SharedOrderManager,
+    classify_send_error, spawn_reconciler, LifecycleState, OrderEvent, OrderManager, OrderObserver,
+    ReconcilerConfig, ReconcilerHandle, ReconciliationReport, SharedOrderManager,
 };
 use crate::risk::{PreTradeDecision, RiskEngine};
 use crate::session::{Mt5Session, SessionConfig};
@@ -476,7 +476,10 @@ pub struct Mt5Gateway<B: TradingBackend + Send + Sync + 'static> {
     p2_timeout: Duration,
     p3_timeout: Duration,
     order_event_out_tx: broadcast::Sender<OrderEvent>,
+    order_event_in_rx: broadcast::Receiver<OrderEvent>,
     risk_engine: Option<Arc<RiskEngine>>,
+    reconciler_config: Option<ReconcilerConfig>,
+    reconciler: Option<ReconcilerHandle>,
 }
 
 impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
@@ -528,6 +531,9 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
         let (trade_event_in_tx, trade_event_in_rx) = mpsc::unbounded_channel();
         let (trade_event_out_tx, _) = broadcast::channel(2048);
         let (order_event_out_tx, _) = broadcast::channel(2048);
+        // The actor observes its own order lifecycle events so it can trigger
+        // immediate reconciliation when an order turns `Unknown` (when enabled).
+        let order_event_in_rx = order_event_out_tx.subscribe();
         let tick_watchers = Arc::new(Mutex::new(HashMap::new()));
         let (state_watch_tx, state_watch_rx) = watch::channel(LifecycleState::Starting);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -577,7 +583,10 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
             p2_timeout: config.p2_timeout,
             p3_timeout: config.p3_timeout,
             order_event_out_tx,
+            order_event_in_rx,
             risk_engine: config.risk_engine,
+            reconciler_config: config.reconciler_config,
+            reconciler: None,
         };
 
         let join_handle = tokio::spawn(async move {
@@ -600,6 +609,12 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                     self.session.on_connected();
                     self.publish_state().await;
 
+                    if let Some(cfg) = self.reconciler_config.clone() {
+                        let manager = self.order_manager.clone();
+                        let backend = self.backend.clone().expect("backend just connected");
+                        self.reconciler = Some(spawn_reconciler(manager, backend, cfg));
+                    }
+
                     if let Err(e) = self.sync_symbols().await {
                         self.session.on_disconnect(&e.to_string());
                         self.backend = None;
@@ -618,6 +633,9 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                             self.replay_subscriptions().await;
 
                             self.serve_until_disconnect(&connector).await;
+                            if let Some(reconciler) = self.reconciler.take() {
+                                reconciler.stop().await;
+                            }
                             self.backend = None;
                             self.session.on_disconnect("pipe closed");
                             self.publish_state().await;
@@ -823,6 +841,17 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                 }
                 Some(event) = self.trade_event_in_rx.recv() => {
                     self.handle_trade_event(event);
+                }
+                Ok(event) = self.order_event_in_rx.recv() => {
+                    if matches!(&event, OrderEvent::Unknown { .. }) {
+                        if let Some(cfg) = &self.reconciler_config {
+                            if cfg.on_unknown {
+                                if let Some(reconciler) = &self.reconciler {
+                                    reconciler.trigger();
+                                }
+                            }
+                        }
+                    }
                 }
                 else => {
                     debug!("All Mt5Gateway channels closed; stopping actor");
@@ -1273,7 +1302,15 @@ impl<B: TradingBackend + Send + Sync + 'static> Mt5Gateway<B> {
                     event_seq = event.event_seq,
                     "Detected TradeEvent event_seq gap! Triggering immediate broker reconciliation"
                 );
-                if let Some(backend) = self.backend.clone() {
+                // When a background reconciler is configured, ask it to run an
+                // immediate pass. Otherwise fall back to the inline reconciliation.
+                let triggered = self
+                    .reconciler_config
+                    .as_ref()
+                    .is_some_and(|cfg| cfg.on_event_gap && self.reconciler.is_some());
+                if triggered {
+                    self.reconciler.as_ref().unwrap().trigger();
+                } else if let Some(backend) = self.backend.clone() {
                     let manager = self.order_manager.clone();
                     let book = Arc::clone(&self.position_book);
                     let executor = self.executor.clone();

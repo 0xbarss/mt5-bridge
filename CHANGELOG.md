@@ -68,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     snapshots before submission.
   - `RiskEngine` is `Send + Sync`, takes `&self`, and keeps portfolio state current
     through `on_account_info`, `on_positions`, and `on_working_orders`.
+- **Automatic reconciliation scheduler**:
+  - New `src/reconciliation/scheduler.rs` with `spawn_reconciler`, `ReconcilerHandle`,
+    `ReconcilerConfig`, and `AutoAckPolicy`.
+  - A `tokio::time::interval` drives scheduled passes plus a trigger channel for
+    immediate passes (wired to `Unknown` orders and trade `event_seq` gaps).
+  - Each pass runs `SharedOrderManager::reconcile` via `tokio::task::spawn_blocking`
+    so synchronous backend calls never block the Tokio executor.
+  - Reports are emitted on a broadcast channel; mismatches can be auto-acknowledged
+    per policy (`Never`, `ProtectionOnly`, `All`).
+  - `GatewayConfig::reconciler_config` wires a reconciler into the gateway; `event_seq`
+    gaps and `Unknown` order events trigger immediate passes.
 
 ### Changed
 

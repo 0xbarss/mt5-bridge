@@ -51,7 +51,7 @@ pub trait OrderStore: Send {
     /// Journal a trade-management rule (`crate::types::TradeRule`).
     ///
     /// The default implementation is a no-op: stores that do not support rule
-    /// persistence (e.g. `JsonFileStore`) silently accept and discard. [`WalOrderStore`]
+    /// persistence (e.g. `JsonFileStore`) silently accept and discard. [`crate::WalOrderStore`]
     /// implements this with a dedicated `REC_TRADE_RULE` frame so rules survive restart.
     fn record_trade_rule(&self, _symbol: &str, _rule: &TradeRule) -> Result<()> {
         Ok(())
@@ -59,7 +59,7 @@ pub trait OrderStore: Send {
 
     /// Load trade rules for `symbol` from durable storage.
     ///
-    /// The default implementation returns an empty vector. [`WalOrderStore`] replays
+    /// The default implementation returns an empty vector. [`crate::WalOrderStore`] replays
     /// `REC_TRADE_RULE` frames from the WAL.
     fn load_trade_rules(&self, _symbol: &str) -> Result<Vec<TradeRule>> {
         Ok(Vec::new())

@@ -20,6 +20,7 @@ pub use executor::BlockingExecutor;
 
 use crate::backend::TradingBackend;
 use crate::error::{Mt5Error, Result};
+use crate::reconciliation::ReconcilerConfig;
 use crate::risk::RiskEngine;
 use crate::session::SessionConfig;
 use std::sync::{Arc, Mutex};
@@ -88,6 +89,10 @@ pub struct GatewayConfig {
     /// Optional pre-trade risk engine. When set, every order submission is checked
     /// against portfolio-level limits before reaching the backend.
     pub risk_engine: Option<Arc<RiskEngine>>,
+    /// Optional automatic reconciliation configuration. When set, a background
+    /// reconciler is spawned that periodically (and on trigger) reconciles orders
+    /// against live broker state without user intervention.
+    pub reconciler_config: Option<ReconcilerConfig>,
 }
 
 impl Default for GatewayConfig {
@@ -99,6 +104,7 @@ impl Default for GatewayConfig {
             p2_timeout: Duration::from_secs(10),
             p3_timeout: Duration::from_secs(120),
             risk_engine: None,
+            reconciler_config: None,
         }
     }
 }

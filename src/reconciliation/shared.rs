@@ -234,6 +234,11 @@ impl SharedOrderManager {
         self.mutate(|manager| manager.modify_order(client, ticket, stop_loss, take_profit))
     }
 
+    /// See [`OrderManager::acknowledge_mismatch`].
+    pub fn acknowledge_mismatch(&self, client_order_id: &str) -> Result<TrackedOrder> {
+        self.mutate(|manager| manager.acknowledge_mismatch(client_order_id))
+    }
+
     /// Point-in-time snapshot of all tracked orders and the lifecycle state.
     ///
     /// This is lock-free and returns the state as of the last completed mutation.

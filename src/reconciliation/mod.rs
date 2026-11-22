@@ -38,6 +38,8 @@
 pub mod classification;
 pub mod events;
 pub mod manager;
+#[cfg(feature = "async")]
+pub mod scheduler;
 pub mod shared;
 pub mod state;
 
@@ -45,6 +47,8 @@ pub mod state;
 pub(crate) use classification::classify_send_error;
 pub use events::{OrderEvent, OrderObserver};
 pub use manager::{OrderManager, StrategyMagic};
+#[cfg(feature = "async")]
+pub use scheduler::{spawn_reconciler, AutoAckPolicy, ReconcilerConfig, ReconcilerHandle};
 pub use shared::{OrderSnapshot, SharedOrderManager};
 pub use state::{
     BrokerSnapshot, LifecycleState, ReconciliationReport, SafetyPolicy, UnknownBlockScope,

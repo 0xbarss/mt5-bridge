@@ -244,6 +244,7 @@ version = "0.3.0"
 dependencies = [
  "mt5-bridge",
  "pyo3",
+ "tokio",
 ]
 
 [[package]]

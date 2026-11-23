@@ -24,6 +24,11 @@ use mt5_bridge::types::{
 use mt5_bridge::{CalendarEvent, Deal, Position, WorkingOrder};
 use std::str::FromStr;
 
+#[cfg(feature = "async")]
+use std::sync::Arc;
+#[cfg(feature = "async")]
+use tokio::runtime::Runtime;
+
 #[pyclass]
 #[derive(Clone)]
 pub struct PyAccountInfo {
@@ -1038,6 +1043,190 @@ impl Client {
     }
 }
 
+#[cfg(feature = "async")]
+#[pyclass]
+pub struct AsyncClient {
+    inner: Arc<Mt5Client>,
+    runtime: Runtime,
+}
+
+#[cfg(feature = "async")]
+#[pymethods]
+impl AsyncClient {
+    /// Connect to MetaTrader 5 using only a pipe authentication secret token,
+    /// running the blocking connect on a Tokio worker thread.
+    #[new]
+    fn new() -> PyResult<Self> {
+        let runtime = Runtime::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to create Tokio runtime: {e}")))?;
+        let client = runtime
+            .block_on(async {
+                tokio::task::spawn_blocking(move || {
+                    Mt5Client::connect_with_secret("").map_err(to_py_err)
+                })
+                .await
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))??;
+        Ok(AsyncClient {
+            inner: Arc::new(client),
+            runtime,
+        })
+    }
+
+    /// Connect to MetaTrader 5 using a pipe authentication secret token.
+    #[classmethod]
+    fn connect_with_secret(_cls: &Bound<'_, PyType>, secret: &str) -> PyResult<Self> {
+        let runtime = Runtime::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to create Tokio runtime: {e}")))?;
+        let client = runtime
+            .block_on(async {
+                let secret = secret.to_string();
+                tokio::task::spawn_blocking(move || {
+                    Mt5Client::connect_with_secret(&secret).map_err(to_py_err)
+                })
+                .await
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))??;
+        Ok(AsyncClient {
+            inner: Arc::new(client),
+            runtime,
+        })
+    }
+
+    /// Query current account balance, equity, and margin information.
+    async fn account_info(&self) -> PyResult<PyAccountInfo> {
+        let inner = Arc::clone(&self.inner);
+        let info = self.run_blocking(move || inner.account_info())?;
+        Ok(PyAccountInfo::from(info))
+    }
+
+    /// Symbol properties (point size, tick value, tick size, lot limits, digits).
+    async fn symbol_info(&self, symbol: &str) -> PyResult<PySymbolInfo> {
+        let inner = Arc::clone(&self.inner);
+        let symbol = symbol.to_string();
+        let info = self.run_blocking(move || inner.symbol_info(&symbol))?;
+        Ok(PySymbolInfo::from(info))
+    }
+
+    /// Latest tick for a symbol.
+    async fn symbol_tick(&self, symbol: &str) -> PyResult<PyTick> {
+        let inner = Arc::clone(&self.inner);
+        let symbol = symbol.to_string();
+        let tick = self.run_blocking(move || inner.symbol_tick(&symbol))?;
+        Ok(PyTick::from(tick))
+    }
+
+    /// Fetch historical OHLCV bars for `symbol` on `timeframe` between `from` and `to` (UTC seconds).
+    async fn copy_bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        from: i64,
+        to: i64,
+    ) -> PyResult<Vec<PyBar>> {
+        let inner = Arc::clone(&self.inner);
+        let symbol = symbol.to_string();
+        let tf = Timeframe::from_str(timeframe).map_err(PyValueError::new_err)?;
+        let bars = self.run_blocking(move || inner.copy_bars(&symbol, tf, from, to))?;
+        Ok(bars.into_iter().map(PyBar::from).collect())
+    }
+
+    /// Heartbeat ping returning MT5 server time, monotonic microsecond counter, and protocol version.
+    async fn ping(&self) -> PyResult<PyPingResult> {
+        let inner = Arc::clone(&self.inner);
+        let result = self.run_blocking(move || inner.ping())?;
+        Ok(PyPingResult::from(result))
+    }
+
+    /// Bridge statistics snapshot.
+    async fn stats(&self) -> PyResult<PyBridgeStats> {
+        let inner = Arc::clone(&self.inner);
+        let stats = self.run_blocking(move || inner.stats())?;
+        Ok(PyBridgeStats::from(stats))
+    }
+
+    /// Open or place an order.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (symbol, order_type, volume, price, sl=0.0, tp=0.0, comment="", deviation=None, expiration=None, magic=None))]
+    async fn order_send(
+        &self,
+        symbol: &str,
+        order_type: &str,
+        volume: f64,
+        price: f64,
+        sl: f64,
+        tp: f64,
+        comment: &str,
+        deviation: Option<u32>,
+        expiration: Option<i64>,
+        magic: Option<u64>,
+    ) -> PyResult<PyTradeResult> {
+        let inner = Arc::clone(&self.inner);
+        let ot = match order_type {
+            "buy" => OrderType::Buy,
+            "sell" => OrderType::Sell,
+            "buy_limit" => OrderType::BuyLimit,
+            "sell_limit" => OrderType::SellLimit,
+            "buy_stop" => OrderType::BuyStop,
+            "sell_stop" => OrderType::SellStop,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown order type: {order_type}"
+                )))
+            }
+        };
+        let symbol = symbol.to_string();
+        let comment = comment.to_string();
+        let result = self.run_blocking(move || {
+            let req = OrderRequest {
+                symbol,
+                order_type: ot,
+                volume,
+                price,
+                stop_loss: sl,
+                take_profit: tp,
+                comment,
+                deviation,
+                expiration,
+                magic,
+                client_order_id: None,
+            };
+            inner.order_send(&req)
+        })?;
+        Ok(PyTradeResult::from(result))
+    }
+
+    /// Close position by ticket.
+    async fn order_close(&self, ticket: u64) -> PyResult<PyTradeResult> {
+        let inner = Arc::clone(&self.inner);
+        let result = self.run_blocking(move || inner.order_close(ticket))?;
+        Ok(PyTradeResult::from(result))
+    }
+
+    /// Disconnect and clean up.
+    async fn shutdown(&mut self) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        self.run_blocking(move || inner.shutdown())
+    }
+}
+
+#[cfg(feature = "async")]
+impl AsyncClient {
+    /// Run a blocking `Mt5Client` call off the Python thread on Tokio's
+    /// `spawn_blocking` pool, awaiting the result without blocking the caller's
+    /// async context beyond the `block_on` wait on this thread.
+    fn run_blocking<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> Result<T, Mt5Error> + Send + 'static,
+    ) -> Result<T, PyErr> {
+        let res = self
+            .runtime
+            .block_on(async { tokio::task::spawn_blocking(f).await })
+            .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))?;
+        res.map_err(to_py_err)
+    }
+}
+
 fn to_py_err(err: Mt5Error) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
 }
@@ -1072,6 +1261,8 @@ fn parse_level_str(s: &str) -> PyResult<Level> {
 #[pymodule]
 fn mt5_bridge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
+    #[cfg(feature = "async")]
+    m.add_class::<AsyncClient>()?;
     m.add_class::<PyAccountInfo>()?;
     m.add_class::<PySymbolInfo>()?;
     m.add_class::<PyTick>()?;

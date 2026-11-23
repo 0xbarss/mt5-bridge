@@ -1,6 +1,7 @@
 # Rust
 /target/
 /fuzz/target/
+/crates/*/target/
 **/*.rs.bk
 lcov.info
 

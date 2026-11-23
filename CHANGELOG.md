@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`HistoryResult` is now an explicit state machine**: Replaced the implicit `complete: bool` + `cancelled: bool` flags with a single `state: HistoryState` field (`Pending`, `Partial`, `Complete`, `Cancelled`). Added `HistoryState::transition()` pure transition method, `HistoryState::max()` priority-ordered resolution, and `is_cancelled()` / `is_terminal()` query methods. `is_complete()` semantics preserved.
+- **`src/wal.rs` split into focused modules**: `src/wal.rs` (1746 lines) split into `src/wal/mod.rs`, `format.rs`, `store.rs`, and `migration.rs` by responsibility (binary format/CRC, store/snapshot/compaction, JSON migration). Public paths (`WalConfig`, `WalOrderStore`, `crc32`, `migrate_json_to_wal`, `wal_to_json`) preserved via re-exports; no consumer impact.
 - **Version bump**: Bumped crate version from `0.4.0` to `0.5.0` across `Cargo.toml`, `Cargo.lock`, `crates/mt5-bridge-py/{Cargo.toml,Cargo.lock,pyproject.toml}`, `fuzz/{Cargo.toml,Cargo.lock}`, `docs/api-reference.md`, `docs/benchmarks.md`, `docs/getting-started.md`.
 - **CI cleanup**: Removed unused `scripts/` directory (`scripts/ci/install-mt5.ps1`) and its README reference.
 - **README restructure**: Removed sections now covered by dedicated docs under `docs/` (packed struct sizes, repository structure, testing & QA); rewrote Key Features cleanly without code references; fixed packed struct size table columns and dropped a stale async test reference.

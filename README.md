@@ -135,19 +135,19 @@ Detailed documentation has been split into focused files under [`docs/`](docs):
 
 | Struct | Size |
 | :--- | :--- |
-| `PacketHdr` (16 bytes) | — |
-| `Mt5TickEvent` (88 bytes) | — |
-| `Mt5TradeEvent` (176 bytes) | — |
-| `Mt5BookEvent` (72 bytes) | — |
-| `Mt5SymInfo` (76 bytes) | — |
-| `Mt5BarEvent` (96 bytes) | — |
-| `Mt5Rate` (60 bytes) | — |
-| `Mt5Tick` (44 bytes) | — |
-| `Mt5TradeResult` (44 bytes) | — |
-| `Mt5Position` (148 bytes) | — |
-| `Mt5Order` (140 bytes) | — |
-| `Mt5Deal` (152 bytes) | — |
-| `Mt5Stats` (64 bytes) | — |
+| `PacketHdr` | 16 bytes |
+| `Mt5TickEvent` | 88 bytes |
+| `Mt5TradeEvent` | 176 bytes |
+| `Mt5BookEvent` | 72 bytes |
+| `Mt5SymInfo` | 76 bytes |
+| `Mt5BarEvent` | 96 bytes |
+| `Mt5Rate` | 60 bytes |
+| `Mt5Tick` | 44 bytes |
+| `Mt5TradeResult` | 44 bytes |
+| `Mt5Position` | 148 bytes |
+| `Mt5Order` | 140 bytes |
+| `Mt5Deal` | 152 bytes |
+| `Mt5Stats` | 64 bytes |
 
 ---
 
@@ -269,9 +269,6 @@ Python test suite (under Wine Python 3.14):
 ```bash
 # Sync tests (one process)
 MT5_DLL_REQUIRE_HASH=true wine python.exe crates/mt5-bridge-py/tests/test_all_features.py
-
-# Async tests (separate process — one client per process limit)
-MT5_DLL_REQUIRE_HASH=true wine python.exe crates/mt5-bridge-py/tests/test_async_only.py
 ```
 
 ---

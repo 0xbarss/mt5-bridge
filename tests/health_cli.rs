@@ -7,6 +7,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+#[allow(deprecated)]
 fn mt5_bridge() -> Command {
     Command::cargo_bin("mt5-bridge").expect("mt5-bridge binary built with the cli feature")
 }

@@ -1,0 +1,20 @@
+[package]
+name = "mt5-bridge-py"
+version = "0.3.0"
+edition = "2021"
+authors = ["0xbarss <https://github.com/0xbarss>"]
+description = "Python bindings (PyO3) for mt5-bridge — MetaTrader 5 API bridge client for Python"
+license = "MIT"
+repository = "https://github.com/0xbarss/mt5-bridge"
+homepage = "https://github.com/0xbarss/mt5-bridge"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mt5-bridge = { path = "../../", default-features = false }
+pyo3 = { version = "0.30", features = ["extension-module"] }
+
+[features]
+default = []
+async = ["mt5-bridge/async", "pyo3/experimental-async"]

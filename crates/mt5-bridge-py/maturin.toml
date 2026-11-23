@@ -1,0 +1,7 @@
+[project]
+name = "mt5_bridge_py"
+requires-python = ">=3.8"
+
+[tool.maturin]
+features = ["async"]
+module-name = "mt5_bridge_py"

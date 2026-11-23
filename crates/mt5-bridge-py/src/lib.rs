@@ -1098,64 +1098,6 @@ impl Client {
         let tf = Timeframe::from_str(timeframe).map_err(PyValueError::new_err)?;
         self.inner.unsubscribe_bars(symbol, tf).map_err(to_py_err)
     }
-
-    /// Register a Python callable `(event_type: int, payload: bytes) -> None`
-    /// invoked by the DLL whenever a streamed event arrives.
-    #[cfg(feature = "async")]
-    fn register_event_callback(&self, callback: Py<PyAny>) -> PyResult<c_int> {
-        let slot = EVENT_CALLBACK.get_or_init(|| std::sync::Mutex::new(None));
-        let Ok(mut guard) = slot.lock() else {
-            return Err(PyRuntimeError::new_err("event callback lock poisoned"));
-        };
-        *guard = Some(callback);
-
-        extern "C" fn trampoline(event_type: u16, payload: *const u8, payload_len: u32) {
-            let slot = match EVENT_CALLBACK.get() {
-                Some(s) => s,
-                None => return,
-            };
-            let Ok(guard) = slot.lock() else {
-                return;
-            };
-            let Some(cb) = guard.as_ref() else {
-                return;
-            };
-            let payload_slice = unsafe { std::slice::from_raw_parts(payload, payload_len as usize) };
-            let _ = pyo3::Python::try_attach(|py| {
-                let args = (event_type, PyBytes::new(py, payload_slice));
-                let _ = cb.call1(py, args);
-            });
-        }
-
-        self.inner
-            .register_event_callback(trampoline)
-            .map_err(to_py_err)
-    }
-
-    /// Poll the DLL for the next available event.
-    ///
-    /// Returns `(event_type, payload)` or `None` on timeout.
-    #[cfg(feature = "async")]
-    fn poll_event(&self, py: Python<'_>, timeout_ms: u32) -> PyResult<Option<Py<PyEvent>>> {
-        match self.inner.poll_event(timeout_ms).map_err(to_py_err)? {
-            Some((event_type, payload)) => {
-                Ok(Some(PyEvent::new(event_type, payload).into_pyobject(py)?.unbind()))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Total events dropped by the DLL buffer queue due to overflow.
-    #[cfg(feature = "async")]
-    fn events_dropped_total(&self) -> PyResult<u64> {
-        Ok(self.inner.events_dropped_total())
-    }
-
-    /// Total orphaned events currently held by the DLL event queue.
-    #[cfg(feature = "async")]
-    fn get_orphan_count(&self) -> PyResult<u64> {
-        Ok(self.inner.get_orphan_count())
-    }
 }
 
 #[cfg(feature = "async")]
@@ -1362,9 +1304,67 @@ impl AsyncClient {
     /// Return an async event stream: `async for event in client.events(): ...`.
     /// Yields `PyEvent(event_type, payload)` for each streamed tick/bar/trade
     /// event delivered by the DLL.
-    async fn events(&self) -> PyResult<PyEventStream> {
+    fn events(&self) -> PyResult<PyEventStream> {
         let rx = self.events_tx.subscribe();
         Ok(PyEventStream { rx })
+    }
+
+    /// Register a Python callable `(event_type: int, payload: bytes) -> None`
+    /// invoked by the DLL whenever a streamed event arrives.
+    #[cfg(feature = "async")]
+    fn register_event_callback(&self, callback: Py<PyAny>) -> PyResult<c_int> {
+        let slot = EVENT_CALLBACK.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut guard) = slot.lock() else {
+            return Err(PyRuntimeError::new_err("event callback lock poisoned"));
+        };
+        *guard = Some(callback);
+
+        extern "C" fn trampoline(event_type: u16, payload: *const u8, payload_len: u32) {
+            let slot = match EVENT_CALLBACK.get() {
+                Some(s) => s,
+                None => return,
+            };
+            let Ok(guard) = slot.lock() else {
+                return;
+            };
+            let Some(cb) = guard.as_ref() else {
+                return;
+            };
+            let payload_slice = unsafe { std::slice::from_raw_parts(payload, payload_len as usize) };
+            let _ = pyo3::Python::try_attach(|py| {
+                let args = (event_type, PyBytes::new(py, payload_slice));
+                let _ = cb.call1(py, args);
+            });
+        }
+
+        self.inner
+            .register_event_callback(trampoline)
+            .map_err(to_py_err)
+    }
+
+    /// Poll the DLL for the next available event.
+    ///
+    /// Returns `(event_type, payload)` or `None` on timeout.
+    #[cfg(feature = "async")]
+    fn poll_event(&self, py: Python<'_>, timeout_ms: u32) -> PyResult<Option<Py<PyEvent>>> {
+        match self.inner.poll_event(timeout_ms).map_err(to_py_err)? {
+            Some((event_type, payload)) => {
+                Ok(Some(PyEvent::new(event_type, payload).into_pyobject(py)?.unbind()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Total events dropped by the DLL buffer queue due to overflow.
+    #[cfg(feature = "async")]
+    fn events_dropped_total(&self) -> PyResult<u64> {
+        Ok(self.inner.events_dropped_total())
+    }
+
+    /// Total orphaned events currently held by the DLL event queue.
+    #[cfg(feature = "async")]
+    fn get_orphan_count(&self) -> PyResult<u64> {
+        Ok(self.inner.get_orphan_count())
     }
 }
 

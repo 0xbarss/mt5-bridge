@@ -4,6 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mt5-bridge-py"
+version = "0.3.0"
 requires-python = ">=3.8"
 
 [tool.maturin]

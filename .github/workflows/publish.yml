@@ -37,6 +37,9 @@ jobs:
       - name: Install maturin
         run: pip install maturin
 
+      - name: Copy root README into Python crate
+        run: cp README.md crates/mt5-bridge-py/README.md
+
       - name: Build wheels
         run: maturin build --release --out dist
         working-directory: crates/mt5-bridge-py

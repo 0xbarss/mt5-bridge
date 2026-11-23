@@ -9,6 +9,7 @@ description = "Python bindings (PyO3) for mt5-bridge — MetaTrader 5 API bridge
 requires-python = ">=3.8"
 authors = [{ name = "0xbarss", email = "baris.ozdemir.se@gmail.com" }]
 license = { text = "MIT" }
+readme = "README.md"
 keywords = ["metatrader", "mt5", "trading", "finance", "algorithmic-trading", "python-bindings", "pyo3"]
 classifiers = [
     "Development Status :: 4 - Beta",

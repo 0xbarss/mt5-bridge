@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: crates/mt5-bridge-py/target/wheels/*.whl
+          path: crates/mt5-bridge-py/dist/*.whl
           retention-days: 7
 
   publish:

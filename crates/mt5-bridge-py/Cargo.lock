@@ -223,7 +223,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "mt5-bridge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "mt5-bridge-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mt5-bridge",
  "pyo3",

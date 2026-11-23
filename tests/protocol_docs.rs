@@ -16,6 +16,7 @@ const EXPECTED_STRUCT_SIZES: &[(&str, usize)] = &[
     ("Mt5Position", 148),
     ("Mt5Order", 140),
     ("Mt5Deal", 152),
+    ("Mt5Stats", 64),
 ];
 
 #[test]

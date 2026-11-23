@@ -12,11 +12,11 @@ This document details protocol evolution across versions and provides migration 
 | **v5** | `5` | Added push event streaming (`OnTick`, `OnTradeTransaction`, `OnBookEvent`). Added wire ID tokenization in order comments (`w:<token>`). |
 | **v6** | `6` | Expanded `PacketHdr` from 12 bytes to 16 bytes with `request_id`. Added `event_seq` to `Mt5TickEvent` (88 B), `Mt5TradeEvent` (176 B), `Mt5BookEvent` (72 B). |
 | **v7** | `7` | Expanded `Mt5SymInfo` from 60 bytes to 76 bytes (added `bid` and `ask`). Added closed bar streaming (`CMD_SUBSCRIBE_BARS`, `CMD_UNSUBSCRIBE_BARS`, `Mt5BarEvent` 96 bytes). |
-| **v8** | `8` *(Planned)* | Planned timestamp unification across book events (epoch ms) and per-stream sequence gap detection. |
+| **v8** | `8` *(Current)* | Python event streaming exports (`RegisterEventCallback`, `PollEvent`, `EventsDroppedTotal`, `GetOrphanCount`). |
 
 ---
 
-## 2. Migrating to Protocol v7 / Crate 0.3.0
+## 2. Migrating to Protocol v8 / Crate 0.4.0
 
 ### Wire Protocol Updates
 1. **`PacketHdr` is 16 bytes:**

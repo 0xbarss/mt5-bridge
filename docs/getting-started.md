@@ -14,7 +14,7 @@ It connects a client process to MetaTrader 5 through a local Windows Named Pipe:
 ## Prerequisites
 
 1. **MetaTrader 5 Terminal** (installed on Windows, or running via Wine on Linux).
-2. **Rust toolchain** 1.77 or newer:
+2. **Rust toolchain** 1.81 or newer:
 
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -131,14 +131,14 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mt5-bridge = "0.3"
+mt5-bridge = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
 Enable features as needed:
 
 ```toml
-mt5-bridge = { version = "0.3", features = ["async", "serde_json", "wal", "cli", "schema"] }
+mt5-bridge = { version = "0.4", features = ["async", "serde_json", "wal", "cli", "schema"] }
 ```
 
 | Feature | Default? | Description |
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Next Steps
 
-- [Python API](python-api.md) — sync `Client`, async `AsyncClient`, Task 5 event streaming
+- [Python API](python-api.md) — sync `Client`, async `AsyncClient`, event streaming
 - [API Reference](api-reference.md) — full Rust `Mt5Client` reference
 - [Architecture](architecture.md) — IPC, security, state machine, event model
 - [Trading](trading.md) — order execution, positions, reconciliation, `OrderManager`

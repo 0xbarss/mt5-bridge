@@ -1,6 +1,6 @@
 # MetaTrader 5 Binary IPC Protocol Specification
 
-**Current Protocol Version:** `7` (`MT5_BRIDGE_PROTOCOL_VERSION`)
+**Current Protocol Version:** `8` (`MT5_BRIDGE_PROTOCOL_VERSION`)
 
 This document defines the authoritative binary wire protocol, packet framing, command table, and packed struct memory layouts for `mt5-bridge`.
 

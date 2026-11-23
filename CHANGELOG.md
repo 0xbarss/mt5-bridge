@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-23
+
+### Added
+
+- **Python event streaming**:
+  - Wrapped DLL exports `RegisterEventCallback`, `PollEvent`, `EventsDroppedTotal`, `GetOrphanCount` in PyO3 bindings.
+  - `AsyncClient.register_event_callback(cb)` — Python callable invoked by the DLL on each streamed event.
+  - `AsyncClient.poll_event(timeout_ms)` — poll for next event; `None` on timeout.
+  - `AsyncClient.events_dropped_total()` and `AsyncClient.get_orphan_count()` — queue observability.
+  - `async for event in client.events(): ...` — async event stream yielding `PyEvent`.
+  - `PyEvent` data class with `event_type` and `payload` fields.
+
+- **Modular documentation**: Split README into focused docs under `docs/` (`getting-started.md`, `python-api.md`, `api-reference.md`, `architecture.md`, `trading.md`, `streaming.md`, `benchmarks.md`, `examples.md`, `multi-instance.md`, `troubleshooting.md`).
+
+- **Benchmarks**: Updated `docs/benchmarks.md` with real release-mode measurements from all four benchmark suites.
+
+### Changed
+
+- Bumped crate version from `0.3.0` to `0.4.0` (`Cargo.toml`, `crates/mt5-bridge-py/Cargo.toml`, `fuzz/Cargo.toml`, `pyproject.toml`).
+
 ## [Unreleased]
 
 ### Added

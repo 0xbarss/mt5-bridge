@@ -4,9 +4,44 @@ build-backend = "maturin"
 
 [project]
 name = "mt5-bridge-py"
-version = "0.3.0"
+version = "0.4.0"
+description = "Python bindings (PyO3) for mt5-bridge — MetaTrader 5 API bridge client for Python"
+readme = "../../README.md"
 requires-python = ">=3.8"
+authors = [{ name = "0xbarss", email = "baris.ozdemir.se@gmail.com" }]
+license = { text = "MIT" }
+keywords = ["metatrader", "mt5", "trading", "finance", "algorithmic-trading", "python-bindings", "pyo3"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+repository = "https://github.com/0xbarss/mt5-bridge"
+homepage = "https://github.com/0xbarss/mt5-bridge"
 
 [tool.maturin]
 features = ["async"]
 module-name = "mt5_bridge_py"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]
+
+[project.urls]
+Documentation = "https://github.com/0xbarss/mt5-bridge/blob/main/crates/mt5-bridge-py/tests/test_all_features.py"
+Source = "https://github.com/0xbarss/mt5-bridge"
+Changelog = "https://github.com/0xbarss/mt5-bridge/blob/main/CHANGELOG.md"
+Issues = "https://github.com/0xbarss/mt5-bridge/issues"

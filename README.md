@@ -1,10 +1,11 @@
 # mt5-bridge
 
 [![Crates.io](https://img.shields.io/crates/v/mt5-bridge.svg)](https://crates.io/crates/mt5-bridge)
+[![PyPI](https://img.shields.io/pypi/v/mt5-bridge-py.svg)](https://pypi.org/project/mt5-bridge-py/)
 [![Docs.rs](https://docs.rs/mt5-bridge/badge.svg)](https://docs.rs/mt5-bridge)
 [![CI](https://github.com/0xbarss/mt5-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/0xbarss/mt5-bridge/actions/workflows/ci.yml)
 [![GitHub release](https://img.shields.io/github/v/release/0xbarss/mt5-bridge.svg)](https://github.com/0xbarss/mt5-bridge/releases)
-[![Rust](https://img.shields.io/badge/rust-1.77%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.81%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Author](https://img.shields.io/badge/author-0xbarss-purple.svg)](https://github.com/0xbarss)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Wine-lightgrey.svg)]()
@@ -51,11 +52,11 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 - **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, bid, ask, and digits with in-memory caching (Protocol v7: `bid`/`ask` from `Mt5SymInfo`).
 - **Price & Lot Normalization**: Helpers to round prices to tick size and normalize lots to valid broker steps, with `is_valid_lot()` bounds checking against `NaN` and `Infinity`.
 - **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`). Includes chunking and retry loops for deep history, plus `copy_rates_chunked_detailed()` reporting completeness.
-- **Real-Time Streaming**: Asynchronous tick streaming (Tokio channels, deduplication, cancellation), closed-bar streaming via `stream_bars`, and bar push streaming via `subscribe_bars` / `unsubscribe_bars` (Protocol v7 real-time bar push).
+- **Real-Time Streaming**: Asynchronous tick streaming (Tokio channels, deduplication, cancellation), `subscribe_trade`, `subscribe_book`, closed-bar streaming via `stream_bars`, and bar push streaming via `subscribe_bars` / `unsubscribe_bars` (Protocol v7 real-time bar push).
 - **Durable Write-Ahead Log**: `WalOrderStore` with binary `MT5WAL01` frame format, per-frame CRC32, tail crash recovery, snapshot compaction, and JSON migration.
 - **Position Book**: `PositionBook` with deal-level order attribution, weighted-average fill tracking, partial/full close transitions, magic-number filtering, and broker snapshot reconciliation.
 - **Session Supervisor & Gateway**: `Mt5Session` exponential-backoff reconnection supervisor; `Mt5Gateway` actor with 3-tier priority scheduling (critical / normal / low) and tick conflation.
-- **Order Execution**: Instant market orders (`Buy` / `Sell`) with slippage tolerance; pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`) with expiration control; position closing by ticket; SL/TP modification with tick-aligned precision and retcode feedback.
+- **Order Execution**: Instant market orders (`Buy` / `Sell`) with slippage tolerance; pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`) with expiration control; `order_close` / `close_position` by ticket; `order_modify` with `stop_loss: Level, take_profit: Level` signature and tick-aligned precision and retcode feedback.
 - **Security Hardening**: Absolute DLL path validation with SHA-256 hash verification; pipe name regex enforcement; explicit pipe security descriptor (ACL).
 - **Headless Autostart**: Shell and PowerShell scripts under `mql5/autostart/` for unattended terminal and EA launch.
 - **Multi-Terminal Ready**: Custom named pipe parameters allow running multiple MT5 terminals/accounts concurrently on the same machine.
@@ -119,7 +120,7 @@ Detailed documentation has been split into focused files under [`docs/`](docs):
 | Document | Contents |
 | :--- | :--- |
 | [Getting Started](docs/getting-started.md) | Prerequisites, EA installation, DLL build, Wine setup, crate features |
-| [Python API](docs/python-api.md) | Sync `Client`, async `AsyncClient`, data classes, Task 5 event streaming, full test suite |
+| [Python API](docs/python-api.md) | Sync `Client`, async `AsyncClient`, data classes, event streaming, full test suite |
 | [API Reference](docs/api-reference.md) | Full Rust `Mt5Client` reference, streaming APIs, data structures, error handling |
 | [Architecture](docs/architecture.md) | IPC architecture, security model, trade execution state machine, event processing model, queue overflow & observability |
 | [Trading](docs/trading.md) | Market orders, pending orders, error handling, positions/orders, `OrderManager` reconciliation, integer tick pricing |
@@ -129,6 +130,24 @@ Detailed documentation has been split into focused files under [`docs/`](docs):
 | [Troubleshooting](docs/troubleshooting.md) | Common issues & fixes |
 | [Examples](docs/examples.md) | Consolidated code examples (1–13 + Python) |
 | [Protocol Specification](docs/protocol.md) | Binary wire protocol, packet framing, command table, packed struct layouts |
+
+### Packed Struct Sizes
+
+| Struct | Size |
+| :--- | :--- |
+| `PacketHdr` (16 bytes) | — |
+| `Mt5TickEvent` (88 bytes) | — |
+| `Mt5TradeEvent` (176 bytes) | — |
+| `Mt5BookEvent` (72 bytes) | — |
+| `Mt5SymInfo` (76 bytes) | — |
+| `Mt5BarEvent` (96 bytes) | — |
+| `Mt5Rate` (60 bytes) | — |
+| `Mt5Tick` (44 bytes) | — |
+| `Mt5TradeResult` (44 bytes) | — |
+| `Mt5Position` (148 bytes) | — |
+| `Mt5Order` (140 bytes) | — |
+| `Mt5Deal` (152 bytes) | — |
+| `Mt5Stats` (64 bytes) | — |
 
 ---
 
@@ -186,7 +205,7 @@ mt5-bridge/
 │   └── wal_journal_tests.rs     # WAL lifecycle, crash recovery, compaction, corruption rejection
 │
 ├── crates/mt5-bridge-py/    # Python bindings (PyO3)
-│   ├── src/lib.rs           # Client, AsyncClient, PyEvent, event streaming (Task 5)
+│   ├── src/lib.rs           # Client, AsyncClient, PyEvent, event streaming
 │   ├── tests/test_all_features.py  # Comprehensive Python feature test suite (101 tests)
 │   └── tests/test_async_only.py    # Async-only tests (separate process)
 │
@@ -225,7 +244,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 
 # MSRV check
-cargo +1.77.0 check --all-features
+cargo +1.81.0 check --all-features
 
 # Dependency audit
 cargo deny check

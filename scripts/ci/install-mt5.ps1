@@ -1,7 +1,7 @@
 # Install MetaTrader 5 on a Windows runner for MQL5 EA compile verification.
 #
 # Installs the terminal to "C:\Program Files\MetaTrader 5" and leaves
-# metaeditor64.exe available for `metaeditor64.exe /compile`.
+# MetaEditor64.exe available for `MetaEditor64.exe /compile`.
 #
 # Idempotent: if metaeditor64.exe is already present, download and install are
 # skipped so repeated runs on the same machine do not reinstall MT5.
@@ -12,7 +12,7 @@ $Installer = "$env:TEMP\mt5setup.exe"
 $Mt5Url = "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 
 # Already installed? Skip everything.
-if (Test-Path "$InstallDir\metaeditor64.exe") {
+if (Test-Path "$InstallDir\MetaEditor64.exe") {
     Write-Host "MetaTrader 5 already installed at $InstallDir — skipping download and install."
     exit 0
 }
@@ -30,8 +30,8 @@ try {
 # /auto installs silently to the default location.
 & "$Installer" /auto
 
-if (-not (Test-Path "$InstallDir\metaeditor64.exe")) {
-    Write-Error "MT5 installation did not produce metaeditor64.exe at $InstallDir"
+if (-not (Test-Path "$InstallDir\MetaEditor64.exe")) {
+    Write-Error "MT5 installation did not produce MetaEditor64.exe at $InstallDir"
     exit 1
 }
 

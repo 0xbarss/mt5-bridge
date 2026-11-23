@@ -15,9 +15,7 @@ use std::sync::atomic::Ordering;
 static CLIENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn with_client_lock() -> std::sync::MutexGuard<'static, ()> {
-    CLIENT_TEST_LOCK
-        .lock()
-        .expect("test lock must not be poisoned")
+    CLIENT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[test]
@@ -89,6 +87,8 @@ fn connect_with_dll_rejects_world_writable_directory() {
 #[test]
 fn dll_load_failure_releases_client_active() {
     let _lock = with_client_lock();
+    // Allow unpinned DLL so we test the actual DLL load error, not hash rejection.
+    std::env::set_var("MT5_DLL_ALLOW_UNPINNED", "1");
     // A file that exists but is not a valid DLL, so loading must fail.
     // The directory must not be world-writable, or the world-writable
     // directory check fires before the loader ever runs.

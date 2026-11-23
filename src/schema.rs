@@ -3,7 +3,7 @@
 //! Gated on the `schema` feature. JSON Schema is generated with `schemars`;
 //! wire offsets use `std::mem::size_of!` plus a MSRV-safe offset helper
 //! (`std::mem::offset_of!` is stable only from Rust 1.78, while this crate
-//! targets 1.77).
+//! targets 1.81).
 
 #![cfg_attr(not(feature = "schema"), allow(dead_code))]
 
@@ -16,7 +16,7 @@ use std::ptr::addr_of;
 
 /// MSRV-safe byte offset of `$field` within `$ty`.
 ///
-/// `std::mem::offset_of!` is stable since Rust 1.78; this crate targets 1.77,
+/// `std::mem::offset_of!` is stable since Rust 1.78; this crate targets 1.81,
 /// so the offset is computed from a null base pointer via `addr_of!`, which
 /// constructs a raw pointer without dereferencing and is therefore
 /// well-defined on every supported toolchain.

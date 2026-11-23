@@ -309,7 +309,9 @@ fn main() {
     bench("order_manager_submit_order (single-owner)", 20_000, || {
         order_idx += 1;
         let id = format!("b-{}", order_idx);
-        let r = OrderRequest::buy("EURUSD", 0.1).client_order_id(&id);
+        let r = OrderRequest::buy("EURUSD", 0.1)
+            .stop_loss(1.0800)
+            .client_order_id(&id);
         let _ = black_box(mgr.submit_order(&backend, r));
     });
 
@@ -319,7 +321,9 @@ fn main() {
     let mut snap_deals = Vec::new();
     for i in 0..50 {
         let cid = format!("recon-ord-{}", i);
-        let r = OrderRequest::buy("EURUSD", 0.1).client_order_id(&cid);
+        let r = OrderRequest::buy("EURUSD", 0.1)
+            .stop_loss(1.0800)
+            .client_order_id(&cid);
         let tracked = recon_mgr.submit_order(&backend, r).unwrap();
 
         let mut p = Position::from_raw(raw_pos);

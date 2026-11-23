@@ -105,7 +105,7 @@ When the receiver buffer is full, the background poller asynchronously awaits ch
 
 ---
 
-## Python Streaming (Task 5)
+## Python Event Streaming
 
 The Python `AsyncClient` wraps the same event delivery system:
 

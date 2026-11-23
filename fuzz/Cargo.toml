@@ -1,6 +1,6 @@
 [package]
 name = "mt5-bridge-fuzz"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 publish = false
 description = "Coverage-guided fuzz targets for mt5-bridge wire and WAL parsers"

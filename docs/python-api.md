@@ -175,7 +175,7 @@ All classes support field get/set via `pyo3(get, set)` and can be constructed fr
 | `await client.order_close(ticket)` | `PyTradeResult` | Close position |
 | `await client.order_modify(ticket, sl_mode, sl, tp_mode, tp)` | `PyTradeResult` | Modify SL/TP |
 
-### Event System (Task 5)
+### Event System
 
 | Method | Returns | Description |
 | :--- | :--- | :--- |
@@ -243,7 +243,7 @@ It exercises every exposed Python API against a live MT5 terminal under Wine Pyt
 | Sync Client — subscriptions | symbol_select, subscribe/unsubscribe ticks/trade/book/bars |
 | Sync Client — trading | order_send with valid SL/TP (retcode 10009), order_send without SL (rejected), order_close, order_modify |
 | Async Client | ping, stats, account_info, symbol_info, symbol_tick, copy_bars, order_send without SL rejected, shutdown |
-| Event System (Task 5) | register_event_callback, poll_event, events_dropped_total, get_orphan_count, async for event in client.events(): |
+| Event System | register_event_callback, poll_event, events_dropped_total, get_orphan_count, async for event in client.events(): |
 
 Run under Wine:
 

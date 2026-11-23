@@ -69,8 +69,8 @@
 
 ## 12. MSRV check fails on `clap_lex` edition2024
 
-- **Cause**: `--all-features` enables `cli` → `clap` → `clap_lex 1.1.2`, which requires edition2024 unavailable in Cargo 1.77.
-- **Fix**: `clap` is pinned to 4.4.18 (clap_lex 0.6.0) in `Cargo.lock` for MSRV compatibility. CI uses `cargo +1.77.0 check --all-features`.
+- **Cause**: `--all-features` enables `cli` → `clap` → `clap_lex 1.1.2`, which requires edition2024 unavailable in Cargo 1.81.
+- **Fix**: `clap` is pinned to 4.4.18 (clap_lex 0.6.0) in `Cargo.lock` for MSRV compatibility. CI uses `cargo +1.81.0 check --all-features`.
 
 ## 13. `ctest` finds 0 C++ tests
 

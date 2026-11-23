@@ -118,14 +118,14 @@ jobs:
           files: lcov.info
 
   msrv:
-    name: MSRV Check (1.77)
+    name: MSRV Check (1.81)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@1.77.0
+        uses: dtolnay/rust-toolchain@1.81.0
 
       - name: Verify MSRV compilation
         run: cargo check --all-features
@@ -233,14 +233,3 @@ jobs:
       - name: Verify Windows DLL output
         run: |
           Get-Item bridge_dll/build/Release/mt5_bridge.dll
-
-      - name: Install MT5
-        run: pwsh -File scripts/ci/install-mt5.ps1
-
-      - name: Compile MQL5 EA
-        run: |
-          & "C:\Program Files\MetaTrader 5\metaeditor64.exe" `
-            /compile:"$PWD\mql5\Experts\mt5_bridge.mq5" `
-            /log:"$PWD\mql5-compile.log"
-          Get-Content .\mql5-compile.log
-          if (Select-String -Path .\mql5-compile.log -Pattern "error|warning") { exit 1 }

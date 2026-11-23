@@ -86,51 +86,59 @@ pub fn record_request_latency_us(us: u64) {
     request_latency_histogram().observe(us as f64);
 }
 
-/// Compute the p50/p95/p99 request latency percentiles from the histogram.
-///
-/// Returns `(0, 0, 0)` when no observations have been recorded.
 pub fn latency_percentiles() -> (u64, u64, u64) {
     let families = registry().gather();
     let payload = families
         .iter()
-        .find(|f| f.get_name() == "mt5_bridge_request_latency_us")
-        .and_then(|f| f.get_metric().first())
-        .map(|m| m.get_histogram());
+        .find(|f| f.name() == "mt5_bridge_request_latency_us")
+        .and_then(|f| f.metric.first())
+        .map(|m| (*m.histogram).clone());
     let Some(payload) = payload else {
         return (0, 0, 0);
     };
-    let total = payload.get_sample_count();
+    let total = payload.sample_count();
     if total == 0 {
         return (0, 0, 0);
     }
-    let buckets = payload.get_bucket();
-    let percentile = |p: f64| -> u64 {
-        let target = (p / 100.0) * total as f64;
-        let mut prev_upper = 0.0f64;
-        let mut prev_count = 0u64;
-        for bucket in buckets {
-            let count = bucket.get_cumulative_count();
-            if count as f64 >= target {
-                let upper = bucket.get_upper_bound();
-                if upper.is_infinite() {
-                    return prev_upper.max(0.0) as u64;
-                }
-                // Linear interpolation within the bucket.
+    let buckets = &payload.bucket;
+    if buckets.is_empty() {
+        return (0, 0, 0);
+    }
+
+    // Compute p50, p95, p99 in a single pass through the buckets.
+    let targets = [50.0, 95.0, 99.0];
+    let mut results = [0u64; 3];
+    let mut target_idx = 0usize;
+    let mut prev_upper = 0.0f64;
+    let mut prev_count = 0u64;
+
+    for bucket in buckets {
+        let count = bucket.cumulative_count();
+        while target_idx < 3 && count as f64 >= (targets[target_idx] / 100.0) * total as f64 {
+            let upper = bucket.upper_bound();
+            let target_val = (targets[target_idx] / 100.0) * total as f64;
+            if upper.is_infinite() {
+                results[target_idx] = prev_upper.max(0.0) as u64;
+            } else {
                 let span = upper - prev_upper;
                 let count_span = count - prev_count;
                 let frac = if count_span > 0 && span > 0.0 {
-                    ((target - prev_count as f64) / count_span as f64).clamp(0.0, 1.0)
+                    ((target_val - prev_count as f64) / count_span as f64).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
-                return (prev_upper + frac * span).max(0.0) as u64;
+                results[target_idx] = (prev_upper + frac * span).max(0.0) as u64;
             }
-            prev_upper = bucket.get_upper_bound();
-            prev_count = count;
+            target_idx += 1;
         }
-        0
-    };
-    (percentile(50.0), percentile(95.0), percentile(99.0))
+        if target_idx >= 3 {
+            break;
+        }
+        prev_upper = bucket.upper_bound();
+        prev_count = count;
+    }
+
+    (results[0], results[1], results[2])
 }
 
 #[cfg(test)]

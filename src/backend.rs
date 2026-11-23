@@ -616,7 +616,7 @@ impl DryRunBackend {
     pub fn tick(&self, symbol: &str, bid: f64, ask: f64) {
         let mut g = self.state.lock().unwrap();
         g.prices.insert(symbol.to_string(), (bid, ask));
-        let pending: Vec<DryWorkingOrder> = g.pending.drain(..).collect();
+        let pending: Vec<DryWorkingOrder> = std::mem::take(&mut g.pending);
         for order in pending {
             let mut filled = false;
             if order.order_type.is_buy() {
@@ -639,7 +639,7 @@ impl DryRunBackend {
     pub fn bar(&self, symbol: &str, close: f64) {
         let mut g = self.state.lock().unwrap();
         g.prices.entry(symbol.to_string()).or_insert((close, close));
-        let pending: Vec<DryWorkingOrder> = g.pending.drain(..).collect();
+        let pending: Vec<DryWorkingOrder> = std::mem::take(&mut g.pending);
         for order in pending {
             let mut filled = false;
             if order.order_type.is_buy() {

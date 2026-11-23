@@ -212,6 +212,11 @@ impl Mt5Client {
         let mut off = 0;
         while off + 4 <= buf.len() {
             let name_len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+            // MT5 symbol names are bounded; reject absurd lengths to avoid
+            // allocating gigabytes from a corrupted length field.
+            if name_len as usize > Self::SYMBOL_NAME_MAX_BYTES {
+                break;
+            }
             let entry_size = 4 + name_len as usize + std::mem::size_of::<Mt5SymInfo>();
             if off + entry_size > buf.len() {
                 break;

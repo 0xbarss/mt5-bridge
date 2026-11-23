@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Version bump**: Bumped crate version from `0.4.0` to `0.5.0` across `Cargo.toml`, `Cargo.lock`, `crates/mt5-bridge-py/{Cargo.toml,Cargo.lock,pyproject.toml}`, `fuzz/{Cargo.toml,Cargo.lock}`, `docs/api-reference.md`, `docs/benchmarks.md`, `docs/getting-started.md`.
 - **CI cleanup**: Removed unused `scripts/` directory (`scripts/ci/install-mt5.ps1`) and its README reference.
 - **README restructure**: Removed sections now covered by dedicated docs under `docs/` (packed struct sizes, repository structure, testing & QA); rewrote Key Features cleanly without code references; fixed packed struct size table columns and dropped a stale async test reference.
+- **Publish CI**: `.github/workflows/publish.yml` now copies the root `README.md` into `crates/mt5-bridge-py/` before `maturin build` so the `readme` field resolves and wheel builds no longer fail on a missing README.
 
 ### Removed
 

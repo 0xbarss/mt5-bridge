@@ -136,9 +136,9 @@ pub use trade::{Bracket, TradeManager, TrailingStop};
 pub use types::{
     calculate_sl_ticks, calculate_tp_ticks, comment_matches_client_order_id, parse_wire_id,
     price_to_ticks, ticks_to_price, truncate_utf8, wire_id, AccountInfo, AttributeMismatch, Bar,
-    BookEvent, BridgeStats, Deal, DealEntry, EventEffect, Fill, HistoryResult, Level, Magic,
-    MismatchKind, OrderRequest, OrderState, OrderType, PingResult, Points, Position, Price, Rate,
-    RejectionEvidence, StreamMode, Symbol, SymbolInfo, Tick, Ticket, Timeframe, TrackedOrder,
+    BookEvent, BridgeStats, Deal, DealEntry, EventEffect, Fill, HistoryResult, HistoryState, Level,
+    Magic, MismatchKind, OrderRequest, OrderState, OrderType, PingResult, Points, Position, Price,
+    Rate, RejectionEvidence, StreamMode, Symbol, SymbolInfo, Tick, Ticket, Timeframe, TrackedOrder,
     TradeEvent, TradeResult, TradeRule, TradeStatus, Volume, WorkingOrder,
     MAX_CLIENT_ORDER_ID_BYTES, MT5_COMMENT_MAX_BYTES, WIRE_COMMENT_PREFIX, WIRE_ID_LEN,
 };

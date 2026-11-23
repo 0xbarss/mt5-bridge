@@ -28,7 +28,7 @@ mod tests;
 pub use account::{AccountInfo, PingResult};
 pub use bar::Bar;
 pub use deal::{Deal, DealEntry};
-pub use history::HistoryResult;
+pub use history::{HistoryResult, HistoryState};
 pub use level::Level;
 pub use mismatch::{approx_price_eq, approx_volume_eq, AttributeMismatch, MismatchKind};
 pub use order_enums::{OrderState, OrderType, TradeStatus};

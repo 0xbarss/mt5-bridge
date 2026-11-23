@@ -148,12 +148,11 @@ impl Mt5Client {
                 if cancel_token.load(std::sync::atomic::Ordering::Relaxed) {
                     all_rates.sort_by_key(|r| r.time);
                     all_rates.dedup_by_key(|r| r.time);
-                    return Ok(HistoryResult {
-                        rates: all_rates,
-                        complete: false,
+                    return Ok(HistoryResult::new(
+                        all_rates,
+                        HistoryState::Cancelled,
                         missing_ranges,
-                        cancelled: true,
-                    });
+                    ));
                 }
             }
 
@@ -243,13 +242,12 @@ impl Mt5Client {
         all_rates.sort_by_key(|r| r.time);
         all_rates.dedup_by_key(|r| r.time);
 
-        let complete = missing_ranges.is_empty();
-        Ok(HistoryResult {
-            rates: all_rates,
-            complete,
-            missing_ranges,
-            cancelled: false,
-        })
+        let state = if missing_ranges.is_empty() {
+            HistoryState::Complete
+        } else {
+            HistoryState::Partial
+        };
+        Ok(HistoryResult::new(all_rates, state, missing_ranges))
     }
 
     /// Robust, chunked historical data downloader.
@@ -265,7 +263,7 @@ impl Mt5Client {
         chunk_bars: usize,
     ) -> Result<Vec<Rate>> {
         let res = self.copy_rates_chunked_detailed(symbol, timeframe, start, end, chunk_bars)?;
-        if !res.complete {
+        if !res.is_complete() {
             warn!(
                 symbol = symbol,
                 missing = res.missing_ranges.len(),

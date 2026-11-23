@@ -12,8 +12,8 @@
 use crate::client::Mt5Client;
 use crate::error::{Mt5Error, Result};
 use crate::types::{
-    AccountInfo, Deal, DealEntry, HistoryResult, Level, OrderRequest, OrderType, Position, Rate,
-    Timeframe, TradeResult, WorkingOrder,
+    AccountInfo, Deal, DealEntry, HistoryResult, HistoryState, Level, OrderRequest, OrderType,
+    Position, Rate, Timeframe, TradeResult, WorkingOrder,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -114,12 +114,7 @@ pub trait TradingBackend {
     ) -> Result<HistoryResult> {
         let _ = cancel;
         let rates = self.copy_rates(symbol, timeframe, from, to)?;
-        Ok(HistoryResult {
-            rates,
-            complete: true,
-            missing_ranges: vec![],
-            cancelled: false,
-        })
+        Ok(HistoryResult::new(rates, HistoryState::Complete, vec![]))
     }
 
     /// Check backend responsiveness via heartbeat ping.

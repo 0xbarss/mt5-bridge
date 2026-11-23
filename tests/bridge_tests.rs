@@ -435,23 +435,15 @@ fn test_order_request_validate_with_symbol() {
 
 #[test]
 fn test_history_result_completeness() {
-    let complete_res = HistoryResult {
-        rates: vec![],
-        complete: true,
-        missing_ranges: vec![],
-        cancelled: false,
-    };
-    assert!(complete_res.complete);
+    let complete_res = HistoryResult::new(vec![], HistoryState::Complete, vec![]);
     assert!(complete_res.is_complete());
     assert!(complete_res.missing_ranges.is_empty());
 
-    let partial_res = HistoryResult {
-        rates: vec![],
-        complete: false,
-        missing_ranges: vec![(1700000000, 1700010000)],
-        cancelled: false,
-    };
-    assert!(!partial_res.complete);
+    let partial_res = HistoryResult::new(
+        vec![],
+        HistoryState::Partial,
+        vec![(1700000000, 1700010000)],
+    );
     assert!(!partial_res.is_complete());
     assert_eq!(partial_res.missing_ranges.len(), 1);
 }

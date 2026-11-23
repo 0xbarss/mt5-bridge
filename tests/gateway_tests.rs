@@ -795,12 +795,7 @@ impl TradingBackend for SlowBackend {
         let sleep_per_chunk = self.p3_sleep / (chunk_count as u32);
         for i in 0..chunk_count {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Ok(HistoryResult {
-                    rates,
-                    complete: false,
-                    missing_ranges: vec![],
-                    cancelled: true,
-                });
+                return Ok(HistoryResult::new(rates, HistoryState::Cancelled, vec![]));
             }
             std::thread::sleep(sleep_per_chunk);
             rates.push(Rate {
@@ -815,12 +810,7 @@ impl TradingBackend for SlowBackend {
             });
         }
         let _ = (symbol, timeframe, to);
-        Ok(HistoryResult {
-            rates,
-            complete: true,
-            missing_ranges: vec![],
-            cancelled: false,
-        })
+        Ok(HistoryResult::new(rates, HistoryState::Complete, vec![]))
     }
 }
 
@@ -948,7 +938,7 @@ async fn test_cancelled_p3_returns_partial_data_and_does_not_block_p1() {
     assert!(p1_res.is_ok());
 
     let p3_res = h_p3.await.unwrap().unwrap();
-    assert!(p3_res.cancelled, "P3 should be marked as cancelled");
+    assert!(p3_res.is_cancelled(), "P3 should be marked as cancelled");
     assert!(
         !p3_res.rates.is_empty(),
         "P3 should return partial rates collected before cancellation"

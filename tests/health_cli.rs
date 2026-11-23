@@ -3,6 +3,10 @@
 //! These tests assert command-line argument parsing and `--help` output using
 //! [`assert_cmd`]. The library-side health checks are unit-tested in
 //! [`src/health.rs`](crate::health).
+//!
+//! Gated on the `cli` feature because they require the `mt5-bridge` binary,
+//! which is only built when that feature is enabled.
+#![cfg(feature = "cli")]
 
 use assert_cmd::Command;
 use predicates::prelude::*;

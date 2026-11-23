@@ -92,7 +92,7 @@ cargo add mt5-bridge
 
 ```toml
 [dependencies]
-mt5-bridge = "0.3"
+mt5-bridge = "0.5"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -223,8 +223,7 @@ mt5-bridge/
 │
 ├── docs/                    # Modular documentation (see table above)
 ├── fuzz/                    # Cargo-fuzz targets
-├── include/                 # Public C API header
-└── scripts/                 # Helper scripts
+└── include/                 # Public C API header
 ```
 
 ---

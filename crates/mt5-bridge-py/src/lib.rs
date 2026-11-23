@@ -118,6 +118,11 @@ pub struct PySymbolInfo {
 
 #[pymethods]
 impl PySymbolInfo {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SymbolInfo(symbol={}, bid={}, ask={}, digits={})",
@@ -169,6 +174,11 @@ pub struct PyTick {
 
 #[pymethods]
 impl PyTick {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn spread(&self) -> f64 {
         self.ask - self.bid
     }
@@ -336,6 +346,11 @@ pub struct PyBridgeStats {
 
 #[pymethods]
 impl PyBridgeStats {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "BridgeStats(uptime_secs={}, requests_total={}, protocol={})",
@@ -492,6 +507,11 @@ pub struct PyPosition {
 
 #[pymethods]
 impl PyPosition {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Position(ticket={}, symbol={}, type={}, volume={}, profit={})",
@@ -555,6 +575,11 @@ pub struct PyWorkingOrder {
 
 #[pymethods]
 impl PyWorkingOrder {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "WorkingOrder(ticket={}, symbol={}, type={}, price_open={})",
@@ -621,6 +646,11 @@ pub struct PyDeal {
 
 #[pymethods]
 impl PyDeal {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Deal(ticket={}, symbol={}, direction={}, volume={}, profit={})",
@@ -685,6 +715,11 @@ pub struct PyCalendarEvent {
 
 #[pymethods]
 impl PyCalendarEvent {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
     fn is_released(&self) -> bool {
         self.actual.is_some()
     }
@@ -792,6 +827,8 @@ impl Client {
         Ok(PyBridgeStats::from(stats).into_pyobject(py)?.unbind())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (symbol, order_type, volume, price, sl=0.0, tp=0.0, comment="", deviation=None, expiration=None, magic=None))]
     fn order_send<'py>(
         &self,
         py: Python<'py>,
@@ -799,6 +836,12 @@ impl Client {
         order_type: &str,
         volume: f64,
         price: f64,
+        sl: f64,
+        tp: f64,
+        comment: &str,
+        deviation: Option<u32>,
+        expiration: Option<i64>,
+        magic: Option<u64>,
     ) -> PyResult<Py<PyTradeResult>> {
         let ot = match order_type {
             "buy" => OrderType::Buy,
@@ -818,12 +861,12 @@ impl Client {
             order_type: ot,
             volume,
             price,
-            stop_loss: 0.0,
-            take_profit: 0.0,
-            comment: String::new(),
-            deviation: None,
-            expiration: None,
-            magic: None,
+            stop_loss: sl,
+            take_profit: tp,
+            comment: comment.to_string(),
+            deviation,
+            expiration,
+            magic,
             client_order_id: None,
         };
         let result = self.inner.order_send(&req).map_err(to_py_err)?;

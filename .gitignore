@@ -4,6 +4,7 @@
 /crates/*/target/
 **/*.rs.bk
 lcov.info
+mql5-compile.log
 
 # C++ Build outputs
 bridge_dll/build/

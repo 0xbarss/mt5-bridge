@@ -236,121 +236,126 @@ extern "C" {
 #endif
 
 /* Connect to MT5 EA pipe server. Returns 1 on success, 0 on failure. */
-MT5_BRIDGE_API int mt5_bridge_initialize(int64_t login, const char* password, const char* server);
+MT5_BRIDGE_API int Initialize(int64_t login, const char* password, const char* server);
 
 /* Disconnect and clean up. */
-MT5_BRIDGE_API int mt5_bridge_shutdown(void);
+MT5_BRIDGE_API int Shutdown(void);
 
 /* Check connection liveness. Returns 1 if connected and reader alive, 0 otherwise. */
-MT5_BRIDGE_API int mt5_bridge_is_connected(void);
+MT5_BRIDGE_API int IsConnected(void);
 
 /* Fetch OHLCV bars in [from, to] UTC range into buf (up to buf_capacity items).
    Returns bar count filled, -1 on error. */
-MT5_BRIDGE_API int mt5_bridge_copy_rates(const char* symbol, int timeframe,
-                                         int64_t from, int64_t to,
-                                         Mt5Rate* buf, int buf_capacity);
+MT5_BRIDGE_API int CopyRates(const char* symbol, int timeframe,
+                             int64_t from, int64_t to,
+                             Mt5Rate* buf, int buf_capacity);
 
 /* Account balances, equity, margin, free margin, leverage, deposit currency.
    `currency` is a NUL-terminated buffer of at least 32 bytes. Returns 1 on success. */
-MT5_BRIDGE_API int mt5_bridge_account_info(double* balance, double* equity,
-                                           double* margin, double* free_margin,
-                                           double* leverage, char* currency, int currency_len);
+MT5_BRIDGE_API int AccountInfo(double* balance, double* equity,
+                               double* margin, double* free_margin,
+                               double* leverage, char* currency, int currency_len);
 
 /* Latest tick for a symbol. Returns 1 on success. */
-MT5_BRIDGE_API int mt5_bridge_symbol_info_tick(const char* symbol, Mt5Tick* tick);
+MT5_BRIDGE_API int SymbolInfoTick(const char* symbol, Mt5Tick* tick);
 
 /* Symbol properties (point size, tick value, tick size, lot limits, digits).
    Returns 1 on success. */
-MT5_BRIDGE_API int mt5_bridge_symbol_info_full(const char* symbol, Mt5SymInfo* info);
+MT5_BRIDGE_API int SymbolInfoFull(const char* symbol, Mt5SymInfo* info);
 
 /* Open or place an order. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
-MT5_BRIDGE_API int mt5_bridge_order_send(const char* symbol, int type, double volume,
-                                         double price, double sl, double tp,
-                                         const char* comment, uint32_t deviation,
-                                         int64_t expiration, uint64_t magic,
-                                         Mt5TradeResult* result);
+MT5_BRIDGE_API int OrderSend(const char* symbol, int type, double volume,
+                             double price, double sl, double tp,
+                             const char* comment, uint32_t deviation,
+                             int64_t expiration, uint64_t magic,
+                             Mt5TradeResult* result);
 
 /* Close position by ticket. Returns 1 on success, -1 on send fail, -2 on unknown execution. */
-MT5_BRIDGE_API int mt5_bridge_order_close(uint64_t ticket, Mt5TradeResult* result);
+MT5_BRIDGE_API int OrderClose(uint64_t ticket, Mt5TradeResult* result);
 
 /* Close position by ticket with magic number verification. */
-MT5_BRIDGE_API int mt5_bridge_order_close_with_magic(uint64_t ticket, uint64_t magic,
-                                                     Mt5TradeResult* result);
+MT5_BRIDGE_API int OrderCloseWithMagic(uint64_t ticket, uint64_t magic,
+                                       Mt5TradeResult* result);
 
-/* Modify SL/TP with explicit level modes (0=keep, 1=clear, 2=set). */
-MT5_BRIDGE_API int mt5_bridge_order_modify(uint64_t ticket, uint8_t sl_mode, double sl,
-                                           uint8_t tp_mode, double tp,
+/* Close position by ticket with deviation, volume, and magic number. */
+MT5_BRIDGE_API int OrderCloseWithDeviation(uint64_t ticket, uint64_t magic,
+                                           uint32_t deviation, double volume,
                                            Mt5TradeResult* result);
 
+/* Modify SL/TP with explicit level modes (0=keep, 1=clear, 2=set). */
+MT5_BRIDGE_API int OrderModify(uint64_t ticket, uint8_t sl_mode, double sl,
+                               uint8_t tp_mode, double tp,
+                               Mt5TradeResult* result);
+
 /* Modify SL/TP with magic number verification and explicit level modes. */
-MT5_BRIDGE_API int mt5_bridge_order_modify_with_magic(uint64_t ticket, uint64_t magic,
-                                                      uint8_t sl_mode, double sl,
-                                                      uint8_t tp_mode, double tp,
-                                                      Mt5TradeResult* result);
+MT5_BRIDGE_API int OrderModifyWithMagic(uint64_t ticket, uint64_t magic,
+                                        uint8_t sl_mode, double sl,
+                                        uint8_t tp_mode, double tp,
+                                        Mt5TradeResult* result);
 
 /* Query open positions. Returns count filled into buf, or -1 on error. */
-MT5_BRIDGE_API int mt5_bridge_positions_get(Mt5Position* buf, int buf_capacity,
-                                            uint64_t magic_filter, const char* symbol_filter);
+MT5_BRIDGE_API int PositionsGet(Mt5Position* buf, int buf_capacity,
+                                uint64_t magic_filter, const char* symbol_filter);
 
 /* Query pending orders. Returns count filled into buf, or -1 on error. */
-MT5_BRIDGE_API int mt5_bridge_orders_get(Mt5Order* buf, int buf_capacity,
-                                         uint64_t magic_filter, const char* symbol_filter);
+MT5_BRIDGE_API int OrdersGet(Mt5Order* buf, int buf_capacity,
+                             uint64_t magic_filter, const char* symbol_filter);
 
 /* Query completed trade deals with from <= time <= to (UTC seconds).
    magic_filter 0 = any, symbol_filter NULL/"" = any. Returns count filled into buf,
    or -1 on error. */
-MT5_BRIDGE_API int mt5_bridge_deals_get(Mt5Deal* buf, int buf_capacity,
-                                        int64_t from, int64_t to,
-                                        uint64_t magic_filter, const char* symbol_filter);
+MT5_BRIDGE_API int DealsGet(Mt5Deal* buf, int buf_capacity,
+                            int64_t from, int64_t to,
+                            uint64_t magic_filter, const char* symbol_filter);
 
 /* Subscription management (protocol v6+) */
-MT5_BRIDGE_API int mt5_bridge_subscribe_ticks(const char* symbol);
-MT5_BRIDGE_API int mt5_bridge_unsubscribe_ticks(const char* symbol);
-MT5_BRIDGE_API int mt5_bridge_subscribe_trade(void);
-MT5_BRIDGE_API int mt5_bridge_unsubscribe_trade(void);
-MT5_BRIDGE_API int mt5_bridge_subscribe_book(const char* symbol);
-MT5_BRIDGE_API int mt5_bridge_unsubscribe_book(const char* symbol);
-MT5_BRIDGE_API int mt5_bridge_subscribe_bars(const char* symbol, int timeframe);
-MT5_BRIDGE_API int mt5_bridge_unsubscribe_bars(const char* symbol, int timeframe);
+MT5_BRIDGE_API int SubscribeTicks(const char* symbol);
+MT5_BRIDGE_API int UnsubscribeTicks(const char* symbol);
+MT5_BRIDGE_API int SubscribeTrade(void);
+MT5_BRIDGE_API int UnsubscribeTrade(void);
+MT5_BRIDGE_API int SubscribeBook(const char* symbol);
+MT5_BRIDGE_API int UnsubscribeBook(const char* symbol);
+MT5_BRIDGE_API int SubscribeBars(const char* symbol, int timeframe);
+MT5_BRIDGE_API int UnsubscribeBars(const char* symbol, int timeframe);
 
 /* Heartbeat ping returning MT5 server time, monotonic microsecond counter,
    and negotiated protocol version. */
-MT5_BRIDGE_API int mt5_bridge_ping(int64_t* server_time_secs,
-                                   uint64_t* monotonic_microseconds,
-                                   uint32_t* protocol);
+MT5_BRIDGE_API int Ping(int64_t* server_time_secs,
+                        uint64_t* monotonic_microseconds,
+                        uint32_t* protocol);
 
 /* Last request DLL-side timing (microseconds since DLL load). */
-MT5_BRIDGE_API void mt5_bridge_last_request_timings(uint64_t* write_start_us,
-                                                    uint64_t* write_end_us,
-                                                    uint64_t* response_at_us);
+MT5_BRIDGE_API void LastRequestTimings(uint64_t* write_start_us,
+                                       uint64_t* write_end_us,
+                                       uint64_t* response_at_us);
 
 /* Symbol universe discovery (protocol v8+). */
-MT5_BRIDGE_API int mt5_bridge_symbols_total(void);
-MT5_BRIDGE_API int mt5_bridge_symbols_get(uint32_t page, uint32_t page_size,
-                                          char* out_buf, int out_buf_capacity);
-MT5_BRIDGE_API int mt5_bridge_symbol_select(const char* symbol, int enable);
+MT5_BRIDGE_API int SymbolsTotal(void);
+MT5_BRIDGE_API int SymbolsGet(uint32_t page, uint32_t page_size,
+                              char* out_buf, int out_buf_capacity);
+MT5_BRIDGE_API int SymbolSelect(const char* symbol, int enable);
 
 /* Economic calendar (protocol v9+). */
-MT5_BRIDGE_API int mt5_bridge_calendar_events(uint64_t from, uint64_t to,
-                                              char* out_buf, int out_buf_capacity);
-MT5_BRIDGE_API int mt5_bridge_calendar_countries(char* out_buf, int out_buf_capacity);
+MT5_BRIDGE_API int CalendarEvents(uint64_t from, uint64_t to,
+                                  char* out_buf, int out_buf_capacity);
+MT5_BRIDGE_API int CalendarCountries(char* out_buf, int out_buf_capacity);
 
 /* Bridge statistics (protocol v9+).
    Stats packs an Mt5Stats struct into out_buf and returns 1 on success,
    -1 on failure. */
-MT5_BRIDGE_API int mt5_bridge_stats(char* out_buf, int out_buf_capacity);
+MT5_BRIDGE_API int Stats(char* out_buf, int out_buf_capacity);
 
 /* Event callback registration and polling (protocol v6+) */
-typedef void (*Mt5BridgeEventCallback)(uint16_t event_type, const void* payload,
-                                       uint32_t payload_len);
-MT5_BRIDGE_API int mt5_bridge_register_event_callback(Mt5BridgeEventCallback cb);
-MT5_BRIDGE_API int mt5_bridge_poll_event(uint16_t* out_event_type, void* out_buf,
-                                         uint32_t buf_cap, uint32_t* out_len,
-                                         uint32_t timeout_ms);
+typedef void (*Mt5EventCallback)(uint16_t event_type, const void* payload,
+                                 uint32_t payload_len);
+MT5_BRIDGE_API int RegisterEventCallback(Mt5EventCallback cb);
+MT5_BRIDGE_API int PollEvent(uint16_t* out_event_type, void* out_buf,
+                             uint32_t buf_cap, uint32_t* out_len,
+                             uint32_t timeout_ms);
 
 /* Queue observability */
-MT5_BRIDGE_API uint64_t mt5_bridge_events_dropped_total(void);
-MT5_BRIDGE_API uint64_t mt5_bridge_get_orphan_count(void);
+MT5_BRIDGE_API uint64_t EventsDroppedTotal(void);
+MT5_BRIDGE_API uint64_t GetOrphanCount(void);
 
 #ifdef __cplusplus
 }

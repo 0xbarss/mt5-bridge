@@ -5,10 +5,90 @@ edition = "2021"
 publish = false
 description = "Coverage-guided fuzz targets for mt5-bridge wire and WAL parsers"
 
+[package.metadata]
+cargo-fuzz = true
+
 [dependencies]
 mt5-bridge = { path = "..", default-features = false, features = ["wal", "serde_json"] }
 libfuzzer-sys = "0.4"
 arbitrary = "1.3"
+
+[[bin]]
+name = "decode_trade_result"
+path = "fuzz_targets/decode_trade_result.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_position"
+path = "fuzz_targets/decode_position.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_order"
+path = "fuzz_targets/decode_order.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_deal"
+path = "fuzz_targets/decode_deal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_tick_event"
+path = "fuzz_targets/decode_tick_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_bar_event"
+path = "fuzz_targets/decode_bar_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_wire_id"
+path = "fuzz_targets/parse_wire_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_id"
+path = "fuzz_targets/wire_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pipe_name"
+path = "fuzz_targets/pipe_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_frame"
+path = "fuzz_targets/wal_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_journal"
+path = "fuzz_targets/json_journal.rs"
+test = false
+doc = false
+bench = false
 
 [profile.release]
 opt-level = 3

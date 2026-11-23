@@ -182,7 +182,7 @@ typedef struct {
     uint64_t event_seq;
 } Mt5BarEvent;           /* 96 bytes */
 
-/* Bridge-wide statistics snapshot (64 bytes, packed, protocol v9+).
+/* Bridge-wide statistics snapshot (64 bytes, packed, protocol v8+).
  * Returned by CMD_STATS (27). Mirrors src/ffi.rs Mt5Stats. */
 typedef struct {
     uint64_t uptime_secs;
@@ -329,7 +329,7 @@ MT5_API int SymbolsTotal(void);
 MT5_API int SymbolsGet(uint32_t page, uint32_t page_size, char* out_buf, int out_buf_capacity);
 MT5_API int SymbolSelect(const char* symbol, int enable);
 
-/* Economic calendar (protocol v9+).
+/* Economic calendar (protocol v8+).
  * CalendarEvents returns the total number of events as status and packs records
  * into out_buf: [u64 id][i64 time][u32 country_len][country][u32 currency_len][currency]
  * [u8 importance][u32 title_len][title][f64 actual][u8 actual_present]
@@ -340,7 +340,7 @@ MT5_API int SymbolSelect(const char* symbol, int enable);
 MT5_API int CalendarEvents(uint64_t from, uint64_t to, char* out_buf, int out_buf_capacity);
 MT5_API int CalendarCountries(char* out_buf, int out_buf_capacity);
 
-/* Bridge statistics (protocol v9+).
+/* Bridge statistics (protocol v8+).
  * Stats packs an Mt5Stats struct into out_buf and returns 1 on success,
  * -1 on failure. */
 MT5_API int Stats(char* out_buf, int out_buf_capacity);

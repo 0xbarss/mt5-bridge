@@ -1361,7 +1361,7 @@ int SymbolSelect(const char* symbol, int enable) {
     return (out == Outcome::RESPONDED && st == 1) ? 1 : 0;
 }
 
-/* ── Economic calendar (protocol v9+) ─────────────────────────────────────── */
+/* ── Economic calendar (protocol v8+) ─────────────────────────────────────── */
 
 int CalendarEvents(uint64_t from, uint64_t to, char* out_buf, int out_buf_capacity) {
     if (!out_buf || out_buf_capacity <= 0) return -1;

@@ -208,7 +208,6 @@ jobs:
 
       - name: Build all fuzz targets
         run: cargo fuzz build
-        working-directory: fuzz
 
   windows-build:
     name: Windows Native (Test & MSVC DLL)

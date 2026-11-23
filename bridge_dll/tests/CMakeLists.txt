@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(mt5_bridge_cpp_tests LANGUAGES CXX)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 17)
 
 # ── Sanitizer + warning flags (shared across all test targets) ───────────────

@@ -41,8 +41,8 @@ impl AsyncMt5Client {
     ///
     /// # Errors
     ///
-    /// Returns [`Mt5Error::DllLoadError`] when no `mt5_bridge.dll` is available,
-    /// [`Mt5Error::AlreadyConnected`] when a client is already connected in this
+    /// Returns [`crate::Mt5Error::DllLoadError`] when no `mt5_bridge.dll` is available,
+    /// [`crate::Mt5Error::AlreadyConnected`] when a client is already connected in this
     /// process, or any error from [`Mt5Client::connect_with_secret`].
     pub async fn connect_with_secret(secret: &str) -> Result<Self> {
         let pool = BlockingExecutor::default();

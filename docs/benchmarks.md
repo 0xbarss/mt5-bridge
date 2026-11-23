@@ -136,7 +136,7 @@ Measured via `await client.ping()` on `AsyncClient` against a running MT5 termin
 - **MSRV pinned at 1.81** for CI; `clap` pinned to 4.4.18 (clap_lex 0.6.0) for MSRV compatibility
 - **DLL**: `mt5_bridge.dll` built with MinGW-w64, PE32+, hash-pinned via SHA-256
 - **MQL5 EA**: compiled under Wine MetaEditor, 0 errors / 0 warnings
-- **Python**: 3.14.10 under Wine 11.22, `mt5_bridge_py 0.4.0`
+- **Python**: 3.14.10 under Wine 11.22, `mt5_bridge_py 0.5.0`
 
 ---
 

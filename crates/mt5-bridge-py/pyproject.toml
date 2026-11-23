@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mt5-bridge-py"
-version = "0.4.0"
+version = "0.5.0"
 description = "Python bindings (PyO3) for mt5-bridge — MetaTrader 5 API bridge client for Python"
 requires-python = ">=3.8"
 authors = [{ name = "0xbarss", email = "baris.ozdemir.se@gmail.com" }]
@@ -35,6 +35,7 @@ homepage = "https://github.com/0xbarss/mt5-bridge"
 [tool.maturin]
 features = ["async"]
 module-name = "mt5_bridge_py"
+manifest-path = "Cargo.toml"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21.0"]

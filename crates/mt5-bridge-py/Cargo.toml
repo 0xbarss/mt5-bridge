@@ -1,6 +1,6 @@
 [package]
 name = "mt5-bridge-py"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["0xbarss <https://github.com/0xbarss>"]
 description = "Python bindings (PyO3) for mt5-bridge — MetaTrader 5 API bridge client for Python"

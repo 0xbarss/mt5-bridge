@@ -131,14 +131,14 @@ Or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mt5-bridge = "0.4"
+mt5-bridge = "0.5"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
 Enable features as needed:
 
 ```toml
-mt5-bridge = { version = "0.4", features = ["async", "serde_json", "wal", "cli", "schema"] }
+mt5-bridge = { version = "0.5", features = ["async", "serde_json", "wal", "cli", "schema"] }
 ```
 
 | Feature | Default? | Description |

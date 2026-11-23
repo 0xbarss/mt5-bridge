@@ -1,6 +1,6 @@
 # Rust API Reference
 
-Comprehensive reference for public structs, enums, methods, and functions in `mt5-bridge` (version 0.4.0).
+Comprehensive reference for public structs, enums, methods, and functions in `mt5-bridge` (version 0.5.0).
 
 ---
 

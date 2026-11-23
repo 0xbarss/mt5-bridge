@@ -80,6 +80,12 @@ pub struct Mt5Client {
     pub(crate) fn_unsubscribe_bars: Option<FnUnsubscribeBars>,
     #[cfg(feature = "async")]
     pub(crate) fn_events_dropped_total: Option<FnEventsDroppedTotal>,
+    #[cfg(feature = "async")]
+    pub(crate) fn_register_event_callback: Option<FnRegisterEventCallback>,
+    #[cfg(feature = "async")]
+    pub(crate) fn_get_orphan_count: Option<FnGetOrphanCount>,
+    #[cfg(feature = "async")]
+    pub(crate) fn_poll_event: Option<FnPollEvent>,
     pub(crate) symbol_cache: Arc<Mutex<HashMap<String, (SymbolInfo, Instant)>>>,
     pub(crate) symbol_cache_ttl: Duration,
     #[cfg(feature = "async")]

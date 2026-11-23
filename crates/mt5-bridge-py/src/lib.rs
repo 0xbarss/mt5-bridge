@@ -13,7 +13,8 @@
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyType};
+use pyo3::types::{PyBytes, PyList, PyType};
+use pyo3::Py;
 
 use mt5_bridge::client::Mt5Client;
 use mt5_bridge::error::Mt5Error;
@@ -22,12 +23,21 @@ use mt5_bridge::types::{
     SymbolInfo, Tick, Timeframe, TradeResult,
 };
 use mt5_bridge::{CalendarEvent, Deal, Position, WorkingOrder};
+use std::os::raw::c_int;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 #[cfg(feature = "async")]
 use std::sync::Arc;
 #[cfg(feature = "async")]
 use tokio::runtime::Runtime;
+#[cfg(feature = "async")]
+use tokio::sync::broadcast;
+
+/// Static storage for the registered Python event callback.
+/// `Py<PyAny>` is `Send` (it's just a raw pointer), so this is safe to access
+/// from the DLL's callback thread as long as the GIL is held when dereferencing.
+static EVENT_CALLBACK: OnceLock<std::sync::Mutex<Option<Py<PyAny>>>> = OnceLock::new();
 
 #[pyclass]
 #[derive(Clone)]
@@ -498,6 +508,31 @@ impl From<TradeResult> for PyTradeResult {
             volume: t.volume,
             price: t.price,
         }
+    }
+}
+
+/// A streamed event from MT5: `(event_type, payload_bytes)`.
+#[pyclass]
+#[derive(Clone)]
+pub struct PyEvent {
+    #[pyo3(get, set)]
+    pub event_type: u16,
+    #[pyo3(get, set)]
+    pub payload: Vec<u8>,
+}
+
+#[pymethods]
+impl PyEvent {
+    #[new]
+    fn new(event_type: u16, payload: Vec<u8>) -> Self {
+        Self {
+            event_type,
+            payload,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PyEvent(event_type={}, payload_len={})", self.event_type, self.payload.len())
     }
 }
 
@@ -1063,6 +1098,64 @@ impl Client {
         let tf = Timeframe::from_str(timeframe).map_err(PyValueError::new_err)?;
         self.inner.unsubscribe_bars(symbol, tf).map_err(to_py_err)
     }
+
+    /// Register a Python callable `(event_type: int, payload: bytes) -> None`
+    /// invoked by the DLL whenever a streamed event arrives.
+    #[cfg(feature = "async")]
+    fn register_event_callback(&self, callback: Py<PyAny>) -> PyResult<c_int> {
+        let slot = EVENT_CALLBACK.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut guard) = slot.lock() else {
+            return Err(PyRuntimeError::new_err("event callback lock poisoned"));
+        };
+        *guard = Some(callback);
+
+        extern "C" fn trampoline(event_type: u16, payload: *const u8, payload_len: u32) {
+            let slot = match EVENT_CALLBACK.get() {
+                Some(s) => s,
+                None => return,
+            };
+            let Ok(guard) = slot.lock() else {
+                return;
+            };
+            let Some(cb) = guard.as_ref() else {
+                return;
+            };
+            let payload_slice = unsafe { std::slice::from_raw_parts(payload, payload_len as usize) };
+            let _ = pyo3::Python::try_attach(|py| {
+                let args = (event_type, PyBytes::new(py, payload_slice));
+                let _ = cb.call1(py, args);
+            });
+        }
+
+        self.inner
+            .register_event_callback(trampoline)
+            .map_err(to_py_err)
+    }
+
+    /// Poll the DLL for the next available event.
+    ///
+    /// Returns `(event_type, payload)` or `None` on timeout.
+    #[cfg(feature = "async")]
+    fn poll_event(&self, py: Python<'_>, timeout_ms: u32) -> PyResult<Option<Py<PyEvent>>> {
+        match self.inner.poll_event(timeout_ms).map_err(to_py_err)? {
+            Some((event_type, payload)) => {
+                Ok(Some(PyEvent::new(event_type, payload).into_pyobject(py)?.unbind()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Total events dropped by the DLL buffer queue due to overflow.
+    #[cfg(feature = "async")]
+    fn events_dropped_total(&self) -> PyResult<u64> {
+        Ok(self.inner.events_dropped_total())
+    }
+
+    /// Total orphaned events currently held by the DLL event queue.
+    #[cfg(feature = "async")]
+    fn get_orphan_count(&self) -> PyResult<u64> {
+        Ok(self.inner.get_orphan_count())
+    }
 }
 
 #[cfg(feature = "async")]
@@ -1070,6 +1163,7 @@ impl Client {
 pub struct AsyncClient {
     inner: Arc<Mt5Client>,
     runtime: Runtime,
+    events_tx: broadcast::Sender<PyEvent>,
 }
 
 #[cfg(feature = "async")]
@@ -1089,9 +1183,26 @@ impl AsyncClient {
                 .await
             })
             .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))??;
+        let (events_tx, _) = broadcast::channel(1024);
+        let client_arc = Arc::new(client);
+        let client_arc_struct = Arc::clone(&client_arc);
+        let tx = events_tx.clone();
+        runtime.spawn(async move {
+            loop {
+                let inner = Arc::clone(&client_arc);
+                let tx = tx.clone();
+                match tokio::task::spawn_blocking(move || inner.poll_event(100)).await {
+                    Ok(Ok(Some((event_type, payload)))) => {
+                        let _ = tx.send(PyEvent::new(event_type, payload));
+                    }
+                    _ => {}
+                }
+            }
+        });
         Ok(AsyncClient {
-            inner: Arc::new(client),
+            inner: client_arc_struct,
             runtime,
+            events_tx,
         })
     }
 
@@ -1109,9 +1220,26 @@ impl AsyncClient {
                 .await
             })
             .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))??;
+        let (events_tx, _) = broadcast::channel(1024);
+        let client_arc = Arc::new(client);
+        let client_arc_struct = Arc::clone(&client_arc);
+        let tx = events_tx.clone();
+        runtime.spawn(async move {
+            loop {
+                let inner = Arc::clone(&client_arc);
+                let tx = tx.clone();
+                match tokio::task::spawn_blocking(move || inner.poll_event(100)).await {
+                    Ok(Ok(Some((event_type, payload)))) => {
+                        let _ = tx.send(PyEvent::new(event_type, payload));
+                    }
+                    _ => {}
+                }
+            }
+        });
         Ok(AsyncClient {
-            inner: Arc::new(client),
+            inner: client_arc_struct,
             runtime,
+            events_tx,
         })
     }
 
@@ -1230,6 +1358,14 @@ impl AsyncClient {
         let inner = Arc::clone(&self.inner);
         self.run_blocking(move || inner.shutdown())
     }
+
+    /// Return an async event stream: `async for event in client.events(): ...`.
+    /// Yields `PyEvent(event_type, payload)` for each streamed tick/bar/trade
+    /// event delivered by the DLL.
+    async fn events(&self) -> PyResult<PyEventStream> {
+        let rx = self.events_tx.subscribe();
+        Ok(PyEventStream { rx })
+    }
 }
 
 #[cfg(feature = "async")]
@@ -1246,6 +1382,48 @@ impl AsyncClient {
             .block_on(async { tokio::task::spawn_blocking(f).await })
             .map_err(|e| PyRuntimeError::new_err(format!("async task join error: {e}")))?;
         res.map_err(to_py_err)
+    }
+}
+
+/// Async event stream returned by [`AsyncClient::events`]. Supports
+/// `async for event in client.events(): ...`.
+#[cfg(feature = "async")]
+#[pyclass]
+pub struct PyEventStream {
+    rx: broadcast::Receiver<PyEvent>,
+}
+
+#[cfg(feature = "async")]
+#[pymethods]
+impl PyEventStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        Ok(slf)
+    }
+
+    fn __anext__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            match self.rx.try_recv() {
+                Ok(event) => {
+                    let obj: Py<PyAny> = event.into_pyobject(py)?.unbind().into();
+                    return Ok(Some(obj));
+                }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    let obj: Py<PyAny> = PyEvent::new(0, vec![])
+                        .into_pyobject(py)?
+                        .unbind()
+                        .into();
+                    return Ok(Some(obj));
+                }
+                Err(broadcast::error::TryRecvError::Closed) => return Ok(None),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
     }
 }
 
@@ -1285,10 +1463,13 @@ fn mt5_bridge_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
     #[cfg(feature = "async")]
     m.add_class::<AsyncClient>()?;
+    #[cfg(feature = "async")]
+    m.add_class::<PyEventStream>()?;
     m.add_class::<PyAccountInfo>()?;
     m.add_class::<PySymbolInfo>()?;
     m.add_class::<PyTick>()?;
     m.add_class::<PyBar>()?;
+    m.add_class::<PyEvent>()?;
     m.add_class::<PyPingResult>()?;
     m.add_class::<PyBridgeStats>()?;
     m.add_class::<PyTradeResult>()?;

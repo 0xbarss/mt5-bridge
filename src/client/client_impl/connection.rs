@@ -327,6 +327,8 @@ impl Mt5Client {
             fn_unsubscribe_bars,
             fn_poll_event,
             fn_events_dropped_total,
+            fn_register_event_callback,
+            fn_get_orphan_count,
         ) = unsafe {
             let fn_subscribe_ticks: Option<FnSubscribeTicks> = lib
                 .get::<FnSubscribeTicks>(b"SubscribeTicks\0")
@@ -376,6 +378,16 @@ impl Mt5Client {
                 .map(|s| *s)
                 .ok();
 
+            let fn_register_event_callback: Option<FnRegisterEventCallback> = lib
+                .get::<FnRegisterEventCallback>(b"RegisterEventCallback\0")
+                .map(|s| *s)
+                .ok();
+
+            let fn_get_orphan_count: Option<FnGetOrphanCount> = lib
+                .get::<FnGetOrphanCount>(b"GetOrphanCount\0")
+                .map(|s| *s)
+                .ok();
+
             (
                 fn_subscribe_ticks,
                 fn_unsubscribe_ticks,
@@ -387,6 +399,8 @@ impl Mt5Client {
                 fn_unsubscribe_bars,
                 fn_poll_event,
                 fn_events_dropped_total,
+                fn_register_event_callback,
+                fn_get_orphan_count,
             )
         };
 
@@ -524,6 +538,12 @@ impl Mt5Client {
             fn_unsubscribe_bars,
             #[cfg(feature = "async")]
             fn_events_dropped_total,
+            #[cfg(feature = "async")]
+            fn_poll_event,
+            #[cfg(feature = "async")]
+            fn_register_event_callback,
+            #[cfg(feature = "async")]
+            fn_get_orphan_count,
             symbol_cache: Arc::new(Mutex::new(HashMap::new())),
             symbol_cache_ttl: super::cache::DEFAULT_SYMBOL_CACHE_TTL,
             #[cfg(feature = "async")]

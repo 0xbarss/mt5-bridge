@@ -1,6 +1,8 @@
 use crate::error::{Mt5Error, Result};
+use crate::ffi::{Mt5EventCallback, MT5_ERR_BUFFER_TOO_SMALL};
 use crate::types::*;
 use std::ffi::CString;
+use std::os::raw::c_int;
 use std::sync::Arc;
 
 use super::client::Mt5Client;
@@ -184,6 +186,83 @@ impl Mt5Client {
             unsafe { f() }
         } else {
             0
+        }
+    }
+
+    /// Total orphaned events currently held by the DLL's event queue.
+    pub fn get_orphan_count(&self) -> u64 {
+        if let Some(f) = self.fn_get_orphan_count {
+            unsafe { f() }
+        } else {
+            0
+        }
+    }
+
+    /// Register a C callback invoked by the DLL whenever an event arrives.
+    ///
+    /// The callback receives `(event_type: u16, payload: &[u8])`. Only one
+    /// callback may be registered at a time; registering a new one replaces
+    /// the previous. Returns `1` on success, a negative error code otherwise.
+    #[cfg(feature = "async")]
+    pub fn register_event_callback(&self, cb: Mt5EventCallback) -> Result<c_int> {
+        let f = self
+            .fn_register_event_callback
+            .ok_or(Mt5Error::UnsupportedFeature("RegisterEventCallback"))?;
+        let ret = unsafe { f(cb) };
+        if ret < 0 {
+            return Err(Mt5Error::Other(format!(
+                "RegisterEventCallback failed (rc={ret})"
+            )));
+        }
+        Ok(ret)
+    }
+
+    /// Poll the DLL for the next available event.
+    ///
+    /// Returns `Ok(Some((event_type, payload)))` when an event is available,
+    /// `Ok(None)` on timeout (no event), or an error on failure.
+    /// The buffer is grown automatically if the DLL reports
+    /// `MT5_ERR_BUFFER_TOO_SMALL`.
+    #[cfg(feature = "async")]
+    pub fn poll_event(&self, timeout_ms: u32) -> Result<Option<(u16, Vec<u8>)>> {
+        let f = self
+            .fn_poll_event
+            .ok_or(Mt5Error::UnsupportedFeature("PollEvent"))?;
+
+        const INITIAL_CAP: u32 = 1024;
+        let mut buf = vec![0u8; INITIAL_CAP as usize];
+        let mut event_type: u16 = 0;
+        let mut out_len: u32 = 0;
+
+        loop {
+            let ret = unsafe {
+                f(
+                    &mut event_type,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut out_len,
+                    timeout_ms,
+                )
+            };
+
+            match ret {
+                1 if out_len > 0 => {
+                    let payload = buf[..out_len as usize].to_vec();
+                    return Ok(Some((event_type, payload)));
+                }
+                0 => return Ok(None),
+                MT5_ERR_BUFFER_TOO_SMALL => {
+                    let required = out_len.max(1) as usize;
+                    if required > buf.len() {
+                        buf.resize(required, 0);
+                    }
+                    continue;
+                }
+                ret if ret < 0 => {
+                    return Err(Mt5Error::Other(format!("PollEvent failed (rc={ret})")));
+                }
+                _ => return Ok(None),
+            }
         }
     }
 }

@@ -49,18 +49,18 @@ MetaQuotes provides an official Python integration (`MetaTrader5`), but:
 ## Key Features
 
 - **Account Overview**: Real-time balance, equity, margin, free margin, and floating PnL.
-- **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, bid, ask, and digits with in-memory caching (Protocol v7: `bid`/`ask` from `Mt5SymInfo`).
-- **Price & Lot Normalization**: Helpers to round prices to tick size and normalize lots to valid broker steps, with `is_valid_lot()` bounds checking against `NaN` and `Infinity`.
-- **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`). Includes chunking and retry loops for deep history, plus `copy_rates_chunked_detailed()` reporting completeness.
-- **Real-Time Streaming**: Asynchronous tick streaming (Tokio channels, deduplication, cancellation), `subscribe_trade`, `subscribe_book`, closed-bar streaming via `stream_bars`, and bar push streaming via `subscribe_bars` / `unsubscribe_bars` (Protocol v7 real-time bar push).
-- **Durable Write-Ahead Log**: `WalOrderStore` with binary `MT5WAL01` frame format, per-frame CRC32, tail crash recovery, snapshot compaction, and JSON migration.
-- **Position Book**: `PositionBook` with deal-level order attribution, weighted-average fill tracking, partial/full close transitions, magic-number filtering, and broker snapshot reconciliation.
-- **Session Supervisor & Gateway**: `Mt5Session` exponential-backoff reconnection supervisor; `Mt5Gateway` actor with 3-tier priority scheduling (critical / normal / low) and tick conflation.
-- **Order Execution**: Instant market orders (`Buy` / `Sell`) with slippage tolerance; pending orders (`BuyLimit`, `SellLimit`, `BuyStop`, `SellStop`) with expiration control; `order_close` / `close_position` by ticket; `order_modify` with `stop_loss: Level, take_profit: Level` signature and tick-aligned precision and retcode feedback.
-- **Security Hardening**: Absolute DLL path validation with SHA-256 hash verification; pipe name regex enforcement; explicit pipe security descriptor (ACL).
-- **Headless Autostart**: Shell and PowerShell scripts under `mql5/autostart/` for unattended terminal and EA launch.
-- **Multi-Terminal Ready**: Custom named pipe parameters allow running multiple MT5 terminals/accounts concurrently on the same machine.
-- **Python Bindings**: Sync `Client` and async `AsyncClient` (Tokio-backed) with full event streaming (`register_event_callback`, `poll_event`, `events_dropped_total`, `get_orphan_count`, `async for event in client.events():`). 101/101 E2E tests pass against live MT5 under Wine Python 3.14.
+- **Symbol Specifications**: Point size, tick size, tick value, contract min/max lots, lot step, spread, bid, ask, and digits with in-memory caching.
+- **Price & Lot Normalization**: Helpers to round prices to tick size and normalize lots to valid broker steps, with bounds checking against `NaN` and `Infinity`.
+- **Historical Data (OHLCV)**: Fetch bars across all standard timeframes (`M1` through `MN1`), with chunking and retry loops for deep history plus completeness reporting.
+- **Real-Time Streaming**: Asynchronous tick streaming with deduplication and cancellation, trade and book subscriptions, closed-bar streaming, and real-time bar push streaming.
+- **Durable Write-Ahead Log**: Binary frame format with per-frame CRC32, tail crash recovery, snapshot compaction, and JSON migration.
+- **Position Book**: Deal-level order attribution, weighted-average fill tracking, partial/full close transitions, magic-number filtering, and broker snapshot reconciliation.
+- **Session Supervisor & Gateway**: Exponential-backoff reconnection supervisor with 3-tier priority scheduling (critical / normal / low) and tick conflation.
+- **Order Execution**: Instant market orders with slippage tolerance; pending orders with expiration control; close and modify by ticket with tick-aligned precision and retcode feedback.
+- **Security Hardening**: Absolute DLL path validation with SHA-256 hash verification, pipe name regex enforcement, and explicit pipe security descriptor (ACL).
+- **Headless Autostart**: Scripts for unattended terminal and Expert Advisor launch.
+- **Multi-Terminal Ready**: Custom named pipe parameters allow running multiple MT5 terminals or accounts concurrently on the same machine.
+- **Python Bindings**: Sync and async clients (Tokio-backed) with full event streaming.
 
 ---
 

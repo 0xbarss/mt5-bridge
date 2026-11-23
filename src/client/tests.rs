@@ -88,6 +88,8 @@ fn connect_with_dll_rejects_world_writable_directory() {
 fn dll_load_failure_releases_client_active() {
     let _lock = with_client_lock();
     // Allow unpinned DLL so we test the actual DLL load error, not hash rejection.
+    // Remove MT5_DLL_REQUIRE_HASH so hash verification is skipped entirely.
+    std::env::remove_var("MT5_DLL_REQUIRE_HASH");
     std::env::set_var("MT5_DLL_ALLOW_UNPINNED", "1");
     // A file that exists but is not a valid DLL, so loading must fail.
     // The directory must not be world-writable, or the world-writable

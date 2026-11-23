@@ -276,6 +276,13 @@ mod tests {
         let dll = dir.join("mt5_bridge.dll");
         std::fs::write(&dll, b"dummy dll content").expect("dummy dll must be writable");
 
+        // Ensure no .sha256 manifest exists next to the DLL.
+        let manifest = dir.join("mt5_bridge.dll.sha256");
+        let _ = std::fs::remove_file(&manifest);
+
+        // Ensure the escape hatch is not set.
+        std::env::remove_var("MT5_DLL_ALLOW_UNPINNED");
+
         with_env_var("MT5_DLL_SHA256", None, || {
             with_env_var("MT5_DLL_REQUIRE_HASH", Some("true"), || {
                 assert!(

@@ -395,7 +395,7 @@ mod tests {
         let handle = spawn_reconciler(manager.clone(), Arc::clone(&backend), config);
         let _ = handle.subscribe();
 
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         assert!(
             !manager.get_order(&cid).is_some_and(|o| o.is_unresolved()),

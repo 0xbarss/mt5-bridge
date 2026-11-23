@@ -32,11 +32,17 @@ use tokio::runtime::Runtime;
 #[pyclass]
 #[derive(Clone)]
 pub struct PyAccountInfo {
+    #[pyo3(get, set)]
     pub balance: f64,
+    #[pyo3(get, set)]
     pub equity: f64,
+    #[pyo3(get, set)]
     pub margin: f64,
+    #[pyo3(get, set)]
     pub free_margin: f64,
+    #[pyo3(get, set)]
     pub leverage: f64,
+    #[pyo3(get, set)]
     pub currency: String,
 }
 
@@ -219,11 +225,17 @@ impl From<Tick> for PyTick {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyBar {
+    #[pyo3(get, set)]
     pub time: i64,
+    #[pyo3(get, set)]
     pub open: f64,
+    #[pyo3(get, set)]
     pub high: f64,
+    #[pyo3(get, set)]
     pub low: f64,
+    #[pyo3(get, set)]
     pub close: f64,
+    #[pyo3(get, set)]
     pub volume: f64,
 }
 
@@ -281,9 +293,13 @@ impl From<Bar> for PyBar {
 #[pyclass]
 #[derive(Clone, Copy)]
 pub struct PyPingResult {
+    #[pyo3(get, set)]
     pub server_time_secs: i64,
+    #[pyo3(get, set)]
     pub protocol: u32,
+    #[pyo3(get, set)]
     pub monotonic_microseconds: u64,
+    #[pyo3(get, set)]
     pub rtt_us: u64,
 }
 
@@ -387,11 +403,17 @@ impl From<BridgeStats> for PyBridgeStats {
 #[pyclass]
 #[derive(Clone)]
 pub struct PyTradeResult {
+    #[pyo3(get, set)]
     pub retcode: u32,
+    #[pyo3(get, set)]
     pub deal: u64,
+    #[pyo3(get, set)]
     pub order: u64,
+    #[pyo3(get, set)]
     pub position: u64,
+    #[pyo3(get, set)]
     pub volume: f64,
+    #[pyo3(get, set)]
     pub price: f64,
 }
 

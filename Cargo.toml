@@ -26,7 +26,7 @@ hex = "0.4"
 dunce = "1.0"
 arc-swap = "1.7"
 prometheus = { version = "0.13", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
+clap = { version = "4.4", features = ["derive"], optional = true }
 schemars = { version = "1.2", optional = true }
 
 [features]
@@ -44,8 +44,8 @@ allow-unpinned-dll = []
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 doc-comment = "0.3"
-assert_cmd = "2"
-predicates = "3"
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [[bench]]
 name = "benchmarks"

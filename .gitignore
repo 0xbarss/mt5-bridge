@@ -28,7 +28,15 @@ Thumbs.db
 
 # Documentation
 docs/*
-!docs/PROTOCOL.md
-!docs/RUNBOOK.md
-!docs/MIGRATION.md
-!docs/SECURITY.md
+!docs/protocol.md
+!docs/migration.md
+!docs/api-reference.md
+!docs/architecture.md
+!docs/benchmarks.md
+!docs/examples.md
+!docs/getting-started.md
+!docs/multi-instance.md
+!docs/python-api.md
+!docs/streaming.md
+!docs/troubleshooting.md
+!docs/trading.md

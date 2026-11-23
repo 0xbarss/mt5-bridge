@@ -5,27 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-11-23
+## [Unreleased]
+
+## [0.5.0] - 2026-11-24
 
 ### Added
 
-- **Python event streaming**:
-  - Wrapped DLL exports `RegisterEventCallback`, `PollEvent`, `EventsDroppedTotal`, `GetOrphanCount` in PyO3 bindings.
-  - `AsyncClient.register_event_callback(cb)` — Python callable invoked by the DLL on each streamed event.
-  - `AsyncClient.poll_event(timeout_ms)` — poll for next event; `None` on timeout.
-  - `AsyncClient.events_dropped_total()` and `AsyncClient.get_orphan_count()` — queue observability.
-  - `async for event in client.events(): ...` — async event stream yielding `PyEvent`.
-  - `PyEvent` data class with `event_type` and `payload` fields.
-
-- **Modular documentation**: Split README into focused docs under `docs/` (`getting-started.md`, `python-api.md`, `api-reference.md`, `architecture.md`, `trading.md`, `streaming.md`, `benchmarks.md`, `examples.md`, `multi-instance.md`, `troubleshooting.md`).
-
-- **Benchmarks**: Updated `docs/benchmarks.md` with real release-mode measurements from all four benchmark suites.
+- **Python async test suite**: Added `crates/mt5-bridge-py/tests/test_async_only.py`, a dedicated async `AsyncClient` test suite run in a separate Wine Python process (one client per process limit). Covers event streaming, queue observability, and async connection lifecycle.
+- **Windows wheel publishing**: `.github/workflows/publish.yml` now builds Windows wheels for Python 3.11–3.14; Linux wheel builds dropped.
 
 ### Changed
 
-- Bumped crate version from `0.3.0` to `0.4.0` (`Cargo.toml`, `crates/mt5-bridge-py/Cargo.toml`, `fuzz/Cargo.toml`, `pyproject.toml`).
+- **Version bump**: Bumped crate version from `0.4.0` to `0.5.0` across `Cargo.toml`, `Cargo.lock`, `crates/mt5-bridge-py/{Cargo.toml,Cargo.lock,pyproject.toml}`, `fuzz/{Cargo.toml,Cargo.lock}`, `docs/api-reference.md`, `docs/benchmarks.md`, `docs/getting-started.md`.
+- **CI cleanup**: Removed unused `scripts/` directory (`scripts/ci/install-mt5.ps1`) and its README reference.
+- **README restructure**: Removed sections now covered by dedicated docs under `docs/` (packed struct sizes, repository structure, testing & QA); rewrote Key Features cleanly without code references; fixed packed struct size table columns and dropped a stale async test reference.
 
-## [Unreleased]
+### Removed
+
+- **Test cleanup**: Removed `tests/protocol_docs.rs` README sync test (120 lines).
+- **Docs hygiene**: Resolved cross-document inconsistencies (protocol v8, command table, MSRV, changelog ordering).
+
+## [0.4.0] - 2026-11-23
 
 ### Added
 
@@ -43,10 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     present.
 
 - **Builder API and prelude**:
-  - New `OrderRequestBuilder` with `build()` validation, constructible via
-    `OrderRequest::market_buy` / `market_sell` / `OrderRequestBuilder::pending`.
-  - Builder methods accept typed units (`Price`, `Volume`, `Magic`) and chain to
-    produce a validated `OrderRequest`.
+  - New `OrderRequestBuilder` with `build()` validation, constructible via `OrderRequest::buy` / `OrderRequest::pending` (returning an `OrderRequest` directly) or `OrderRequestBuilder::market_buy` / `market_sell` / `pending` (returning a builder to chain).
+  - Builder methods accept typed units (`Price`, `Volume`, `Magic`) and chain to produce a validated `OrderRequest`.
   - New `src/prelude.rs` re-exporting common types (`OrderRequest`, `Price`,
     `Volume`, `Magic`, `Symbol`, `Ticket`, `OrderType`, `Mt5Error`, `Result`,
     `EA_DEFAULT_MAGIC_TYPED`) for `use mt5_bridge::prelude::*;`.
@@ -225,6 +223,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `cli` feature and optional `clap` dependency; `assert_cmd` integration
     tests cover argument parsing and `--help`.
 
+- **Python event streaming**:
+  - Wrapped DLL exports `RegisterEventCallback`, `PollEvent`, `EventsDroppedTotal`, `GetOrphanCount` in PyO3 bindings.
+  - `AsyncClient.register_event_callback(cb)` — Python callable invoked by the DLL on each streamed event.
+  - `AsyncClient.poll_event(timeout_ms)` — poll for next event; `None` on timeout.
+  - `AsyncClient.events_dropped_total()` and `AsyncClient.get_orphan_count()` — queue observability.
+  - `async for event in client.events(): ...` — async event stream yielding `PyEvent`.
+  - `PyEvent` data class with `event_type` and `payload` fields.
+
+- **Modular documentation**: Split README into focused docs under `docs/` (`getting-started.md`, `python-api.md`, `api-reference.md`, `architecture.md`, `trading.md`, `streaming.md`, `benchmarks.md`, `examples.md`, `multi-instance.md`, `troubleshooting.md`).
+
+- **Benchmarks**: Updated `docs/benchmarks.md` with real release-mode measurements from all four benchmark suites.
+
 ### Changed
 
 - `Mt5Error::AlreadyConnected` now reads "a client is already connected in this process;
@@ -232,20 +242,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SharedOrderManager::strategy_magic` and `magic` no longer acquire the manager lock; the
   strategy magic is immutable after construction.
 
-### Changed
-
 - **WAL feature split**: the `wal` feature now enables the binary WAL without
   `serde_json`. `JsonFileStore`, `migrate_json_to_wal`, and `wal_to_json` moved to the new
   `json-journal` feature (`serde_json` remains an alias for `json-journal`). Use
   `--no-default-features --features wal` for WAL without JSON.
-
-### Changed
 
 - **Retcode classification split**: `RetcodeClass::Executed` replaced by `Accepted`
   (`TRADE_RETCODE_PLACED` = 10008), `Filled` (`TRADE_RETCODE_DONE` = 10009), and
   `PartiallyFilled` (`TRADE_RETCODE_DONE_PARTIAL` = 10010). Pending-order placement is
   no longer counted as a fill. `classify_retcode` now maps each retcode to its own
   variant; `DefinitivelyNotExecuted` and `Ambiguous` are unchanged.
+
+- Bumped crate version from `0.3.0` to `0.4.0` (`Cargo.toml`, `crates/mt5-bridge-py/Cargo.toml`, `fuzz/Cargo.toml`, `pyproject.toml`).
 
 ## [0.3.0] - 2026-11-20
 

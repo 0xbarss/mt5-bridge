@@ -66,7 +66,7 @@ Feature requests are welcome! When opening an issue for a feature idea, please d
 
 ### Prerequisites
 
-- **Rust**: 1.75 or newer (via `rustup`).
+- **Rust**: 1.81 or newer (via `rustup`).
 - **MetaTrader 5**: Windows desktop terminal or running under Wine on Linux.
 - **C++ Cross-Compiler** (only if modifying `bridge_dll/`):
   - On Linux: `mingw-w64-gcc` (`sudo apt install gcc-mingw-w64 g++-mingw-w64` or `sudo pacman -S mingw-w64-gcc`).

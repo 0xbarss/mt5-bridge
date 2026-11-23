@@ -74,13 +74,21 @@
 
 ## 13. `ctest` finds 0 C++ tests
 
-- **Cause**: `bridge_dll/tests/CMakeLists.txt` is missing `enable_testing()`.
-- **Fix**: The test binaries pass when run directly (`test_frame`, `test_poll_event`, `test_event_queue`, `test_connection`). Add `enable_testing()` to restore `ctest` discovery.
+- **Cause**: `bridge_dll/tests/CMakeLists.txt` already includes `enable_testing()`, but CMake may not have been re-run after the tests were added, so `ctest` does not list them.
+- **Fix**: Re-run CMake configuration and build so `ctest` discovers `test_frame`, `test_poll_event`, `test_event_queue`, and (on Linux) `test_connection`:
+
+  ```bash
+  cmake -S bridge_dll/tests -B bridge_dll/tests/build
+  cmake --build bridge_dll/tests/build
+  ctest --test-dir bridge_dll/tests/build --output-on-failure
+  ```
+
+The test binaries also pass when run directly.
 
 ## 14. Fuzz targets not discoverable
 
-- **Cause**: `fuzz/fuzz_targetors/` (typo) lacks `[[bin]]` entries and `[package.metadata] cargo-fuzz = true`.
-- **Fix**: Rename to `fuzz/fuzz_targets/`, add `[[bin]]` entries, add cargo-fuzz metadata, and run `cargo fuzz` from the repo root (not `fuzz/`).
+- **Cause**: `fuzz/fuzz_targets/` exists with `[[bin]]` entries and `[package.metadata] cargo-fuzz = true`, but `cargo fuzz` was run from the wrong directory or the fuzz crate is not a workspace member.
+- **Fix**: Run `cargo fuzz` from the repo root (not `fuzz/`). Targets are defined in `fuzz/Cargo.toml` under `fuzz/fuzz_targets/`.
 
 ---
 

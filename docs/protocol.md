@@ -58,6 +58,7 @@ Every binary packet across the pipe starts with a 16-byte header (`#pragma pack(
 | `-4` | `MT5_ERR_SERVER_AUTH_FAILED` | Account credentials or secret token rejected. |
 | `-5` | `MT5_ERR_EA_REJECTED` | MQL5 preflight validation rejected request (e.g. invalid lot/stops). |
 | `-6` | `MT5_ERR_ALREADY_INITIALIZED` | Handshake already performed on this connection. |
+| `-7` | `MT5_ERR_BUFFER_TOO_SMALL` | Caller's buffer too small for the whole event; nothing copied, event stays queued. |
 
 ---
 
@@ -65,7 +66,7 @@ Every binary packet across the pipe starts with a 16-byte header (`#pragma pack(
 
 | ID | Constant | Direction | Payload Description |
 | :---: | :--- | :---: | :--- |
-| `1` | `CMD_INIT` | Req → Resp | Handshake: login (`int64`), secret (`string`), server (`string`), protocol version (`int32 = 7`). |
+| `1` | `CMD_INIT` | Req → Resp | Handshake: login (`int64`), secret (`string`), server (`string`), protocol version (`int32 = 8`). |
 | `2` | `CMD_SHUTDOWN` | Req → Resp | Clean disconnect and pipe teardown. |
 | `3` | `CMD_RATES` | Req → Resp | Historical OHLCV query: symbol, timeframe, from UTC, to UTC, max bars. |
 | `4` | `CMD_ACCOUNT` | Req → Resp | Query account balance, equity, margin, free margin. |
@@ -86,6 +87,12 @@ Every binary packet across the pipe starts with a 16-byte header (`#pragma pack(
 | `19` | `CMD_SUBSCRIBE_BARS` | Req → Resp | Subscribe to closed-bar notifications for symbol and timeframe. |
 | `20` | `CMD_UNSUBSCRIBE_BARS`| Req → Resp | Unsubscribe from closed-bar notifications. |
 | `21` | `CMD_PING` | Req → Resp | Heartbeat ping returning server_time_secs (`int64`) and protocol (`uint32`). |
+| `22` | `CMD_SYMBOLS_TOTAL` | Req → Resp | Return total number of symbols available. |
+| `23` | `CMD_SYMBOLS_GET` | Req → Resp | Paged symbol list (`[u32 name_len][name][Mt5SymInfo]` entries). |
+| `24` | `CMD_SYMBOL_SELECT` | Req → Resp | Select/deselect a symbol in Market Watch. |
+| `25` | `CMD_CALENDAR_EVENTS` | Req → Resp | Economic calendar events in a UTC time window. |
+| `26` | `CMD_CALENDAR_COUNTRIES` | Req → Resp | Countries that have calendar events. |
+| `27` | `CMD_STATS` | Req → Resp | Bridge statistics snapshot (`Mt5Stats`, 64 bytes packed). |
 
 ---
 

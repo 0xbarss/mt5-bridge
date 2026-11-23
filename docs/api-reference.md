@@ -21,6 +21,14 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 
 > **One client per process.** A second `connect*` call while a client is alive returns `Mt5Error::AlreadyConnected`. Run one process per MT5 terminal.
 
+### Bridge Diagnostics & Observability
+
+| Method | Signature | Description |
+| :--- | :--- | :--- |
+| `ping` | `pub fn ping(&self) -> Result<PingResult>` | Heartbeat returning server time, protocol version, and RTT. |
+| `stats` | `pub fn stats(&self) -> Result<BridgeStats>` | Bridge uptime, request/drop counters, queue depths, last error, protocol version. Returns `UnsupportedFeature` if the DLL lacks the `Stats` export. |
+| `process_connection_count` | `pub fn process_connection_count() -> usize` | Returns the number of live clients in this process (0 or 1). Diagnostics / health checks. |
+
 ### Account & Symbol Data
 
 | Method | Signature | Description |
@@ -28,6 +36,13 @@ Comprehensive reference for public structs, enums, methods, and functions in `mt
 | `account_info` | `pub fn account_info(&self) -> Result<AccountInfo>` | Real-time balance, equity, margin, free margin in deposit currency. |
 | `symbol_info` | `pub fn symbol_info(&self, symbol: &str) -> Result<SymbolInfo>` | Contract specifications (point size, tick size, tick value, lot step, min/max lots, spread, digits) with thread-safe caching. |
 | `symbol_tick` | `pub fn symbol_tick(&self, symbol: &str) -> Result<Tick>` | Latest quote tick (bid, ask, last, volume, flags). |
+| `symbols_total` | `pub fn symbols_total(&self) -> Result<u32>` | Total number of symbols available in the terminal (`CMD_SYMBOLS_TOTAL`). |
+| `symbols_page` | `pub fn symbols_page(&self, page: u32, page_size: u32) -> Result<Vec<SymbolInfo>>` | Paged symbol list (`CMD_SYMBOLS_GET`). |
+| `symbols` | `pub fn symbols(&self) -> Result<Vec<SymbolInfo>>` | Full symbol list, paging internally. |
+| `symbols_filtered` | `pub fn symbols_filtered(&self, ...) -> Result<Vec<SymbolInfo>>` | Symbol list with optional filters. |
+| `symbol_select` | `pub fn symbol_select(&self, symbol: &str, enable: bool) -> Result<()>` | Select/deselect a symbol in Market Watch (`CMD_SYMBOL_SELECT`). |
+| `calendar_events` | `pub fn calendar_events(&self, from: u64, to: u64) -> Result<Vec<CalendarEvent>>` | Economic calendar events in a UTC time window (`CMD_CALENDAR_EVENTS`). |
+| `calendar_countries` | `pub fn calendar_countries(&self) -> Result<Vec<String>>` | Countries that have calendar events (`CMD_CALENDAR_COUNTRIES`). |
 
 ### Historical Market Data
 
@@ -352,6 +367,12 @@ All client methods return `Result<T, Mt5Error>`.
 | `AccountInfoFailed(status)` | Failed to retrieve balance/equity. |
 | `SymbolInfoFailed(symbol)` | Unknown symbol or contract specs unavailable. |
 | `SymbolTickFailed(symbol)` | Tick quote query failed. |
+| `SymbolsTotalFailed(status)` | Symbols total query failed. |
+| `SymbolsGetFailed(status)` | Symbols page query failed. |
+| `SymbolSelectFailed(symbol)` | Symbol select/deselect failed. |
+| `CalendarEventsFailed(status)` | Calendar events query failed. |
+| `CalendarCountriesFailed(status)` | Calendar countries query failed. |
+| `StatsFailed(status)` | Bridge statistics query failed. |
 | `OrderSendFailed { symbol, retcode, description }` | Order rejected by MT5 terminal/trade server. |
 | `OrderCloseFailed { ticket, retcode, description }` | Position closure/cancellation rejected. |
 | `OrderModifyFailed { ticket, retcode, description }` | SL/TP modification rejected. |
@@ -363,6 +384,20 @@ All client methods return `Result<T, Mt5Error>`.
 | `ReconciliationError(message)` | State mismatch during broker reconciliation. |
 | `AlreadyConnected` | Another client already connected in this process. |
 | `UnsupportedFeature(name)` | DLL lacks optional export. |
+| `DealsFailed(status)` | Deal history query failed. |
+| `ClientOrderIdConflict { client_order_id, reason }` | Client order ID conflicts with an existing tracked order. |
+| `UnresolvedUnknownOrders { symbol, client_order_ids }` | Submission blocked by unresolved UNKNOWN orders. |
+| `RetryNotAllowed { client_order_id, reason }` | Retry not allowed because the original order is not definitively rejected/cancelled. |
+| `PersistenceError(message)` | Order state persistence (write-ahead journal) error. |
+| `PreflightRejected(message)` | Order rejected by preflight validation or EA risk gate before transmission. |
+| `RiskRejected { rule, detail }` | Order rejected by a pre-trade risk rule. |
+| `ServerAuthFailed` | Server authentication or pipe peer verification failed. |
+| `PositionsTruncated { returned, total }` | Positions snapshot truncated. |
+| `OrdersTruncated { returned, total }` | Working orders snapshot truncated. |
+| `DealHistoryTruncated { returned, capacity }` | Deal history snapshot truncated. |
+| `InvalidRequest(message)` | Invalid request parameters. |
+| `ConfigError(message)` | Configuration error. |
+| `PipeDisconnected` | Named pipe disconnected or communication broken. |
 | `InvalidTimeRange { start, end }` | Query start timestamp > end timestamp. |
 | `ChannelDisconnected` | Async stream receiver/sender disconnected. |
 | `Other(message)` | General internal bridge error. |

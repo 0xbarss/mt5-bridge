@@ -39,7 +39,7 @@
 
 1. **Local IPC Boundary**: Windows Named Pipes (`\\.\pipe\...`). All communication is strictly local to the machine running the MT5 terminal.
 2. **Persistent Authentication State**: The EA enforces connection authentication state. All incoming commands (`CMD_ORDER_SEND`, `CMD_ACCOUNT`, `CMD_RATES`, etc.) are rejected unless preceded by a valid, authenticated `CMD_INIT` handshake.
-3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 7`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
+3. **Wire Protocol Versioning**: `CMD_INIT` negotiates wire protocol versioning (`PROTOCOL_VERSION = 8`). Version mismatches between the client DLL and the EA are rejected immediately, guaranteeing ABI compatibility for packed structs.
 4. **Shared Secret Token**: `InpPipeSecret` provides application-level authentication. `InpRequireSecret` is enabled by default (`true`), preventing the EA from starting without a secret configured. Provide the secret from Rust via `Mt5Client::connect_with_secret` or the `MT5_PIPE_SECRET` environment variable.
 5. **Explicit Pipe Security Descriptor (ACL)**: The named pipe is created with an explicit Win32 Security Descriptor (`InpPipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"`), restricting pipe access strictly to the owner user account, Local System, and Administrators.
 6. **Terminal Account Verification**: `HandleInit` verifies that the requested account login and trade server match the active MT5 terminal connection (`ACCOUNT_LOGIN` and `ACCOUNT_SERVER`), preventing accidental execution against the wrong account.

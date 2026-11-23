@@ -16,7 +16,7 @@ This document details protocol evolution across versions and provides migration 
 
 ---
 
-## 2. Migrating to Protocol v8 / Crate 0.4.0
+## 2. Migrating to Protocol v8 / Crate 0.5.0
 
 ### Wire Protocol Updates
 1. **`PacketHdr` is 16 bytes:**

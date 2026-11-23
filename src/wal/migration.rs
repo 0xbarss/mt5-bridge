@@ -1,11 +1,18 @@
 //! Legacy JSON-to-WAL migration and WAL-to-JSON conversion.
 
+#[cfg(feature = "json-journal")]
 use crate::error::Result;
+#[cfg(feature = "json-journal")]
 use crate::journal::OrderStore;
+#[cfg(feature = "json-journal")]
 use crate::wal::format::io_err;
+#[cfg(feature = "json-journal")]
 use crate::wal::store::WalOrderStore;
+#[cfg(feature = "json-journal")]
 use std::collections::HashMap;
+#[cfg(feature = "json-journal")]
 use std::io::Write;
+#[cfg(feature = "json-journal")]
 use std::path::Path;
 
 /// Migrate a legacy `orders.json` file into an append-only WAL store.
